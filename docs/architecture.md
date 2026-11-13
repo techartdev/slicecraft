@@ -10,7 +10,7 @@ describes code that exists. The rules that keep the shape are in
 ## Workspace
 
 13 packages: 7 libraries, 2 apps, `xtask`. About 13,700 lines of Rust
-(`cargo xtask stats`, 2026-11-13), 148 tests in 17 test binaries.
+(`cargo xtask stats`, 2026-11-13), 152 tests in 17 test binaries.
 
 | Layer | Crate | What it does |
 |---|---|---|
@@ -155,9 +155,12 @@ with) models, and MCP has `open_project` and `save_project`.
    thin strips become one area.
 3. **Columns:** stacked from the top down, cut by the model, and for "from the bed
    only" filtered from the bottom up. This is the one sequential pass, unions only.
-4. **Clearance and density:** per layer (in parallel), the horizontal and bottom
+4. **Pillars** (default style): per layer, the column area is snapped to grid cells
+   fixed to the bed, a line width apart.
+5. **Clearance and density:** per layer (in parallel), the horizontal and bottom
    gaps, an opening by half a line, and dense zones under the model, on the model
-   and at the base.
+   and at the base. Each pillar or area is filled with one zigzag
+   (`render::paths::zigzag`).
 
 Paths are `PathKind::Support` and `PathKind::SupportInterface`. They are printed
 first on each layer, at `support_speed_percent`. The first layer's support is inside

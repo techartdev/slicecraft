@@ -35,9 +35,12 @@ below):
 - Its dense support layers (0 in this job) and its separation layers behave as their
   names say. That was not separately measured.
 
-## 4. SliceCraft's design (and why it differs)
+## 4. SliceCraft's design
 
-Region-based rather than pillars:
+Two styles share one pipeline. **Pillars** is the default: easy removal and less
+material, the reference's strengths. **Areas** holds every point of a surface.
+
+The pipeline:
 
 - **Overhang:** layer *i* overhangs where it reaches past layer *i − 1* by more than
   `h · tan(angle)`.
@@ -56,30 +59,41 @@ Region-based rather than pillars:
   of the model and the base layers on the bed are dense. The body lines stack in
   one direction (or a grid), and the dense layers cross them.
 
-Why regions:
-- They follow the model exactly, so surfaces are held everywhere, not just at
-  grid points.
-- They need no grid-size setting to get right.
-- They share all their geometry with the rest of the pipeline.
+- **Pillars:** each layer's column area is snapped to square cells on a grid fixed
+  to the bed origin, so the pillars stack exactly. A cell becomes a pillar when the
+  column covers at least 3 of 9 sample points (about a third of the cell). An
+  island smaller than a cell still gets the cell it sits in. Pillars are one line
+  width apart, so each breaks away on its own.
+- **Zigzag:** each pillar or area is filled with one zigzag. The lines are joined
+  wherever the link stays inside the shape, which is checked with
+  `Region::segment_inside`.
+- **Defaults:** dense interface layers are off, as in the reference, because they
+  make support harder to remove. The pillar size is 2 mm.
 
-The cost is more material. On the crown we print about 39 m of support path against
-the reference's 20.5 m, on 304 layers against its 305. Pillars, editable cells and
-blockers can be added on top of the region design later; `support_pillar_size` is
-kept in the schema for that.
+Why regions underneath: the columns, clearances and dense zones are computed
+exactly, and pillars are a final snapping step. Editable cells and blockers can
+work on the same grid later.
 
 ## 5. Measurements
 
 | | Simplify3D 4.0.1 | SliceCraft |
 |---|---|---|
-| layers with support (crown) | 305 | 304 |
-| support path | 20.5 m | 39.1 m (+ 2.2 m dense base) |
+| layers with support (crown) | 305 | 306 (pillars), 304 (areas) |
+| support filament, 1.5 mm grid | 682 mm | **676 mm** with pillars; 1432 mm with areas |
+| support filament by pillar size, our grid | — | 1.5 mm: 676 · 2 mm: 782 · 3 mm: 1773 · 4 mm: 1181 |
 | body line spacing at 30 % | 1.33 mm | 1.33 mm |
-| slice time, crown, release build | — | 2.1 s with or without support (support stages run in parallel) |
+| retractions, whole job | 4384 | 9660 (5046 with no support at all; see question 1) |
+| slice time, crown, release build | — | about 1.5 s with or without support |
+
+The non-monotonic 3 mm figure comes from how the grid falls on this model's columns.
+The best size depends on the model.
 
 ## 6. Open questions
 
-1. Connect neighbouring support lines into zigzags, as the reference does. That
-   would cut retractions; on the crown we make about 9,600.
+1. Retractions: the model alone already retracts more than the reference's whole
+   job. The reference does not retract on travel that stays inside the part
+   ("only retract when crossing outlines"); ours retracts on every long travel. That
+   setting is the next step.
 2. Pillar or grid quantisation as an option, and manual support editing and
    blockers. Those need a support preview before slicing.
 3. Measure the reference's dense support layers on a job that uses them.

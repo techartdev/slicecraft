@@ -12,22 +12,133 @@
 //!    cut wherever the model occupies the layer, so it ends on the model or the
 //!    bed. With "from the bed only", whatever does not reach the bed is removed
 //!    again, from the bottom up.
-//! 3. **Clearance.** Each layer's support keeps `support_xy_gap` from the
+//! 3. **Pillars** (the default style): each layer's column area is snapped to
+//!    square cells of `support_pillar_size` on a grid fixed to the bed, a line
+//!    width apart, so pillars stack exactly and snap off one by one. The
+//!    "areas" style keeps the exact column shape.
+//! 4. **Clearance.** Each layer's support keeps `support_xy_gap` from the
 //!    model beside it and `support_bottom_gap_layers` from the model below;
 //!    whatever is then narrower than a line is dropped.
-//! 4. **Density.** The `support_interface_layers` under the model, the
+//! 5. **Density.** The `support_interface_layers` under the model, the
 //!    `support_floor_layers` on top of the model and the `support_base_layers`
-//!    on the bed are dense; the rest is the body at `support_infill`.
+//!    on the bed are dense; the rest is the body at `support_infill`. Each
+//!    pillar or area is filled with one zigzag, not separate lines.
 
 use crate::EngineError;
 use crate::pipeline::{LayerSlot, SliceObserver, Stage, par_map};
-use slicecraft_doc::{PrintSettings, SupportPattern, SupportPlacement};
-use slicecraft_geom::Region;
-use slicecraft_render::paths::{line_infill, perimeters};
+use slicecraft_doc::{PrintSettings, SupportPattern, SupportPlacement, SupportStyle};
+use slicecraft_geom::{Point2, Region};
+use slicecraft_render::paths::{line_infill, perimeters, zigzag};
 use slicecraft_render::{PathKind, ToolPath};
 
 /// Steepest overhang angle used; at 90° nothing would ever need support.
 const MAX_ANGLE_DEG: f64 = 89.0;
+/// Most pillar cells considered on one layer; past it the exact area is used.
+const MAX_PILLAR_CELLS: usize = 250_000;
+/// Sample positions inside a cell, as fractions of its side.
+const SAMPLES: [f64; 3] = [0.25, 0.5, 0.75];
+/// Of the nine samples, how many must be covered for a cell to become a pillar:
+/// about a third of the cell, so edge cells that are barely touched stay empty.
+const MIN_SAMPLES: u8 = 3;
+
+/// Snap `area` to pillars: the cells of a `cell`-sized grid, aligned to the bed
+/// origin so pillars stack exactly from layer to layer, that `area` covers at
+/// `MIN_SAMPLES` of nine sample points (or that hold a whole small island), each shrunk
+/// by `gap / 2` so neighbouring pillars stand apart.
+fn pillars(area: &Region, cell: f64, gap: f64) -> Result<Region, EngineError> {
+    let Some(b) = area.bounds() else { return Ok(Region::new()) };
+    if !(cell > gap && cell.is_finite()) {
+        return Ok(area.clone());
+    }
+    let (c0, c1) = ((b.min_x / cell).floor(), (b.max_x / cell).floor());
+    let (r0, r1) = ((b.min_y / cell).floor(), (b.max_y / cell).floor());
+    let (cols, rows) = ((c1 - c0 + 1.0).max(1.0), (r1 - r0 + 1.0).max(1.0));
+    if cols * rows > MAX_PILLAR_CELLS as f64 || (cols * rows).is_nan() {
+        return Ok(area.clone());
+    }
+    let (cols, rows) = (cols as usize, rows as usize);
+    let mut hit = vec![0u8; cols * rows];
+    let mut mark = |c: f64, r: f64, weight: u8| {
+        let (ci, ri) = (c - c0, r - r0);
+        if ci >= 0.0
+            && ri >= 0.0
+            && (ci as usize) < cols
+            && (ri as usize) < rows
+            && let Some(h) = hit.get_mut(ri as usize * cols + ci as usize)
+        {
+            *h = h.saturating_add(weight);
+        }
+    };
+    let rings: Vec<&Vec<Point2>> = area.contours().collect();
+    for r in 0..rows {
+        let row = r0 + r as f64;
+        for fy in SAMPLES {
+            let y = (row + fy) * cell;
+            let mut xs = Vec::new();
+            for ring in &rings {
+                let n = ring.len();
+                for i in 0..n {
+                    let (Some(p), Some(q)) = (ring.get(i), ring.get((i + 1) % n)) else { continue };
+                    if (p.y > y) != (q.y > y) {
+                        xs.push(p.x + (y - p.y) * (q.x - p.x) / (q.y - p.y));
+                    }
+                }
+            }
+            xs.sort_by(f64::total_cmp);
+            for pair in xs.chunks_exact(2) {
+                let &[x0, x1] = pair else { continue };
+                for fx in SAMPLES {
+                    let (lo, hi) = ((x0 / cell - fx).ceil(), (x1 / cell - fx).floor());
+                    let mut c = lo;
+                    while c <= hi {
+                        mark(c, row, 1);
+                        c += 1.0;
+                    }
+                }
+            }
+        }
+    }
+    // an island smaller than the samples still gets the cells it sits in
+    for poly in &area.polygons {
+        if poly.area() < cell * cell {
+            for v in &poly.outer {
+                mark((v.x / cell).floor(), (v.y / cell).floor(), MIN_SAMPLES);
+            }
+        }
+    }
+    let g = gap / 2.0;
+    let mut squares = Vec::new();
+    for (k, count) in hit.iter().enumerate() {
+        if *count < MIN_SAMPLES {
+            continue;
+        }
+        let x = (c0 + (k % cols) as f64) * cell;
+        let y = (r0 + (k / cols) as f64) * cell;
+        squares.push(vec![
+            Point2::new(x + g, y + g),
+            Point2::new(x + cell - g, y + g),
+            Point2::new(x + cell - g, y + cell - g),
+            Point2::new(x + g, y + cell - g),
+        ]);
+    }
+    Ok(Region::from_loops(&squares)?)
+}
+
+/// Fill each island of `region` with parallel lines joined into zigzags.
+fn zigzag_fill(
+    region: &Region,
+    spacing: f64,
+    angle: f64,
+    kind: PathKind,
+) -> Result<Vec<ToolPath>, EngineError> {
+    let mut out = Vec::new();
+    for poly in &region.polygons {
+        let one = Region { polygons: vec![poly.clone()] };
+        let lines = line_infill(&one, spacing, angle, kind)?;
+        out.extend(zigzag(lines, &one, spacing * 2.0));
+    }
+    Ok(out)
+}
 
 /// The support of one layer.
 #[derive(Debug, Clone, Default)]
@@ -162,8 +273,12 @@ pub fn support_layers(
         if col.is_empty() {
             return Ok(SupportLayer::default());
         }
+        let source = match s.support_style {
+            SupportStyle::Pillars => pillars(col, s.support_pillar_size, w)?,
+            SupportStyle::Areas => col.clone(),
+        };
         let beside = regions.get(j).map_or(Ok(Region::new()), |r| r.offset(s.support_xy_gap))?;
-        let mut area = col.difference(&beside)?;
+        let mut area = source.difference(&beside)?;
         if gap_bottom > 0 {
             let below = union_range(regions, j.saturating_sub(gap_bottom), j)?;
             if !below.is_empty() {
@@ -216,11 +331,11 @@ pub fn support_paths(
         match s.support_pattern {
             // lines stack on lines, so the body is a set of thin walls
             SupportPattern::Lines => {
-                out.extend(line_infill(&layer.body, spacing, 0.0, PathKind::Support)?);
+                out.extend(zigzag_fill(&layer.body, spacing, 0.0, PathKind::Support)?);
             }
             SupportPattern::Grid => {
                 for k in 0..2 {
-                    out.extend(line_infill(
+                    out.extend(zigzag_fill(
                         &layer.body,
                         spacing * 2.0,
                         f64::from(k) * quarter,
@@ -238,7 +353,7 @@ pub fn support_paths(
         };
         // crossing the body lines, turning each layer
         let angle = if index.is_multiple_of(2) { quarter } else { 0.0 };
-        out.extend(line_infill(
+        out.extend(zigzag_fill(
             &layer.dense,
             w * 100.0 / density,
             angle,
@@ -268,7 +383,12 @@ mod tests {
     }
 
     fn on() -> PrintSettings {
-        PrintSettings { support_enabled: true, ..PrintSettings::default() }
+        PrintSettings {
+            support_enabled: true,
+            support_style: SupportStyle::Areas,
+            support_interface_layers: 2,
+            ..PrintSettings::default()
+        }
     }
 
     /// A 10 mm post with a 30 mm table top from layer `top_from` up.
@@ -397,6 +517,50 @@ mod tests {
         let off = PrintSettings::default();
         let sup = support_layers(&regions, &slots(n, 0.2), &off, w, &mut crate::pipeline::Quiet);
         assert!(sup.is_ok_and(|l| l.len() == n && l.iter().all(SupportLayer::is_empty)));
+    }
+
+    #[test]
+    fn pillars_are_separate_grid_squares_that_stack() {
+        let (n, w) = (20, 0.45);
+        let regions = table(n, 10);
+        let s = PrintSettings { support_style: SupportStyle::Pillars, ..on() };
+        let sup = support_layers(&regions, &slots(n, 0.2), &s, w, &mut crate::pipeline::Quiet);
+        assert!(sup.is_ok());
+        let Ok(sup) = sup else { return };
+        let (Some(a), Some(b)) = (sup.get(3), sup.get(5)) else { return };
+        let (Ok(a), Ok(b)) = (a.area(), b.area()) else { return };
+        // separate pillars, each at most one cell
+        assert!(a.polygons.len() > 10, "{} pillars", a.polygons.len());
+        assert!(a.polygons.iter().all(|p| p.area() <= 16.0 + 1e-6));
+        // the same grid on every layer: they stack exactly
+        assert!((a.area() - b.area()).abs() < 1e-6);
+        // never into the post
+        let into = a.intersection(&square(10.0, 10.0, 10.0));
+        assert!(into.is_ok_and(|r| r.area() < 1e-6));
+        // each pillar is one zigzag
+        let paths = sup.get(3).map(|l| support_paths(l, 3, &s, w));
+        let Some(Ok(paths)) = paths else { return };
+        let pillars = a.polygons.len();
+        assert!(
+            paths.len() <= pillars + pillars / 4,
+            "{} paths for {pillars} pillars",
+            paths.len()
+        );
+    }
+
+    #[test]
+    fn a_tiny_island_still_gets_a_pillar() {
+        let mut cell = Region::new();
+        let tiny = Region::from_loops(&[vec![
+            Point2::new(1.1, 1.1),
+            Point2::new(1.4, 1.1),
+            Point2::new(1.4, 1.4),
+            Point2::new(1.1, 1.4),
+        ]]);
+        if let Ok(t) = tiny {
+            cell = pillars(&t, 4.0, 0.45).unwrap_or_default();
+        }
+        assert_eq!(cell.polygons.len(), 1);
     }
 
     #[test]

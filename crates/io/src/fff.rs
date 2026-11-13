@@ -676,6 +676,10 @@ impl<'a, 'i> Importer<'a, 'i> {
         let v = self.top_f(&["supportLowerSeparationLayers"]);
         self.num("support_bottom_gap_layers", v, "lower separation layers");
         let v = self.top_f(&["supportGridSpacing"]);
+        if v.is_some() {
+            // the source always builds pillars on this grid
+            self.choice("support_style", Some(0), "support grid");
+        }
         self.num("support_pillar_size", v, "support pillar size");
         let v = self.top_f(&["maxOverhangAngle"]);
         self.num("support_angle", v, "overhang angle");

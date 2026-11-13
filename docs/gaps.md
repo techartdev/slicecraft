@@ -34,10 +34,12 @@ the architecture document, not to a quieter line here.
 
 ## Slicing pipeline
 
-- **Support** — automatic, region-based: overhang angle, everywhere or bed-only, lines or
-  grid, gaps, interface/floor/base layers, expansion, walls. No support preview before
-  slicing, no manual editing or blockers, no pillar mode; support lines are not joined
-  into zigzags, so it retracts often.
+- **Support** — automatic, as pillars (default) or exact areas: overhang angle,
+  everywhere or bed-only, lines or grid, gaps, interface/floor/base layers, expansion,
+  walls; each pillar is one zigzag. No support preview before slicing, no manual
+  editing or blockers.
+- **Retraction on every long travel** — "retract only when crossing outlines" is still a
+  placeholder, so jobs retract roughly twice as often as the reference.
 - **Bridges** — absent.
 - **Adhesion** — skirt (loops, layers) and brim; no raft, prime tower or ooze shield.
 - **Infill patterns** — rectilinear, one-direction lines, grid, triangles and

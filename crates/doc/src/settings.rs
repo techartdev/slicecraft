@@ -153,6 +153,20 @@ impl SupportPlacement {
     const NAMES: &'static [&'static str] = &["everywhere", "from the bed only"];
 }
 
+/// How support areas are built.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SupportStyle {
+    /// Separate square pillars on a grid: less contact, each snaps off alone.
+    Pillars,
+    /// The exact area under the overhang: holds every point of the surface.
+    Areas,
+}
+
+impl SupportStyle {
+    pub const ALL: [SupportStyle; 2] = [SupportStyle::Pillars, SupportStyle::Areas];
+    const NAMES: &'static [&'static str] = &["pillars", "areas"];
+}
+
 /// Shape of the support body.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SupportPattern {
@@ -255,6 +269,9 @@ pub struct PrintSettings {
     // support
     pub support_enabled: bool,
     pub support_placement: SupportPlacement,
+    pub support_style: SupportStyle,
+    /// Side of one pillar's grid cell, mm.
+    pub support_pillar_size: f64,
     /// Surfaces flatter than this, measured from vertical, get support. Degrees.
     pub support_angle: f64,
     /// Density of the support body, %.
@@ -348,13 +365,15 @@ impl Default for PrintSettings {
             gcode_offset_z: 0.0,
             support_enabled: false,
             support_placement: SupportPlacement::Everywhere,
+            support_style: SupportStyle::Pillars,
+            support_pillar_size: 2.0,
             support_angle: 45.0,
             support_infill: 25.0,
             support_pattern: SupportPattern::Lines,
             support_xy_gap: 0.4,
             support_top_gap_layers: 1,
             support_bottom_gap_layers: 1,
-            support_interface_layers: 2,
+            support_interface_layers: 0,
             support_interface_infill: 70.0,
             support_floor_layers: 0,
             support_base_layers: 0,
@@ -1410,6 +1429,16 @@ pub static SETTINGS: &[SettingSpec] = &[
         bind_e!(support_placement, SupportPlacement),
     ),
     row(
+        "support_style",
+        "Support style",
+        Support,
+        "Support",
+        SettingKind::Choice(SupportStyle::NAMES),
+        Dc(0),
+        "Pillars: separate blocks on a grid that break away one by one and use less material. Areas: the exact shape under the overhang.",
+        bind_e!(support_style, SupportStyle),
+    ),
+    row(
         "support_angle",
         "Overhang angle",
         Support,
@@ -1475,7 +1504,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         Support,
         "Interface",
         i(0, 10, ""),
-        Di(2),
+        Di(0),
         "Dense layers directly under supported surfaces.",
         bind_u!(support_interface_layers),
     ),
@@ -1511,13 +1540,13 @@ pub static SETTINGS: &[SettingSpec] = &[
     ),
     row(
         "support_pillar_size",
-        "Pillar resolution",
+        "Pillar size",
         Support,
-        "Base",
+        "Support",
         f(0.5, 20.0, 0.5, MM),
-        Df(4.0),
-        "Grid size support areas are built from.",
-        None,
+        Df(2.0),
+        "Grid cell of one pillar. Smaller pillars follow small details; larger ones print faster.",
+        bind_f!(support_pillar_size),
     ),
     // ----------------------------------------------------------- Temperature
     row(

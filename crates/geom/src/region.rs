@@ -156,6 +156,44 @@ impl Region {
         self.boolean(other, OverlayRule::Intersect)
     }
 
+    /// True when `p` is inside the region or within `ON_EDGE` of its boundary.
+    pub fn contains(&self, p: Point2) -> bool {
+        let mut inside = false;
+        for ring in self.contours() {
+            let n = ring.len();
+            for i in 0..n {
+                let (Some(&a), Some(&b)) = (ring.get(i), ring.get((i + 1) % n)) else { continue };
+                if distance_to_segment(p, a, b) <= ON_EDGE {
+                    return true;
+                }
+                // even-odd: holes are separate rings, so parity is exact
+                if (a.y > p.y) != (b.y > p.y) {
+                    let x = a.x + (p.y - a.y) * (b.x - a.x) / (b.y - a.y);
+                    if x > p.x {
+                        inside = !inside;
+                    }
+                }
+            }
+        }
+        inside
+    }
+
+    /// True when the straight move from `a` to `b` stays inside the region:
+    /// it crosses no boundary edge and its midpoint is inside. Touching the
+    /// boundary, as a move along an edge does, counts as inside.
+    pub fn segment_inside(&self, a: Point2, b: Point2) -> bool {
+        for ring in self.contours() {
+            let n = ring.len();
+            for i in 0..n {
+                let (Some(&c), Some(&d)) = (ring.get(i), ring.get((i + 1) % n)) else { continue };
+                if segments_cross(a, b, c, d) {
+                    return false;
+                }
+            }
+        }
+        self.contains(Point2::new((a.x + b.x) / 2.0, (a.y + b.y) / 2.0))
+    }
+
     /// Drop polygons whose area is below `min_area` mm².
     pub fn without_slivers(mut self, min_area: f64) -> Self {
         self.polygons.retain(|p| p.area() >= min_area);
@@ -195,6 +233,33 @@ impl Region {
     }
 }
 
+/// Distance within which a point counts as on a boundary, mm.
+const ON_EDGE: f64 = 1e-6;
+
+fn distance_to_segment(p: Point2, a: Point2, b: Point2) -> f64 {
+    let (dx, dy) = (b.x - a.x, b.y - a.y);
+    let len2 = dx * dx + dy * dy;
+    let t = if len2 > 0.0 {
+        (((p.x - a.x) * dx + (p.y - a.y) * dy) / len2).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let (qx, qy) = (a.x + t * dx - p.x, a.y + t * dy - p.y);
+    (qx * qx + qy * qy).sqrt()
+}
+
+/// Proper crossing: each segment has its ends strictly on both sides of the
+/// other. Touching at an end or running along each other is not a crossing.
+fn segments_cross(a: Point2, b: Point2, c: Point2, d: Point2) -> bool {
+    let orient =
+        |p: Point2, q: Point2, r: Point2| (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x);
+    let eps = 1e-9;
+    let (d1, d2) = (orient(c, d, a), orient(c, d, b));
+    let (d3, d4) = (orient(a, b, c), orient(a, b, d));
+    ((d1 > eps && d2 < -eps) || (d1 < -eps && d2 > eps))
+        && ((d3 > eps && d4 < -eps) || (d3 < -eps && d4 > eps))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,6 +280,25 @@ mod tests {
 
     fn close(a: f64, b: f64) -> bool {
         (a - b).abs() < 1e-3
+    }
+
+    #[test]
+    fn contains_and_segment_inside_respect_holes_and_edges() {
+        // a 10 mm square with a 4 mm hole in the middle
+        let mut hole = square(3.0, 3.0, 4.0);
+        hole.reverse();
+        let r = Region::from_loops(&[square(0.0, 0.0, 10.0), hole]).unwrap_or_default();
+        assert!(r.contains(Point2::new(1.0, 1.0)));
+        assert!(!r.contains(Point2::new(5.0, 5.0)), "in the hole");
+        assert!(!r.contains(Point2::new(11.0, 1.0)));
+        assert!(r.contains(Point2::new(0.0, 5.0)), "on the edge counts");
+        // along the left edge: inside; across the hole: not
+        assert!(r.segment_inside(Point2::new(0.0, 1.0), Point2::new(0.0, 9.0)));
+        assert!(!r.segment_inside(Point2::new(1.0, 5.0), Point2::new(9.0, 5.0)));
+        // two separate squares: a link between them leaves the region
+        let two =
+            Region::from_loops(&[square(0.0, 0.0, 2.0), square(2.5, 0.0, 2.0)]).unwrap_or_default();
+        assert!(!two.segment_inside(Point2::new(2.0, 1.0), Point2::new(2.5, 1.0)));
     }
 
     #[test]

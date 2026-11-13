@@ -1129,8 +1129,11 @@ mesh = AAAA
                 .any(|p| matches!(p.kind, PathKind::Support | PathKind::SupportInterface));
             assert!(!sup || l.z < slab, "support at z {}", l.z);
         }
+        // dense interface layers are off by default: support stays easy to remove
         assert!(
-            out.layers.iter().any(|l| l.paths.iter().any(|p| p.kind == PathKind::SupportInterface))
+            !out.layers
+                .iter()
+                .any(|l| l.paths.iter().any(|p| p.kind == PathKind::SupportInterface))
         );
         assert!(out.gcode.contains(";TYPE:support"));
         // and it is undoable like any other edit

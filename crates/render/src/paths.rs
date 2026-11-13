@@ -201,6 +201,68 @@ pub fn line_infill(
 }
 
 /// Most rings one concentric fill may draw.
+/// Most lines `zigzag` joins in one call; past it the lines stay separate.
+pub const MAX_ZIGZAG_LINES: usize = 4000;
+
+/// Join parallel fill lines into continuous zigzags: each line's end links to
+/// the nearest unused line end within `max_link` when the link stays inside
+/// `region`. Fewer, longer paths mean fewer travel moves and retractions.
+pub fn zigzag(lines: Vec<ToolPath>, region: &Region, max_link: f64) -> Vec<ToolPath> {
+    if lines.len() < 2 || lines.len() > MAX_ZIGZAG_LINES || max_link.is_nan() || max_link <= 0.0 {
+        return lines;
+    }
+    let link2 = max_link * max_link;
+    let ends: Vec<Option<(Point2, Point2)>> =
+        lines.iter().map(|l| Some((*l.points.first()?, *l.points.last()?))).collect();
+    let mut used = vec![false; lines.len()];
+    let mut out = Vec::new();
+    for start in 0..lines.len() {
+        if used.get(start).copied().unwrap_or(true) {
+            continue;
+        }
+        let Some(first) = lines.get(start) else { continue };
+        if let Some(u) = used.get_mut(start) {
+            *u = true;
+        }
+        let kind = first.kind;
+        let mut chain = first.points.clone();
+        while let Some(&end) = chain.last() {
+            let mut best: Option<(f64, usize, bool)> = None;
+            for (j, e) in ends.iter().enumerate() {
+                let (Some((a, b)), false) = (e, used.get(j).copied().unwrap_or(true)) else {
+                    continue;
+                };
+                for (point, reversed) in [(*a, false), (*b, true)] {
+                    let d2 = end.distance_sq(point);
+                    if d2 <= link2 && best.is_none_or(|(bd, _, _)| d2 < bd) {
+                        best = Some((d2, j, reversed));
+                    }
+                }
+            }
+            let Some((_, j, reversed)) = best else { break };
+            let Some(next) = lines.get(j) else { break };
+            let Some(&join_at) = (if reversed { next.points.last() } else { next.points.first() })
+            else {
+                break;
+            };
+            if !region.segment_inside(end, join_at) {
+                // the nearest end is across a boundary: stop this chain here
+                break;
+            }
+            if let Some(u) = used.get_mut(j) {
+                *u = true;
+            }
+            if reversed {
+                chain.extend(next.points.iter().rev().copied());
+            } else {
+                chain.extend(next.points.iter().copied());
+            }
+        }
+        out.push(ToolPath { kind, points: chain, closed: false });
+    }
+    out
+}
+
 pub const MAX_RINGS: usize = 10_000;
 
 /// Rings following the outline inward, `spacing` apart; the first ring sits
@@ -320,6 +382,38 @@ mod tests {
             Point2::new(0.0, s),
         ]])
         .ok()
+    }
+
+    #[test]
+    fn zigzag_joins_lines_inside_a_square_and_not_across_a_gap() {
+        let sq = |x0: f64, s: f64| {
+            vec![
+                Point2::new(x0, 0.0),
+                Point2::new(x0 + s, 0.0),
+                Point2::new(x0 + s, s),
+                Point2::new(x0, s),
+            ]
+        };
+        let one = Region::from_loops(&[sq(0.0, 10.0)]).unwrap_or_default();
+        let lines = line_infill(&one, 1.0, 0.0, PathKind::Support).unwrap_or_default();
+        let n = lines.len();
+        assert!(n >= 9);
+        let joined = zigzag(lines, &one, 1.5);
+        assert_eq!(joined.len(), 1, "one zigzag through the whole square");
+        assert_eq!(joined.first().map(|p| p.points.len()), Some(2 * n));
+        // two squares 0.5 mm apart: the lines join within each, never across
+        let two = Region::from_loops(&[sq(0.0, 4.0), sq(4.5, 4.0)]).unwrap_or_default();
+        let lines = line_infill(&two, 1.0, std::f64::consts::FRAC_PI_2, PathKind::Support)
+            .unwrap_or_default();
+        let joined = zigzag(lines, &two, 1.5);
+        assert_eq!(joined.len(), 2);
+        for p in &joined {
+            for w in p.points.windows(2) {
+                if let [a, b] = w {
+                    assert!(two.segment_inside(*a, *b), "a link left the region: {a:?} {b:?}");
+                }
+            }
+        }
     }
 
     #[test]
