@@ -12,6 +12,7 @@
 //! World units are millimetres. Z is up. Nothing here allocates without a
 //! bound supplied by the caller, because every mesh comes from a file.
 
+pub mod mesh_ops;
 pub mod region;
 pub mod repair;
 

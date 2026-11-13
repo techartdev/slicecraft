@@ -77,10 +77,10 @@ Status: **done** = works and is tested · **partial** = works with stated limits
 |---|---|---|---|
 | Mesh statistics (volume, area, errors) | public | done (`Mesh::report`) | P2 |
 | Find non-manifold edges / open edges | public | done (counts) | P2 |
-| Find self-intersections | public | placeholder | P2 |
+| Find self-intersections | public | done (count) | P2 |
 | Repair flipped faces / flip a whole surface | public | done (per part, plus weld, degenerate removal, hole filling) | P2 |
 | Remove duplicate and orphaned faces | public | placeholder | P2 |
-| Reduce triangle count | public | placeholder | P2 |
+| Reduce triangle count | public | done (vertex clustering) | P2 |
 | Repair during slicing: close open outlines, choose how overlaps fill | public | partial (closes gaps ≤ 1 mm, non-zero fill); the choices are placeholders | P2 |
 | Cross-section view | public | partial (horizontal cut of the model view) | P2 |
 | Display modes: wireframe, normals, points | public | placeholder | P6 |

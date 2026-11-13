@@ -222,19 +222,49 @@ pub fn menu_bar(app: &mut SliceCraftApp, ui: &mut Ui) {
             {
                 app.run(Command::SplitParts { index });
             }
-            item(app, ui, "cut-plane", "", true);
-            item(app, ui, "hollow", "", true);
+            if item(app, ui, "cut-plane", "", has_sel)
+                && let Some(index) = app.primary()
+            {
+                // at the section height when the section view is on, else half way
+                let half =
+                    app.session.document().objects.get(index).map_or(0.0, |o| o.size().z / 2.0);
+                let z = app.section.unwrap_or(half);
+                app.run(Command::CutPlane { index, z });
+            }
+            ui.add_enabled_ui(has_sel, |ui| {
+                ui.menu_button("Hollow Model", |ui| {
+                    for wall in [1.0, 2.0, 3.0, 5.0] {
+                        if ui.button(format!("Walls {wall} mm")).clicked() {
+                            app.for_selected(|index| Command::Hollow { index, wall });
+                            ui.close();
+                        }
+                    }
+                });
+            });
         });
         ui.menu_button("Repair", |ui| {
             if item(app, ui, "analyze-mesh", "", has_models) {
                 app.dialogs.analysis = true;
             }
             ui.separator();
-            item(app, ui, "find-intersections", "", true);
+            if item(app, ui, "find-intersections", "", has_sel)
+                && let Some(index) = app.primary()
+            {
+                app.run(Command::FindIntersections { index });
+            }
             if item(app, ui, "repair-mesh", "", has_sel) {
                 app.for_selected(|index| Command::RepairMesh { index, fill: true });
             }
-            item(app, ui, "reduce-mesh", "", true);
+            ui.add_enabled_ui(has_sel, |ui| {
+                ui.menu_button("Reduce Triangle Count", |ui| {
+                    for cell in [0.1, 0.25, 0.5, 1.0] {
+                        if ui.button(format!("Merge points within {cell} mm")).clicked() {
+                            app.for_selected(|index| Command::ReduceMesh { index, cell });
+                            ui.close();
+                        }
+                    }
+                });
+            });
             if item(app, ui, "fix-normals", "", has_sel) {
                 app.for_selected(|index| Command::RepairMesh { index, fill: false });
             }

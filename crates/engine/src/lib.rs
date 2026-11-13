@@ -100,11 +100,11 @@ pub const COMMANDS: &[CommandSpec] = &[
     ready("repair-mesh", "Repair Mesh"),
     ready("analyze-mesh", "Analyse Mesh"),
     ready("fix-normals", "Fix Inverted Faces"),
-    planned("find-intersections", "Find Self-Intersections"),
-    planned("reduce-mesh", "Reduce Triangle Count"),
+    ready("find-intersections", "Find Self-Intersections"),
+    ready("reduce-mesh", "Reduce Triangle Count"),
     ready("fill-holes", "Fill Holes"),
-    planned("hollow", "Hollow Model"),
-    planned("cut-plane", "Cut with a Plane"),
+    ready("hollow", "Hollow Model"),
+    ready("cut-plane", "Cut with a Plane"),
     // support
     ready("supports", "Generate Supports"),
     ready("support-edit", "Add or Remove Support by Hand"),
@@ -170,6 +170,25 @@ pub enum Command {
     /// Turn a model so its largest flat face lies on the bed.
     LayFlat {
         index: usize,
+    },
+    /// Cut a model at a height above the bed into two closed models.
+    CutPlane {
+        index: usize,
+        z: f64,
+    },
+    /// Merge vertices closer than `cell` mm to lower the triangle count.
+    ReduceMesh {
+        index: usize,
+        cell: f64,
+    },
+    /// Count the model's self-intersecting triangle pairs.
+    FindIntersections {
+        index: usize,
+    },
+    /// Leave only walls `wall` mm thick.
+    Hollow {
+        index: usize,
+        wall: f64,
     },
     /// Include or leave out a model when slicing.
     SetVisible {
@@ -255,6 +274,10 @@ impl Command {
             Command::SplitParts { .. } => "split-parts",
             Command::MergeModels { .. } => "merge-models",
             Command::LayFlat { .. } => "lay-flat",
+            Command::CutPlane { .. } => "cut-plane",
+            Command::ReduceMesh { .. } => "reduce-mesh",
+            Command::FindIntersections { .. } => "find-intersections",
+            Command::Hollow { .. } => "hollow",
             Command::Arrange => "arrange",
             Command::Undo => "undo",
             Command::Redo => "redo",
@@ -322,6 +345,11 @@ pub enum Outcome {
         path: PathBuf,
         objects: usize,
         warnings: Vec<String>,
+    },
+    /// Self-intersecting triangle pairs found (`None`: too large to check).
+    Intersections {
+        index: usize,
+        pairs: Option<usize>,
     },
     /// What a repair changed.
     Repaired {
@@ -727,6 +755,75 @@ impl Session {
                     skipped_facets: 0,
                     format: MeshFormat::StlBinary,
                 })
+            }
+            Command::CutPlane { index, z } => {
+                let index = self.object_index(index)?;
+                let Some(o) = self.doc.objects.get(index).cloned() else {
+                    return Err(EngineError::Doc(DocError::NoSuchObject(index)));
+                };
+                let world = o.world_mesh()?;
+                let (lo, hi) = slicecraft_geom::mesh_ops::cut(&world, z)?;
+                if lo.is_empty() || hi.is_empty() {
+                    return Ok(Outcome::Unchanged);
+                }
+                self.checkpoint(None);
+                self.doc.objects.remove(index);
+                self.doc.forget_object(index);
+                for (label, mesh) in [("bottom", lo), ("top", hi)] {
+                    let c = mesh.bounds().center();
+                    let mut part = SceneObject::new(format!("{} {label}", o.name), mesh);
+                    part.transform.translate = Vec3::new(c.x, c.y, 0.0);
+                    part.visible = o.visible;
+                    self.doc.add(part)?;
+                }
+                self.doc.arrange(ARRANGE_GAP)?;
+                Ok(self.changed())
+            }
+            Command::ReduceMesh { index, cell } => {
+                let index = self.object_index(index)?;
+                let Some(o) = self.doc.objects.get(index) else {
+                    return Err(EngineError::Doc(DocError::NoSuchObject(index)));
+                };
+                let mesh = slicecraft_geom::mesh_ops::reduce(&o.mesh, cell)?;
+                if mesh.is_empty() || mesh.len() == o.mesh.len() {
+                    return Ok(Outcome::Unchanged);
+                }
+                let replaced = with_mesh(o, o.name.clone(), mesh);
+                self.checkpoint(None);
+                if let Some(slot) = self.doc.objects.get_mut(index) {
+                    *slot = replaced;
+                }
+                Ok(self.changed())
+            }
+            Command::FindIntersections { index } => {
+                let index = self.object_index(index)?;
+                let pairs = self
+                    .doc
+                    .objects
+                    .get(index)
+                    .and_then(|o| slicecraft_geom::mesh_ops::self_intersections(&o.mesh));
+                Ok(Outcome::Intersections { index, pairs })
+            }
+            Command::Hollow { index, wall } => {
+                let index = self.object_index(index)?;
+                if !(wall.is_finite() && wall > 0.0 && wall < 100.0) {
+                    return Err(EngineError::Doc(DocError::Setting(
+                        "a hollow wall is between 0 and 100 mm",
+                    )));
+                }
+                let Some(o) = self.doc.objects.get(index) else {
+                    return Err(EngineError::Doc(DocError::NoSuchObject(index)));
+                };
+                let mesh = slicecraft_geom::mesh_ops::hollow(
+                    &o.mesh,
+                    wall / o.transform.scale.x.abs().max(1e-6),
+                )?;
+                let replaced = with_mesh(o, o.name.clone(), mesh);
+                self.checkpoint(None);
+                if let Some(slot) = self.doc.objects.get_mut(index) {
+                    *slot = replaced;
+                }
+                Ok(self.changed())
             }
             Command::LayFlat { index } => {
                 let index = self.object_index(index)?;
@@ -1290,6 +1387,10 @@ mod tests {
             Command::SplitParts { index: 0 },
             Command::MergeModels { indices: vec![] },
             Command::LayFlat { index: 0 },
+            Command::CutPlane { index: 0, z: 1.0 },
+            Command::ReduceMesh { index: 0, cell: 0.5 },
+            Command::FindIntersections { index: 0 },
+            Command::Hollow { index: 0, wall: 2.0 },
             Command::AddZone(Box::new(slicecraft_doc::SettingZone::new("z"))),
             Command::RemoveZone { index: 0 },
             Command::AddSupportEdit(SupportEdit::columns(
@@ -2185,6 +2286,33 @@ mesh = AAAA
         }
         assert!(finished, "the print did not finish");
         assert!(lines.lock().map(|n| *n).unwrap_or(0) > count, "every line went out");
+    }
+
+    #[test]
+    fn cut_reduce_hollow_and_intersections() {
+        let Some(mut s) = session_with(cube(20.0)) else { return };
+        assert!(matches!(
+            s.execute(Command::FindIntersections { index: 0 }),
+            Ok(Outcome::Intersections { pairs: Some(0), .. })
+        ));
+        assert!(matches!(s.execute(Command::CutPlane { index: 0, z: 5.0 }), Ok(Outcome::Changed)));
+        assert_eq!(s.document().objects.len(), 2);
+        let heights: Vec<f64> = s.document().objects.iter().map(|o| o.size().z).collect();
+        assert!(
+            heights.iter().any(|h| (h - 5.0).abs() < 1e-6)
+                && heights.iter().any(|h| (h - 15.0).abs() < 1e-6),
+            "{heights:?}"
+        );
+        assert!(s.document().objects.iter().all(|o| o.mesh.report().is_watertight()));
+        // a cut above the model changes nothing
+        assert!(matches!(
+            s.execute(Command::CutPlane { index: 0, z: 500.0 }),
+            Ok(Outcome::Unchanged)
+        ));
+        assert!(matches!(s.execute(Command::Hollow { index: 0, wall: 1.0 }), Ok(Outcome::Changed)));
+        let v = s.document().objects.first().map_or(0.0, |o| o.mesh.report().volume);
+        assert!(v > 0.0 && v < 20.0 * 20.0 * 5.0, "{v}");
+        assert!(s.execute(Command::Hollow { index: 0, wall: -1.0 }).is_err());
     }
 
     #[test]

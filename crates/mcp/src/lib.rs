@@ -138,6 +138,10 @@ fn run(session: &mut Session, command: Command) -> Reply {
         Ok(Outcome::SupportPreviewed { layers, volume }) => {
             Reply::Text(format!("support on {layers} layers, {volume:.0} mm³"))
         }
+        Ok(Outcome::Intersections { index, pairs }) => Reply::Text(match pairs {
+            Some(n) => format!("model {index}: {n} self-intersecting triangle pairs"),
+            None => format!("model {index} is too large to check"),
+        }),
         Ok(Outcome::Repaired { index, report }) => Reply::Text(format!(
             "model {index}: {} degenerate removed, {} flipped, {} holes filled",
             report.degenerate_removed, report.flipped, report.holes_filled

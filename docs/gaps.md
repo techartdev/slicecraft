@@ -19,10 +19,12 @@ the architecture document, not to a quieter line here.
 - **Units** — the mesh is treated as millimetres; inch and centimetre models are fixed
   by hand (Model ▸ Correct units). No automatic detection.
 - **Repair** — weld, degenerate-face removal, consistent outward normals per part, and
-  hole filling (fan from the hole's centre: fine for small, roughly flat holes). No
-  self-intersection removal, no decimation.
-- **Placement** — lay flat (largest flat face), split into parts, merge models. No
-  grouping, no cut plane, no hollowing. Arrange is a row packer, not a nesting
+  hole filling (fan from the hole's centre: fine for small, roughly flat holes);
+  self-intersections are counted, not removed; triangle reduction merges vertices on a
+  grid (simple, not shape-preserving).
+- **Placement** — lay flat (largest flat face), split into parts, merge models, cut at a
+  height (capped), hollow (inner shell along averaged normals: thin features can
+  self-intersect). No grouping. Arrange is a row packer, not a nesting
   algorithm.
 - **Model export** — STL (binary), OBJ and 3MF of the visible models as placed.
 

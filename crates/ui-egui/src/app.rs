@@ -662,6 +662,13 @@ impl SliceCraftApp {
                         ));
                         self.dialogs.import_report = Some((name.clone(), report.clone()));
                     }
+                    Outcome::Intersections { pairs, .. } => self.info(match pairs {
+                        Some(0) => "No self-intersections.".to_string(),
+                        Some(n) => format!("{n} pairs of triangles cross each other."),
+                        None => {
+                            "The model is too large to check for self-intersections.".to_string()
+                        }
+                    }),
                     Outcome::Repaired { report, .. } => {
                         self.info(format!(
                             "Repaired: {} degenerate faces removed, {} flipped, {} holes filled ({} faces added){}.",
