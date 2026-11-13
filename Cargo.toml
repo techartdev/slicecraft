@@ -1,0 +1,27 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "apps/*", "xtask"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+rust-version = "1.93"
+repository = "https://github.com/storytold/slicecraft"
+
+[workspace.dependencies]
+# internal
+slicecraft-geom = { path = "crates/geom" }
+slicecraft-doc = { path = "crates/doc" }
+slicecraft-render = { path = "crates/render" }
+slicecraft-io = { path = "crates/io" }
+slicecraft-engine = { path = "crates/engine" }
+slicecraft-ui-egui = { path = "crates/ui-egui" }
+slicecraft-mcp = { path = "crates/mcp" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"

@@ -1,0 +1,15 @@
+[package]
+name = "slicecraft"
+description = "SliceCraft: an open-source, clean-room 3D print slicer written from scratch in pure Rust"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+slicecraft-engine.workspace = true
+slicecraft-ui-egui.workspace = true
+
+[lints]
+workspace = true

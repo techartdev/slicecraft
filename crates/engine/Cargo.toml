@@ -1,0 +1,17 @@
+[package]
+name = "slicecraft-engine"
+description = "Sessions and commands for SliceCraft"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+slicecraft-doc.workspace = true
+slicecraft-geom.workspace = true
+slicecraft-io.workspace = true
+slicecraft-render.workspace = true
+
+[lints]
+workspace = true

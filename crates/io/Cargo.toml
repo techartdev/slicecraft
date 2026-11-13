@@ -1,0 +1,16 @@
+[package]
+name = "slicecraft-io"
+description = "Mesh import and G-code export for SliceCraft"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+slicecraft-doc.workspace = true
+slicecraft-geom.workspace = true
+slicecraft-render.workspace = true
+
+[lints]
+workspace = true

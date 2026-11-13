@@ -1,0 +1,12 @@
+SliceCraft
+Copyright 2026 the SliceCraft contributors
+
+This product is licensed under MIT OR Apache-2.0.
+
+SliceCraft is a clean-room reimplementation of 3D print slicing workflows. It is not
+affiliated with, endorsed by, or derived from the source code of any commercial
+slicer. Behaviour was studied black-box and from public format specifications only.
+
+ArtCraft, the Craft App Suite and their marks belong to their respective owners. This
+repository is a candidate member of the suite; membership is pending approval and no
+affiliation is claimed until it is granted.

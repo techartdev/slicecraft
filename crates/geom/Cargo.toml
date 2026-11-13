@@ -1,0 +1,14 @@
+[package]
+name = "slicecraft-geom"
+description = "f64 geometry for SliceCraft: vectors, bounds, meshes, planar regions and their offsets and booleans"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+i_overlay = { version = "9.1", default-features = false }
+
+[lints]
+workspace = true
