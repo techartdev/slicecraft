@@ -95,8 +95,8 @@ Status: **done** = works and is tested · **partial** = works with stated limits
 | Search settings by name; show changed settings | public | done | P2 |
 | Revert a setting to its default | public | done | P2 |
 | Compare two profiles | public | — | P2 |
-| Several profiles per job, each for chosen models | public | placeholder | P5 |
-| Profiles switching at heights (variable settings, start/stop Z) | public | placeholder | P5 |
+| Several profiles per job, each for chosen models | public | done as model zones (walls, infill, solid layers per model) | P5 |
+| Profiles switching at heights (variable settings, start/stop Z) | public | done as height zones (any setting) | P5 |
 | Sequential printing (one object at a time) with clearance | observed | — | P5 |
 | Quick-apply groups (material, quality) | public | partial (quick panel + presets) | P2 |
 | Printer setup assistant and printer database | public | placeholder | P6 |
@@ -218,7 +218,7 @@ grouping is its own.
 1. Which sparse patterns matter enough to build first after rectilinear/grid/
    triangles? (Gyroid is the most requested in reviews.)
 2. Support: pillar-grid (as the reference) or a region-based design? Answered: region-based, pillars possible later ([R5](05-support.md)).
-3. Several profiles per job: per-model, per-height, or both from the start?
+3. Several profiles per job: per-model, per-height, or both from the start? Answered: both, as setting zones.
 4. Should SliceCraft read the reference's project or profile files for migration?
    Profiles: **yes**, decided by the operator on 2026-11-13 and done ([R9](09-fff-profiles.md)).
    Project files (`.factory`): still open.

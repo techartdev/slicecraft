@@ -93,8 +93,8 @@ pub const COMMANDS: &[CommandSpec] = &[
     ready("new-project", "New Project"),
     ready("open-project", "Open Project"),
     ready("save-project", "Save Project"),
-    planned("multi-profile", "Several Profiles per Job"),
-    planned("setting-zones", "Height and Region Setting Zones"),
+    ready("multi-profile", "Several Profiles per Job"),
+    ready("setting-zones", "Height and Model Setting Zones"),
     planned("profile-wizard", "Printer Setup Assistant"),
     // mesh tools
     ready("repair-mesh", "Repair Mesh"),
@@ -197,6 +197,17 @@ pub enum Command {
     SaveProject(PathBuf),
     /// Turn automatic support on or off in the current profile.
     Supports(bool),
+    /// Add a setting zone (settings for a height range and/or some models).
+    AddZone(Box<slicecraft_doc::SettingZone>),
+    /// Replace a setting zone.
+    UpdateZone {
+        index: usize,
+        zone: Box<slicecraft_doc::SettingZone>,
+    },
+    /// Remove a setting zone.
+    RemoveZone {
+        index: usize,
+    },
     /// Add a box where support is added or blocked.
     AddSupportEdit(SupportEdit),
     /// Remove one support edit.
@@ -244,6 +255,14 @@ impl Command {
                 SupportEditKind::Block => "support-blockers",
             },
             Command::RemoveSupportEdit { .. } => "support-edit",
+            Command::AddZone(z) | Command::UpdateZone { zone: z, .. } => {
+                if z.objects.is_empty() {
+                    "setting-zones"
+                } else {
+                    "multi-profile"
+                }
+            }
+            Command::RemoveZone { .. } => "setting-zones",
             Command::ClearSupportEdits => "support-clear",
             Command::PreviewSupport => "support-preview",
             Command::Slice => "slice",
@@ -497,7 +516,10 @@ impl Session {
 
     /// Run one command.
     pub fn execute(&mut self, command: Command) -> Result<Outcome, EngineError> {
-        if !matches!(command, Command::Place { .. } | Command::Profile(_)) {
+        if !matches!(
+            command,
+            Command::Place { .. } | Command::Profile(_) | Command::UpdateZone { .. }
+        ) {
             // anything else ends a run of merged edits
             self.last_edit = None;
         }
@@ -530,6 +552,7 @@ impl Session {
                 let index = self.object_index(index)?;
                 self.checkpoint(None);
                 self.doc.objects.remove(index);
+                self.doc.forget_object(index);
                 Ok(self.changed())
             }
             Command::Duplicate { index } => {
@@ -585,6 +608,7 @@ impl Session {
                 }
                 self.checkpoint(None);
                 self.doc.objects.remove(index);
+                self.doc.forget_object(index);
                 for (k, mesh) in parts.into_iter().enumerate() {
                     // each part keeps its place: the anchor moves with its own box
                     let mut part = with_mesh(&o, format!("{} part {}", o.name, k + 1), mesh);
@@ -622,6 +646,7 @@ impl Session {
                 self.checkpoint(None);
                 for i in seen.iter().rev() {
                     self.doc.objects.remove(*i);
+                    self.doc.forget_object(*i);
                 }
                 let index = self.doc.add(merged)?;
                 self.changed();
@@ -745,14 +770,19 @@ impl Session {
                 for e in project.support_edits {
                     doc.add_support_edit(e)?;
                 }
+                doc.zones = project.zones;
                 self.doc = doc;
                 self.profile_name = project.profile.name;
                 self.reset_history(Some(path.clone()));
                 Ok(Outcome::ProjectOpened { path, objects, warnings: project.warnings })
             }
             Command::SaveProject(path) => {
-                let text =
-                    write_project(&self.profile(), &self.doc.objects, &self.doc.support_edits);
+                let text = write_project(
+                    &self.profile(),
+                    &self.doc.objects,
+                    &self.doc.support_edits,
+                    &self.doc.zones,
+                );
                 std::fs::write(&path, text).map_err(|e| {
                     EngineError::File(format!("cannot write {}: {e}", path.display()))
                 })?;
@@ -768,6 +798,37 @@ impl Session {
                 let mut settings = self.doc.settings.clone();
                 settings.support_enabled = on;
                 self.doc.set_settings(settings);
+                Ok(self.changed())
+            }
+            Command::AddZone(zone) => {
+                self.check_zone(&zone)?;
+                if self.doc.zones.len() >= slicecraft_doc::MAX_ZONES {
+                    return Err(EngineError::Doc(DocError::Setting("too many setting zones")));
+                }
+                self.checkpoint(None);
+                self.doc.zones.push(*zone);
+                Ok(self.changed())
+            }
+            Command::UpdateZone { index, zone } => {
+                self.check_zone(&zone)?;
+                if index >= self.doc.zones.len() {
+                    return Err(EngineError::Doc(DocError::Setting("there is no such zone")));
+                }
+                if self.doc.zones.get(index) == Some(&*zone) {
+                    return Ok(Outcome::Unchanged);
+                }
+                self.checkpoint(Some(("zone", index)));
+                if let Some(slot) = self.doc.zones.get_mut(index) {
+                    *slot = *zone;
+                }
+                Ok(self.changed())
+            }
+            Command::RemoveZone { index } => {
+                if index >= self.doc.zones.len() {
+                    return Err(EngineError::Doc(DocError::Setting("there is no such zone")));
+                }
+                self.checkpoint(None);
+                self.doc.zones.remove(index);
                 Ok(self.changed())
             }
             Command::AddSupportEdit(e) => {
@@ -837,6 +898,16 @@ impl Session {
                 Ok(Outcome::Exported { path, bytes: out.gcode.len() })
             }
         }
+    }
+
+    fn check_zone(&self, zone: &slicecraft_doc::SettingZone) -> Result<(), EngineError> {
+        zone.validate()?;
+        if zone.objects.iter().any(|&i| i >= self.doc.objects.len()) {
+            return Err(EngineError::Doc(DocError::NoSuchObject(
+                zone.objects.iter().copied().max().unwrap_or(0),
+            )));
+        }
+        Ok(())
     }
 
     /// A new or opened document: no undo history, nothing unsaved.
@@ -1044,6 +1115,8 @@ mod tests {
             Command::SplitParts { index: 0 },
             Command::MergeModels { indices: vec![] },
             Command::LayFlat { index: 0 },
+            Command::AddZone(Box::new(slicecraft_doc::SettingZone::new("z"))),
+            Command::RemoveZone { index: 0 },
             Command::AddSupportEdit(SupportEdit::columns(
                 SupportEditKind::Block,
                 (0.0, 0.0),
@@ -1795,6 +1868,66 @@ mesh = AAAA
             .filter(|t| t.vertices().iter().all(|v| (v.z - bottom).abs() < 1e-6))
             .count();
         assert_eq!(on_bed, 1, "one face lies on the bed");
+    }
+
+    #[test]
+    fn setting_zones_change_heights_and_models() {
+        use slicecraft_doc::SettingZone;
+        use slicecraft_doc::settings::SettingValue;
+        // two cubes; the second gets 4 walls through a model zone, and the
+        // top half of both gets 60 % infill and 220 °C through a height zone
+        let Some(mut s) = session_with(cube(20.0)) else { return };
+        let bytes = stl_of(&cube(20.0).unwrap_or_default());
+        assert!(
+            s.execute(Command::Import { name: "b".into(), bytes, extension: Some("stl".into()) })
+                .is_ok()
+        );
+        let mut walls = SettingZone::new("thick walls");
+        walls.objects = vec![1];
+        walls.overrides.insert("perimeter_count".into(), SettingValue::Int(4));
+        assert!(s.execute(Command::AddZone(Box::new(walls))).is_ok());
+        let mut top = SettingZone::new("top half");
+        top.z_from = 10.0;
+        top.overrides.insert("nozzle_temperature".into(), SettingValue::Float(220.0));
+        top.overrides.insert("infill_percentage".into(), SettingValue::Float(60.0));
+        assert!(s.execute(Command::AddZone(Box::new(top))).is_ok());
+        assert!(matches!(s.execute(Command::Slice), Ok(Outcome::Sliced { .. })));
+        let Some(out) = s.slice_result() else { return };
+        // layer 20: cube b has twice the shells of cube a
+        let Some(l) = out.layers.get(20) else { return };
+        let b_x = s.document().objects.get(1).map_or(0.0, |o| o.world_bounds().min().x);
+        let shells = |left: bool| {
+            l.paths
+                .iter()
+                .filter(|p| matches!(p.kind, PathKind::OuterPerimeter | PathKind::InnerPerimeter))
+                .filter(|p| p.points.first().is_some_and(|q| (q.x >= b_x - 1.0) != left))
+                .count()
+        };
+        assert_eq!(
+            shells(false),
+            2 * shells(true),
+            "zone walls: {} vs {}",
+            shells(false),
+            shells(true)
+        );
+        // the height zone sets the temperature and denser infill above 10 mm
+        assert!(out.gcode.contains("M104 S220 ; zone temperature"));
+        let sparse_len = |l: &slicecraft_render::LayerPaths| {
+            l.paths
+                .iter()
+                .filter(|p| p.kind == PathKind::SparseInfill)
+                .map(|p| p.points.len())
+                .sum::<usize>()
+        };
+        let (low, high) = (out.layers.get(20).map(sparse_len), out.layers.get(70).map(sparse_len));
+        assert!(matches!((low, high), (Some(a), Some(b)) if b > a), "{low:?} {high:?}");
+        // removing the first model forgets it in the zone
+        assert!(s.execute(Command::Remove { index: 0 }).is_ok());
+        assert_eq!(s.document().zones.first().map(|z| z.objects.clone()), Some(vec![0]));
+        // a zone naming a missing model is refused
+        let mut bad = SettingZone::new("bad");
+        bad.objects = vec![9];
+        assert!(s.execute(Command::AddZone(Box::new(bad))).is_err());
     }
 
     #[test]

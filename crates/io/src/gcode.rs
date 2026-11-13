@@ -706,11 +706,36 @@ impl<'a> GcodeWriter<'a> {
 
 /// Write a complete job: header, start sequence, every layer, end sequence.
 pub fn write_gcode(layers: &[LayerPaths], settings: &PrintSettings, bed: &Bed) -> GcodeOutput {
+    write_gcode_layers(layers, settings, &[], bed)
+}
+
+/// Like `write_gcode`, with each layer's own settings (setting zones):
+/// `per_layer[k]` applies to `layers[k]`; missing entries use `settings`.
+pub fn write_gcode_layers<'a>(
+    layers: &[LayerPaths],
+    settings: &'a PrintSettings,
+    per_layer: &[&'a PrintSettings],
+    bed: &Bed,
+) -> GcodeOutput {
     let mut w = GcodeWriter::new(settings);
     w.start();
-    for layer in layers {
+    let mut previous = settings;
+    for (k, layer) in layers.iter().enumerate() {
+        let here = per_layer.get(k).copied().unwrap_or(settings);
+        w.settings = here;
+        // a zone with other temperatures: change them as the layer starts
+        if layer.index >= 2 {
+            if here.nozzle_temperature != previous.nozzle_temperature {
+                let _ = writeln!(w.out, "M104 S{:.0} ; zone temperature", here.nozzle_temperature);
+            }
+            if here.bed_temperature != previous.bed_temperature {
+                let _ = writeln!(w.out, "M140 S{:.0} ; zone bed temperature", here.bed_temperature);
+            }
+        }
+        previous = here;
         w.layer(layer);
     }
+    w.settings = settings;
     w.end(bed);
     let mut stats = w.stats;
     let filament_area = std::f64::consts::PI * settings.filament_diameter.powi(2) / 4.0;

@@ -10,7 +10,7 @@ use slicecraft_doc::{
     Document, InfillPattern, IslandOrder, PerimeterOrder, SeamMode, SolidPattern,
 };
 use slicecraft_geom::{Mesh, Point2, Region, Vec3};
-use slicecraft_io::{GcodeStats, write_gcode};
+use slicecraft_io::GcodeStats;
 use slicecraft_render::paths::{
     concentric_infill, line_infill, order_paths, perimeters, start_near,
 };
@@ -535,6 +535,69 @@ fn with_raft(raft: Raft, layers: Vec<LayerPaths>, skirt: Vec<ToolPath>) -> Vec<L
     out
 }
 
+/// One piece of slicing work: a layer, or the part of a layer that a model
+/// zone covers, with the settings that apply there.
+struct Job {
+    layer: usize,
+    region: Region,
+    settings: slicecraft_doc::PrintSettings,
+}
+
+/// Split each layer into jobs: the area of each model zone's models (their
+/// own cross-sections) gets the zone's settings, the rest the layer's.
+fn layer_jobs(
+    doc: &Document,
+    slots: &[LayerSlot],
+    regions: &[Region],
+    layer_settings: &[slicecraft_doc::PrintSettings],
+    observer: &mut dyn SliceObserver,
+) -> Result<Vec<Job>, EngineError> {
+    let model_zones: Vec<&slicecraft_doc::SettingZone> =
+        doc.zones.iter().filter(|z| !z.objects.is_empty()).collect();
+    // each model zone's footprint on every layer
+    let mut footprints: Vec<Vec<Region>> = Vec::with_capacity(model_zones.len());
+    for zone in &model_zones {
+        let mut meshes = Vec::new();
+        for &i in &zone.objects {
+            if let Some(o) = doc.objects.get(i).filter(|o| o.visible) {
+                let world = o.world_mesh()?;
+                let drop = world.bounds().min().z;
+                meshes.push(if drop == 0.0 {
+                    world
+                } else {
+                    world.map_vertices(|v| v - Vec3::new(0.0, 0.0, drop))?
+                });
+            }
+        }
+        footprints.push(par_map(slots, Stage::Sections, observer, |_, slot| {
+            if !zone.covers_z(slot.cut_z()) {
+                return Ok(Region::new());
+            }
+            let mut loops = Vec::new();
+            for m in &meshes {
+                loops.extend(cross_section(m, slot.cut_z()).loops.into_iter().map(|l| l.points));
+            }
+            Ok(Region::from_loops(&loops)?.offset(0.05)?)
+        })?);
+    }
+    let mut jobs = Vec::with_capacity(regions.len());
+    for (i, region) in regions.iter().enumerate() {
+        let base = layer_settings.get(i).cloned().unwrap_or_else(|| doc.settings.clone());
+        let mut rest = region.clone();
+        for (zone, fp) in model_zones.iter().zip(&footprints) {
+            let Some(fp) = fp.get(i).filter(|f| !f.is_empty()) else { continue };
+            let part = rest.intersection(fp)?;
+            if part.is_empty() {
+                continue;
+            }
+            rest = rest.difference(&part)?;
+            jobs.push(Job { layer: i, region: part, settings: zone.apply(&base) });
+        }
+        jobs.push(Job { layer: i, region: rest, settings: base });
+    }
+    Ok(jobs)
+}
+
 /// Direction of a polygon's long axis, radians, from its outline's
 /// edge-weighted second moments.
 fn long_axis(ring: &[Point2]) -> f64 {
@@ -714,8 +777,15 @@ pub fn slice_document(
     })?;
     drop(support_areas);
 
-    // 3. shells
-    let shelled = par_map(&regions, Stage::Shells, observer, |i, region| {
+    // 3. per-layer settings (height zones) and the parts of each layer that
+    // model zones give their own settings
+    let layer_settings: Vec<slicecraft_doc::PrintSettings> =
+        slots.iter().map(|sl| doc.settings_at(sl.cut_z())).collect();
+    let jobs = layer_jobs(doc, &slots, &regions, &layer_settings, observer)?;
+
+    // shells, per job
+    let shelled = par_map(&jobs, Stage::Shells, observer, |_, job| {
+        let (i, region, s) = (job.layer, &job.region, &job.settings);
         let w = slicecraft_io::gcode::layer_line_width(s, i);
         let (mut shells, inner) = perimeters(region, s.perimeter_count, w)?;
         shells.extend(gap_fill(region, &inner, s, w)?);
@@ -724,10 +794,12 @@ pub fn slice_document(
 
     // 4. solid vs sparse, infill
     let empty = Region::new();
-    let (below, above) = (s.solid_layers_bottom as usize, s.solid_layers_top as usize);
-    let base_angle = s.infill_angle.to_radians();
     let n = regions.len();
-    let infilled = par_map(&shelled, Stage::Infill, observer, |i, sh| {
+    let infilled = par_map(&shelled, Stage::Infill, observer, |k, sh| {
+        let Some(job) = jobs.get(k) else { return Ok(Vec::new()) };
+        let (i, s) = (job.layer, &job.settings);
+        let (below, above) = (s.solid_layers_bottom as usize, s.solid_layers_top as usize);
+        let base_angle = s.infill_angle.to_radians();
         let w = slicecraft_io::gcode::layer_line_width(s, i);
         let overlap = s.infill_overlap / 100.0 * w;
         let sparse_spacing =
@@ -875,6 +947,23 @@ pub fn slice_document(
         }
         Ok(paths)
     })?;
+
+    // back to one list per layer
+    let mut per_layer_shells: Vec<Vec<ToolPath>> = vec![Vec::new(); n];
+    let mut per_layer_infill: Vec<Vec<ToolPath>> = vec![Vec::new(); n];
+    for ((job, sh), fill) in jobs.iter().zip(shelled).zip(infilled) {
+        if let Some(v) = per_layer_shells.get_mut(job.layer) {
+            v.extend(sh.shells);
+        }
+        if let Some(v) = per_layer_infill.get_mut(job.layer) {
+            v.extend(fill);
+        }
+    }
+    let shelled: Vec<Shelled> = per_layer_shells
+        .into_iter()
+        .map(|shells| Shelled { shells, inner: Region::new() })
+        .collect();
+    let infilled = per_layer_infill;
 
     // 5. skirt and brim, around the first layer and its support (or the raft)
     let first = regions.first().cloned().unwrap_or_default();
@@ -1059,7 +1148,13 @@ pub fn slice_document(
     if let Some(r) = raft {
         layers = with_raft(r, layers, if s.skirt_enabled { skirt.clone() } else { Vec::new() });
     }
-    let out = write_gcode(&layers, s, &doc.bed);
+    // each printed layer's settings: raft layers use the profile
+    let raft_count = layers.len().saturating_sub(n);
+    let per_layer: Vec<&slicecraft_doc::PrintSettings> = layers
+        .iter()
+        .map(|l| l.index.checked_sub(raft_count).and_then(|i| layer_settings.get(i)).unwrap_or(s))
+        .collect();
+    let out = slicecraft_io::gcode::write_gcode_layers(&layers, s, &per_layer, &doc.bed);
     let mut warnings = Vec::new();
     if !s.infill_pattern.is_implemented() && s.infill_percentage > 0.0 {
         warnings.push(

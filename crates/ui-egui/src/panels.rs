@@ -132,15 +132,22 @@ pub fn models_panel(app: &mut SliceCraftApp, ui: &mut Ui) {
                 app.save_profile_dialog();
             }
         });
-        ui.add_enabled_ui(false, |ui| {
-            ui.horizontal(|ui| {
-                let _ = ui.button("Add profile").on_disabled_hover_text(
-                    "planned: several profiles in one job, each for some models or heights",
-                );
-                let _ = ui
-                    .button("Setting zones…")
-                    .on_disabled_hover_text("planned: change settings above a height");
-            });
+        ui.horizontal(|ui| {
+            let zones = app.session.document().zones.len();
+            let label = if zones == 0 {
+                "Setting zones…".to_string()
+            } else {
+                format!("Setting zones ({zones})…")
+            };
+            if ui
+                .button(label)
+                .on_hover_text(
+                    "Change settings above a height, or give some models their own settings",
+                )
+                .clicked()
+            {
+                app.dialogs.zones = Some(Default::default());
+            }
         });
     });
 

@@ -279,8 +279,11 @@ pub fn menu_bar(app: &mut SliceCraftApp, ui: &mut Ui) {
                 app.open_settings();
             }
             ui.separator();
-            item(app, ui, "multi-profile", "", true);
-            item(app, ui, "setting-zones", "", true);
+            let several = item(app, ui, "multi-profile", "", true);
+            let zones = item(app, ui, "setting-zones", "", true);
+            if several || zones {
+                app.dialogs.zones = Some(Default::default());
+            }
             item(app, ui, "variable-layers", "", true);
         });
         ui.menu_button("Machine", |ui| {

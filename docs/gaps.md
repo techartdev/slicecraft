@@ -61,7 +61,7 @@ the architecture document, not to a quieter line here.
   layer-change retraction, extra restart, "only when crossing outlines", coasting,
   wipe and firmware retraction (G10/G11). Travel inside the part walks around holes.
 - **Adaptive layer heights, size compensation, combined infill, vase mode** — done.
-  **Layer ranges and per-object settings** — absent.
+  **Layer ranges and per-model settings** — done as setting zones.
 - **First-layer width** — set by percentage; no separate first-layer line width for the part on a raft.
 
 ## Output
@@ -84,7 +84,9 @@ the architecture document, not to a quieter line here.
   fan speed are carried over; material/quality presets inside a 4.x file and
   `.factory` project files are not read. Some value meanings are inferred, not
   measured ([R9](research/09-fff-profiles.md) §4).
-- **Several profiles per job, height zones** — not supported (menu items are planned).
+- **Setting zones** — any settings can change over a height range and/or for chosen
+  models. A model zone gets its own walls, infill and solid layers; speeds,
+  temperatures and fan follow the layer (the height zones), not the model.
 - **No printer or material database**; the bed size comes from the profile.
 - **Projects** — `.scproj` holds models, placement, visibility and the profile. It is
   uncompressed (≈ 96 bytes per triangle), keeps no undo history and no slice result,

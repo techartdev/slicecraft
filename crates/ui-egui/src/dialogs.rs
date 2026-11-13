@@ -28,6 +28,14 @@ pub struct Dialogs {
     pub planned: Option<&'static CommandSpec>,
     /// The last profile imported from another slicer, with its report.
     pub import_report: Option<(String, slicecraft_io::ImportReport)>,
+    /// The setting-zones window: open, with the selected zone and the search.
+    pub zones: Option<ZonesEditor>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ZonesEditor {
+    pub selected: usize,
+    pub search: String,
 }
 
 impl Dialogs {
@@ -41,6 +49,7 @@ impl Dialogs {
             || self.about
             || self.planned.is_some()
             || self.import_report.is_some()
+            || self.zones.is_some()
     }
 }
 
@@ -81,6 +90,147 @@ pub fn show(app: &mut SliceCraftApp, ctx: &egui::Context) {
     planned_window(app, ctx);
     confirm_window(app, ctx);
     import_report_window(app, ctx);
+    zones_window(app, ctx);
+}
+
+/// Setting zones: settings that change above a height, or for some models.
+fn zones_window(app: &mut SliceCraftApp, ctx: &egui::Context) {
+    use slicecraft_doc::SettingZone;
+    use slicecraft_engine::Command;
+    let Some(mut editor) = app.dialogs.zones.clone() else { return };
+    let doc = app.session.document();
+    let zones = doc.zones.clone();
+    let names: Vec<String> = doc.objects.iter().map(|o| o.name.clone()).collect();
+    let base = doc.settings.clone();
+    let top = slicecraft_geom::MAX_COORD;
+    let mut open = true;
+    let mut command: Option<Command> = None;
+    egui::Window::new("Setting zones").open(&mut open).default_width(640.0).show(ctx, |ui| {
+        ui.label("Change settings above a height, or for some models only. Zones apply in order; later ones win.");
+        ui.add_space(4.0);
+        ui.horizontal_top(|ui| {
+            ui.vertical(|ui| {
+                ui.set_width(180.0);
+                for (i, z) in zones.iter().enumerate() {
+                    let range = if z.z_to >= top {
+                        format!("from {:.1} mm", z.z_from)
+                    } else {
+                        format!("{:.1}–{:.1} mm", z.z_from, z.z_to)
+                    };
+                    let who = if z.objects.is_empty() { "all models".to_string() } else { format!("{} model(s)", z.objects.len()) };
+                    if ui.selectable_label(editor.selected == i, format!("{}\n{range} · {who}", z.name)).clicked() {
+                        editor.selected = i;
+                    }
+                }
+                ui.add_space(6.0);
+                if ui.button("+ Add zone").clicked() {
+                    let mut z = SettingZone::new(format!("Zone {}", zones.len() + 1));
+                    z.z_from = 0.0;
+                    command = Some(Command::AddZone(Box::new(z)));
+                    editor.selected = zones.len();
+                }
+            });
+            ui.separator();
+            ui.vertical(|ui| {
+                let Some(zone) = zones.get(editor.selected) else {
+                    ui.weak("Add a zone to change settings for part of the job.");
+                    return;
+                };
+                let mut z = zone.clone();
+                ui.horizontal(|ui| {
+                    ui.label("Name");
+                    ui.text_edit_singleline(&mut z.name);
+                });
+                ui.horizontal(|ui| {
+                    ui.label("From");
+                    ui.add(egui::DragValue::new(&mut z.z_from).range(0.0..=10_000.0).speed(0.1).suffix(" mm"));
+                    let mut to_top = z.z_to >= top;
+                    ui.checkbox(&mut to_top, "to the top");
+                    if to_top {
+                        z.z_to = top;
+                    } else {
+                        if z.z_to >= top {
+                            z.z_to = z.z_from + 10.0;
+                        }
+                        ui.label("to");
+                        ui.add(egui::DragValue::new(&mut z.z_to).range(0.0..=10_000.0).speed(0.1).suffix(" mm"));
+                    }
+                });
+                ui.label(RichText::new("Models").strong());
+                if names.is_empty() {
+                    ui.weak("No models yet.");
+                }
+                ui.horizontal_wrapped(|ui| {
+                    for (i, n) in names.iter().enumerate() {
+                        let mut on = z.objects.contains(&i);
+                        if ui.checkbox(&mut on, n).changed() {
+                            if on {
+                                z.objects.push(i);
+                                z.objects.sort_unstable();
+                            } else {
+                                z.objects.retain(|&k| k != i);
+                            }
+                        }
+                    }
+                });
+                ui.weak(if z.objects.is_empty() {
+                    "No model ticked: the zone applies to every model."
+                } else {
+                    "Only the ticked models; speeds and temperatures follow the layer."
+                });
+                ui.add_space(4.0);
+                ui.label(RichText::new("Settings").strong());
+                let mut remove = None;
+                egui::Grid::new("zone-settings").num_columns(3).show(ui, |ui| {
+                    for (key, value) in z.overrides.clone() {
+                        let Some(spec) = slicecraft_doc::settings::spec(&key) else { continue };
+                        ui.label(spec.label);
+                        if let Some(v) = setting_widget(ui, spec, &value) {
+                            z.overrides.insert(key.clone(), v);
+                        }
+                        if ui.small_button("×").on_hover_text("Stop changing this setting").clicked() {
+                            remove = Some(key.clone());
+                        }
+                        ui.end_row();
+                    }
+                });
+                if let Some(k) = remove {
+                    z.overrides.remove(&k);
+                }
+                ui.horizontal(|ui| {
+                    ui.label("Add a setting:");
+                    ui.text_edit_singleline(&mut editor.search);
+                });
+                let q = editor.search.to_lowercase();
+                if !q.is_empty() {
+                    egui::ScrollArea::vertical().max_height(140.0).show(ui, |ui| {
+                        for spec in SETTINGS.iter().filter(|s| s.label.to_lowercase().contains(&q) || s.key.contains(&q)).take(30) {
+                            if ui.button(spec.label).clicked()
+                                && let Some(v) = base.get(spec.key)
+                            {
+                                z.overrides.insert(spec.key.to_string(), v);
+                                editor.search.clear();
+                            }
+                        }
+                    });
+                }
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Remove zone").clicked() {
+                        command = Some(Command::RemoveZone { index: editor.selected });
+                        editor.selected = editor.selected.saturating_sub(1);
+                    }
+                });
+                if command.is_none() && z != *zone && z.validate().is_ok() {
+                    command = Some(Command::UpdateZone { index: editor.selected, zone: Box::new(z) });
+                }
+            });
+        });
+    });
+    if let Some(c) = command {
+        app.run(c);
+    }
+    app.dialogs.zones = if open { Some(editor) } else { None };
 }
 
 /// What a profile import carried over, converted or left out.

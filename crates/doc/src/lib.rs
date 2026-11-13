@@ -230,6 +230,62 @@ impl Bed {
     }
 }
 
+/// Most setting zones one document holds.
+pub const MAX_ZONES: usize = 100;
+
+/// Settings that differ from the profile over a height range and, optionally,
+/// only for some models ("several profiles per job").
+#[derive(Debug, Clone, PartialEq)]
+pub struct SettingZone {
+    pub name: String,
+    /// From this height (inclusive) to `z_to` (exclusive), mm.
+    pub z_from: f64,
+    pub z_to: f64,
+    /// Models the zone applies to; empty means every model.
+    pub objects: Vec<usize>,
+    /// Setting key → value, each checked against the schema.
+    pub overrides: std::collections::BTreeMap<String, settings::SettingValue>,
+}
+
+impl SettingZone {
+    /// The whole height, every model, nothing changed yet.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            z_from: 0.0,
+            z_to: slicecraft_geom::MAX_COORD,
+            objects: Vec::new(),
+            overrides: Default::default(),
+        }
+    }
+
+    /// Every override names a known setting with a value in its range, and the
+    /// heights are finite and ordered.
+    pub fn validate(&self) -> Result<(), DocError> {
+        if !(self.z_from.is_finite() && self.z_to.is_finite() && self.z_from < self.z_to) {
+            return Err(DocError::Setting("a zone needs a height range from low to high"));
+        }
+        let mut probe = PrintSettings::default();
+        for (k, v) in &self.overrides {
+            probe.set(k, v.clone())?;
+        }
+        Ok(())
+    }
+
+    pub fn covers_z(&self, z: f64) -> bool {
+        z >= self.z_from && z < self.z_to
+    }
+
+    /// `base` with this zone's overrides applied.
+    pub fn apply(&self, base: &PrintSettings) -> PrintSettings {
+        let mut out = base.clone();
+        for (k, v) in &self.overrides {
+            let _ = out.set(k, v.clone());
+        }
+        out
+    }
+}
+
 /// Most support edits one document holds.
 pub const MAX_SUPPORT_EDITS: usize = 1000;
 
@@ -303,6 +359,8 @@ pub struct Document {
     pub objects: Vec<SceneObject>,
     /// Boxes where support is added or blocked, in bed coordinates.
     pub support_edits: Vec<SupportEdit>,
+    /// Settings that change over heights or for some models.
+    pub zones: Vec<SettingZone>,
 }
 
 impl Document {
@@ -326,6 +384,28 @@ impl Document {
         }
         self.support_edits.push(edit);
         Ok(self.support_edits.len() - 1)
+    }
+
+    /// A model is gone: zones forget it and later models move down one.
+    pub fn forget_object(&mut self, index: usize) {
+        for z in &mut self.zones {
+            z.objects.retain(|&i| i != index);
+            for i in &mut z.objects {
+                if *i > index {
+                    *i -= 1;
+                }
+            }
+        }
+    }
+
+    /// The settings of every model on a layer at height `z`: the profile with
+    /// the height zones (those for every model) applied in order.
+    pub fn settings_at(&self, z: f64) -> PrintSettings {
+        let mut s = self.settings.clone();
+        for zone in self.zones.iter().filter(|zn| zn.objects.is_empty() && zn.covers_z(z)) {
+            s = zone.apply(&s);
+        }
+        s
     }
 
     /// Add an object, refusing past `MAX_OBJECTS`. Returns its index.
