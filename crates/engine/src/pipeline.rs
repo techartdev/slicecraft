@@ -352,6 +352,87 @@ pub fn support_preview(
     Ok(out)
 }
 
+/// A raft: its layers, ready to print, and its outline.
+struct Raft {
+    layers: Vec<(f64, Vec<ToolPath>)>,
+    footprint: Region,
+    /// Total thickness plus the air gap: how far the part is lifted.
+    lift: f64,
+}
+
+/// A raft under `first` (the part's first layer and its support): base layers
+/// at the raft density, then solid top layers turned a quarter each layer,
+/// each with an outline.
+fn raft_layers(
+    first: &Region,
+    s: &slicecraft_doc::PrintSettings,
+    w: f64,
+) -> Result<Raft, EngineError> {
+    use slicecraft_render::paths::zigzag;
+    // the margin, with holes filled: a raft is one solid plate
+    let grown = first.offset(s.raft_margin.max(w))?;
+    let footprint = Region {
+        polygons: grown
+            .polygons
+            .into_iter()
+            .map(|p| slicecraft_geom::Polygon { outer: p.outer, holes: Vec::new() })
+            .collect(),
+    }
+    .union(&Region::new())?;
+    let mut layers = Vec::new();
+    let mut z = 0.0;
+    let count = s.raft_base_layers + s.raft_top_layers;
+    for k in 0..count {
+        let base = k < s.raft_base_layers;
+        let h = if k == 0 { s.first_layer_height } else { s.layer_height };
+        z += h;
+        let density = if base { s.raft_infill.max(1.0) } else { 100.0 };
+        let spacing = w * 100.0 / density;
+        let angle =
+            if k % 2 == 0 { std::f64::consts::FRAC_PI_4 } else { -std::f64::consts::FRAC_PI_4 };
+        let (outline, inner) = perimeters(&footprint, 1, w)?;
+        let mut paths: Vec<ToolPath> =
+            outline.into_iter().map(|p| ToolPath { kind: PathKind::Raft, ..p }).collect();
+        for poly in &inner.offset(w * 0.15)?.polygons {
+            let one = Region { polygons: vec![poly.clone()] };
+            let lines = line_infill(&one, spacing, angle, PathKind::Raft)?;
+            paths.extend(zigzag(lines, &one, spacing * 2.0));
+        }
+        layers.push((z, paths));
+    }
+    Ok(Raft { layers, footprint, lift: z + s.raft_gap })
+}
+
+/// Put the raft under the part's layers: raft layers first (the skirt on the
+/// first), then every part layer lifted by the raft's thickness and gap.
+fn with_raft(raft: Raft, layers: Vec<LayerPaths>, skirt: Vec<ToolPath>) -> Vec<LayerPaths> {
+    let mut out = Vec::with_capacity(raft.layers.len() + layers.len());
+    let mut below = 0.0;
+    for (k, (z, mut paths)) in raft.layers.into_iter().enumerate() {
+        if k == 0 {
+            let mut first = skirt.clone();
+            first.append(&mut paths);
+            paths = first;
+        }
+        out.push(LayerPaths {
+            index: k,
+            z,
+            height: z - below,
+            paths,
+            inside_travel: Vec::new(),
+            travel_via: Vec::new(),
+        });
+        below = z;
+    }
+    let offset = out.len();
+    for mut l in layers {
+        l.index += offset;
+        l.z += raft.lift;
+        out.push(l);
+    }
+    out
+}
+
 /// A layer's model paths as feature groups in print order: walls (in the
 /// profile's perimeter order), solid infill, sparse infill, or infill first.
 fn feature_groups(paths: Vec<ToolPath>, s: &slicecraft_doc::PrintSettings) -> Vec<Vec<ToolPath>> {
@@ -563,10 +644,15 @@ pub fn slice_document(
         Ok(paths)
     })?;
 
-    // 5. skirt and brim, around the first layer and its support
+    // 5. skirt and brim, around the first layer and its support (or the raft)
     let first = regions.first().cloned().unwrap_or_default();
     let first = if support_first.is_empty() { first } else { first.union(&support_first)? };
-    let brim = if s.brim_enabled {
+    let raft = if s.raft_enabled { Some(raft_layers(&first, s, w)?) } else { None };
+    let first = match &raft {
+        Some(r) => r.footprint.clone(),
+        None => first,
+    };
+    let brim = if s.brim_enabled && raft.is_none() {
         rings_around(&first, 0.0, s.brim_loops, w, PathKind::Brim)?
     } else {
         Vec::new()
@@ -591,7 +677,8 @@ pub fn slice_document(
         // first everything outside the model: skirt, brim, then support, so
         // walls never wait on a column that is not there yet
         let mut pre: Vec<Vec<ToolPath>> = Vec::with_capacity(3);
-        if i < s.skirt_layers as usize {
+        // with a raft the skirt goes around the raft instead
+        if i < s.skirt_layers as usize && raft.is_none() {
             pre.push(skirt.clone());
         }
         if i == 0 {
@@ -706,6 +793,9 @@ pub fn slice_document(
             layer.inside_travel = f;
             layer.travel_via = v;
         }
+    }
+    if let Some(r) = raft {
+        layers = with_raft(r, layers, if s.skirt_enabled { skirt.clone() } else { Vec::new() });
     }
     let out = write_gcode(&layers, s, &doc.bed);
     let mut warnings = Vec::new();

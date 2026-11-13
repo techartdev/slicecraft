@@ -41,7 +41,8 @@ the architecture document, not to a quieter line here.
   but have no editor yet). Edit boxes are in bed coordinates and stay put when a
   model moves.
 - **Bridges** — absent.
-- **Adhesion** — skirt (loops, layers) and brim; no raft, prime tower or ooze shield.
+- **Adhesion** — skirt (loops, layers), brim and raft (base and top layers, margin, air
+  gap); no prime tower or ooze shield (they need several tools).
 - **Infill patterns** — rectilinear, one-direction lines, grid, triangles, concentric, gyroid,
   honeycomb, wiggle, cubic and octahedral all work. No dense layers, ironing or ordered
   (monotonic) tops yet.

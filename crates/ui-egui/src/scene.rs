@@ -40,6 +40,7 @@ pub fn kind_color(kind: PathKind) -> Color32 {
         PathKind::SparseInfill => Color32::from_rgb(0xe0, 0x56, 0x56),
         PathKind::Support => Color32::from_rgb(0x9a, 0xa4, 0xae),
         PathKind::SupportInterface => Color32::from_rgb(0x5c, 0x8a, 0x6e),
+        PathKind::Raft => Color32::from_rgb(0x8a, 0x7a, 0x5c),
     }
 }
 
@@ -579,11 +580,11 @@ pub fn build_preview(layers: &[LayerPaths], s: &PrintSettings) -> Vec<PreviewLay
 
 /// Which toolpath features are drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct KindFilter(pub [bool; 8]);
+pub struct KindFilter(pub [bool; 9]);
 
 impl Default for KindFilter {
     fn default() -> Self {
-        Self([true; 8])
+        Self([true; 9])
     }
 }
 

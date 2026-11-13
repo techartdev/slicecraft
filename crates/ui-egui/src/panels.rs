@@ -262,6 +262,7 @@ fn quick_settings(app: &mut SliceCraftApp, ui: &mut Ui) {
         ui.horizontal(|ui| {
             ui.checkbox(&mut s.skirt_enabled, "skirt");
             ui.checkbox(&mut s.brim_enabled, "brim");
+            ui.checkbox(&mut s.raft_enabled, "raft");
         });
         ui.end_row();
         ui.label("Support");

@@ -1383,6 +1383,43 @@ mesh = AAAA
     }
 
     #[test]
+    fn a_raft_goes_under_the_part_and_lifts_it() {
+        let Some(mut s) = session_with(cube(20.0)) else { return };
+        let plain = match s.execute(Command::Slice) {
+            Ok(Outcome::Sliced { layers, .. }) => layers,
+            _ => 0,
+        };
+        let p = PrintSettings { raft_enabled: true, ..s.document().settings.clone() };
+        assert!(s.execute(Command::Profile(Box::new(p.clone()))).is_ok());
+        let r = s.execute(Command::Slice);
+        assert!(matches!(r, Ok(Outcome::Sliced { .. })), "{r:?}");
+        let Some(out) = s.slice_result() else { return };
+        let raft = (p.raft_base_layers + p.raft_top_layers) as usize;
+        assert_eq!(out.layers.len(), plain + raft);
+        // the raft layers come first, and are raft (plus the skirt)
+        for l in out.layers.iter().take(raft) {
+            assert!(l.paths.iter().all(|t| matches!(t.kind, PathKind::Raft | PathKind::Skirt)));
+            assert!(l.paths.iter().any(|t| t.kind == PathKind::Raft));
+        }
+        // the part sits on the raft plus the air gap
+        let raft_top = out.layers.get(raft - 1).map_or(0.0, |l| l.z);
+        let part_first = out.layers.get(raft).map_or(0.0, |l| l.z);
+        assert!((part_first - (raft_top + p.raft_gap + p.first_layer_height)).abs() < 1e-9);
+        // the raft reaches past the part by about the margin
+        let reach = |kind: PathKind| {
+            out.layers
+                .iter()
+                .flat_map(|l| l.paths.iter())
+                .filter(|t| t.kind == kind)
+                .flat_map(|t| t.points.iter())
+                .fold(f64::INFINITY, |m, q| m.min(q.x))
+        };
+        let gap = reach(PathKind::OuterPerimeter) - reach(PathKind::Raft);
+        assert!(gap > p.raft_margin - 1.0 && gap < p.raft_margin + 1.0, "{gap}");
+        assert!(out.gcode.contains(";TYPE:raft"));
+    }
+
+    #[test]
     fn restoring_a_profile_does_not_mark_changes() {
         let mut s = Session::new();
         let profile = Profile {

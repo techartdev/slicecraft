@@ -284,6 +284,16 @@ pub struct PrintSettings {
     pub gcode_offset_x: f64,
     pub gcode_offset_y: f64,
     pub gcode_offset_z: f64,
+    // raft
+    pub raft_enabled: bool,
+    pub raft_base_layers: u32,
+    pub raft_top_layers: u32,
+    /// How far the raft reaches past the part, mm.
+    pub raft_margin: f64,
+    /// Air gap between the raft and the part, mm.
+    pub raft_gap: f64,
+    /// Density of the raft's base layers, %.
+    pub raft_infill: f64,
     // support
     pub support_enabled: bool,
     pub support_placement: SupportPlacement,
@@ -385,6 +395,12 @@ impl Default for PrintSettings {
             gcode_offset_x: 0.0,
             gcode_offset_y: 0.0,
             gcode_offset_z: 0.0,
+            raft_enabled: false,
+            raft_base_layers: 2,
+            raft_top_layers: 2,
+            raft_margin: 3.0,
+            raft_gap: 0.15,
+            raft_infill: 85.0,
             support_enabled: false,
             support_placement: SupportPlacement::Everywhere,
             support_style: SupportStyle::Pillars,
@@ -1146,7 +1162,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         B,
         Db(false),
         "Print the part on a disposable lattice.",
-        None,
+        bind_b!(raft_enabled),
     ),
     row(
         "raft_base_layers",
@@ -1156,7 +1172,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         i(1, 10, ""),
         Di(2),
         "Thick, wide layers at the bottom of the raft.",
-        None,
+        bind_u!(raft_base_layers),
     ),
     row(
         "raft_top_layers",
@@ -1166,7 +1182,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         i(1, 10, ""),
         Di(2),
         "Dense layers the part sits on.",
-        None,
+        bind_u!(raft_top_layers),
     ),
     row(
         "raft_margin",
@@ -1176,7 +1192,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(0.0, 30.0, 0.5, MM),
         Df(3.0),
         "How far the raft extends past the part.",
-        None,
+        bind_f!(raft_margin),
     ),
     row(
         "raft_gap",
@@ -1186,7 +1202,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(0.0, 2.0, 0.01, MM),
         Df(0.15),
         "Air gap between raft and part.",
-        None,
+        bind_f!(raft_gap),
     ),
     row(
         "raft_infill",
@@ -1196,7 +1212,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(1.0, 100.0, 1.0, PCT),
         Df(85.0),
         "Density of the raft layers.",
-        None,
+        bind_f!(raft_infill),
     ),
     row(
         "prime_tower_enabled",
@@ -2568,11 +2584,11 @@ mod tests {
     fn placeholders_are_stored_and_reported() {
         let mut p = PrintSettings::default();
         assert!(p.unused_changes().is_empty());
-        assert!(p.set("raft_enabled", SettingValue::Bool(true)).is_ok());
-        assert_eq!(p.get("raft_enabled"), Some(SettingValue::Bool(true)));
-        assert_eq!(p.unused_changes(), vec!["Raft"]);
+        assert!(p.set("ironing_enabled", SettingValue::Bool(true)).is_ok());
+        assert_eq!(p.get("ironing_enabled"), Some(SettingValue::Bool(true)));
+        assert_eq!(p.unused_changes(), vec!["Ironing"]);
         // setting it back to the default forgets it
-        assert!(p.set("raft_enabled", SettingValue::Bool(false)).is_ok());
+        assert!(p.set("ironing_enabled", SettingValue::Bool(false)).is_ok());
         assert!(p.extra.is_empty());
     }
 

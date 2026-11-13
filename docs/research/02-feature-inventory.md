@@ -137,7 +137,8 @@ grouping is its own.
 | Solid patterns: rectilinear, one-direction, concentric | public | done | P3 |
 | Infill before walls | public | done | P3 |
 | Skirt (several loops, several layers), brim | public | done | P4 |
-| Raft, prime tower, ooze shield | public | placeholder | P4 |
+| Raft | public | done (base and top layers, margin, air gap) | P4 |
+| Prime tower, ooze shield | public | placeholder (needs several tools) | P5 |
 | Thin walls, gap fill, single-line walls | public | placeholder | P3 |
 | Adaptive layer heights | public | placeholder | P3 |
 | Dimensional (hole/outer) compensation | public | placeholder | P3 |

@@ -27,10 +27,12 @@ pub enum PathKind {
     Support,
     /// Dense support: under or on the model, or at its foot on the bed.
     SupportInterface,
+    /// The raft under the part.
+    Raft,
 }
 
 impl PathKind {
-    pub const ALL: [PathKind; 8] = [
+    pub const ALL: [PathKind; 9] = [
         PathKind::Skirt,
         PathKind::Brim,
         PathKind::OuterPerimeter,
@@ -39,6 +41,7 @@ impl PathKind {
         PathKind::SparseInfill,
         PathKind::Support,
         PathKind::SupportInterface,
+        PathKind::Raft,
     ];
 
     pub fn label(self) -> &'static str {
@@ -51,6 +54,7 @@ impl PathKind {
             PathKind::SparseInfill => "sparse infill",
             PathKind::Support => "support",
             PathKind::SupportInterface => "dense support",
+            PathKind::Raft => "raft",
         }
     }
 }
