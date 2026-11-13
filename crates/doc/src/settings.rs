@@ -301,6 +301,28 @@ pub struct PrintSettings {
     /// How far infill reaches into the innermost perimeter, % of the width.
     pub infill_overlap: f64,
     pub infill_before_perimeters: bool,
+    /// Print solid areas over air as bridges: straight across, own flow, speed and fan.
+    pub bridging_enabled: bool,
+    pub bridge_flow_percent: f64,
+    pub bridge_speed_percent: f64,
+    pub bridge_fan_percent: f64,
+    /// Top surfaces: flow, speed (of solid speed) and fan, %.
+    pub top_flow_percent: f64,
+    pub top_speed_percent: f64,
+    pub top_fan_percent: f64,
+    /// A light extra pass over top surfaces.
+    pub ironing_enabled: bool,
+    pub ironing_spacing: f64,
+    pub ironing_flow: f64,
+    /// Lay top-surface lines one after another in one direction.
+    pub monotonic_solid: bool,
+    /// Denser infill layers under top surfaces.
+    pub dense_layers: u32,
+    pub dense_percentage: f64,
+    /// Sparse islands smaller than this are printed solid, mm².
+    pub solid_min_area: f64,
+    /// Grow solid areas into the sparse infill, mm.
+    pub solid_expansion: f64,
     // temperature
     pub nozzle_temperature: f64,
     pub bed_temperature: f64,
@@ -440,6 +462,21 @@ impl Default for PrintSettings {
             infill_alternate: true,
             infill_overlap: 15.0,
             infill_before_perimeters: false,
+            bridging_enabled: true,
+            bridge_flow_percent: 100.0,
+            bridge_speed_percent: 70.0,
+            bridge_fan_percent: 100.0,
+            top_flow_percent: 100.0,
+            top_speed_percent: 100.0,
+            top_fan_percent: 100.0,
+            ironing_enabled: false,
+            ironing_spacing: 0.1,
+            ironing_flow: 10.0,
+            monotonic_solid: false,
+            dense_layers: 0,
+            dense_percentage: 50.0,
+            solid_min_area: 0.0,
+            solid_expansion: 0.0,
             nozzle_temperature: 210.0,
             bed_temperature: 60.0,
             first_layer_nozzle_temperature: 210.0,
@@ -1484,7 +1521,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         i(0, 20, ""),
         Di(0),
         "Layers of denser infill below the top skin.",
-        None,
+        bind_u!(dense_layers),
     ),
     row(
         "dense_percentage",
@@ -1494,7 +1531,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(0.0, 100.0, 1.0, PCT),
         Df(50.0),
         "Density of those layers.",
-        None,
+        bind_f!(dense_percentage),
     ),
     row(
         "ironing_enabled",
@@ -1504,7 +1541,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         B,
         Db(false),
         "Pass the hot nozzle over top surfaces to smooth them.",
-        None,
+        bind_b!(ironing_enabled),
     ),
     row(
         "ironing_spacing",
@@ -1514,7 +1551,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(0.01, 1.0, 0.01, MM),
         Df(0.1),
         "Distance between ironing passes.",
-        None,
+        bind_f!(ironing_spacing),
     ),
     row(
         "ironing_flow",
@@ -1524,7 +1561,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(0.0, 50.0, 1.0, PCT),
         Df(10.0),
         "Material pushed while ironing.",
-        None,
+        bind_f!(ironing_flow),
     ),
     // ----------------------------------------------------------- Support
     row(
@@ -1777,7 +1814,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(0.0, 100.0, 1.0, PCT),
         Df(100.0),
         "Fan duty while bridging.",
-        None,
+        bind_f!(bridge_fan_percent),
     ),
     row(
         "min_layer_time",
@@ -1858,7 +1895,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(5.0, 200.0, 1.0, PCT),
         Df(70.0),
         "Bridge speed, relative to the default speed.",
-        None,
+        bind_f!(bridge_speed_percent),
     ),
     row(
         "first_layer_speed",
@@ -2142,9 +2179,9 @@ pub static SETTINGS: &[SettingSpec] = &[
         Advanced,
         "Bridging",
         B,
-        Db(false),
+        Db(true),
         "Print unsupported spans as straight bridges.",
-        None,
+        bind_b!(bridging_enabled),
     ),
     row(
         "bridge_flow_percent",
@@ -2154,7 +2191,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(10.0, 200.0, 1.0, PCT),
         Df(100.0),
         "Flow while bridging.",
-        None,
+        bind_f!(bridge_flow_percent),
     ),
     row(
         "slice_close_gap",
@@ -2249,7 +2286,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(0.0, 1000.0, 1.0, "mm²"),
         Df(0.0),
         "Infill regions smaller than this print solid.",
-        None,
+        bind_f!(solid_min_area),
     ),
     row(
         "solid_expansion",
@@ -2259,7 +2296,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(0.0, 10.0, 0.1, MM),
         Df(0.0),
         "Grow solid areas into the sparse infill for anchoring.",
-        None,
+        bind_f!(solid_expansion),
     ),
     row(
         "monotonic_solid",
@@ -2269,7 +2306,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         B,
         Db(false),
         "Lay solid lines strictly side by side for an even top surface.",
-        None,
+        bind_b!(monotonic_solid),
     ),
     row(
         "top_flow_percent",
@@ -2279,7 +2316,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(10.0, 200.0, 1.0, PCT),
         Df(100.0),
         "Flow on the exposed top layer.",
-        None,
+        bind_f!(top_flow_percent),
     ),
     row(
         "top_speed_percent",
@@ -2289,7 +2326,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(5.0, 200.0, 1.0, PCT),
         Df(100.0),
         "Speed on the exposed top layer.",
-        None,
+        bind_f!(top_speed_percent),
     ),
     row(
         "top_fan_percent",
@@ -2299,7 +2336,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(0.0, 100.0, 1.0, PCT),
         Df(100.0),
         "Fan on the exposed top layer.",
-        None,
+        bind_f!(top_fan_percent),
     ),
     row(
         "solid_every_layers",
@@ -2663,13 +2700,20 @@ mod tests {
 
     #[test]
     fn placeholders_are_stored_and_reported() {
+        // any boolean setting the slicer does not use yet
+        let Some(spec) =
+            SETTINGS.iter().find(|s| !s.implemented() && matches!(s.kind, SettingKind::Bool))
+        else {
+            return;
+        };
         let mut p = PrintSettings::default();
         assert!(p.unused_changes().is_empty());
-        assert!(p.set("ironing_enabled", SettingValue::Bool(true)).is_ok());
-        assert_eq!(p.get("ironing_enabled"), Some(SettingValue::Bool(true)));
-        assert_eq!(p.unused_changes(), vec!["Ironing"]);
+        let on = SettingValue::Bool(spec.default.value() != SettingValue::Bool(true));
+        assert!(p.set(spec.key, on.clone()).is_ok());
+        assert_eq!(p.get(spec.key), Some(on));
+        assert_eq!(p.unused_changes(), vec![spec.label]);
         // setting it back to the default forgets it
-        assert!(p.set("ironing_enabled", SettingValue::Bool(false)).is_ok());
+        assert!(p.set(spec.key, spec.default.value()).is_ok());
         assert!(p.extra.is_empty());
     }
 

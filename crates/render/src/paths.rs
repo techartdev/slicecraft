@@ -31,10 +31,16 @@ pub enum PathKind {
     Raft,
     /// Single lines in thin walls and in gaps the shells leave.
     GapFill,
+    /// Solid infill over air, straight across.
+    Bridge,
+    /// The exposed top surface.
+    TopSolid,
+    /// A light pass over top surfaces.
+    Ironing,
 }
 
 impl PathKind {
-    pub const ALL: [PathKind; 10] = [
+    pub const ALL: [PathKind; 13] = [
         PathKind::Skirt,
         PathKind::Brim,
         PathKind::OuterPerimeter,
@@ -45,6 +51,9 @@ impl PathKind {
         PathKind::SupportInterface,
         PathKind::Raft,
         PathKind::GapFill,
+        PathKind::Bridge,
+        PathKind::TopSolid,
+        PathKind::Ironing,
     ];
 
     pub fn label(self) -> &'static str {
@@ -59,6 +68,9 @@ impl PathKind {
             PathKind::SupportInterface => "dense support",
             PathKind::Raft => "raft",
             PathKind::GapFill => "gap fill",
+            PathKind::Bridge => "bridge",
+            PathKind::TopSolid => "top surface",
+            PathKind::Ironing => "ironing",
         }
     }
 }

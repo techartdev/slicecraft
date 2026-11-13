@@ -909,7 +909,10 @@ mod tests {
         // a middle layer is sparse inside, solid near the top
         assert!(out.layers[50].paths.iter().any(|p| p.kind == PathKind::SparseInfill));
         assert!(!out.layers[50].paths.iter().any(|p| p.kind == PathKind::SolidInfill));
-        assert!(out.layers[98].paths.iter().any(|p| p.kind == PathKind::SolidInfill));
+        assert!(
+            out.layers[98].paths.iter().any(|p| p.kind == PathKind::TopSolid),
+            "the last layer is a top surface"
+        );
         // the outer shell of a 20 mm cube is a 19.55 mm square at its centreline
         let outer: f64 = out.layers[50]
             .paths
@@ -1418,6 +1421,38 @@ mesh = AAAA
         let gap = reach(PathKind::OuterPerimeter) - reach(PathKind::Raft);
         assert!(gap > p.raft_margin - 1.0 && gap < p.raft_margin + 1.0, "{gap}");
         assert!(out.gcode.contains(";TYPE:raft"));
+    }
+
+    #[test]
+    fn bridges_top_surfaces_and_ironing_are_their_own_features() {
+        let Some(mut s) = session_with(table_mesh()) else { return };
+        let count = |s: &Session, kind: PathKind| {
+            s.slice_result().map_or(0, |o| {
+                o.layers.iter().flat_map(|l| l.paths.iter()).filter(|p| p.kind == kind).count()
+            })
+        };
+        assert!(matches!(s.execute(Command::Slice), Ok(Outcome::Sliced { .. })));
+        assert!(count(&s, PathKind::Bridge) > 0, "the slab's underside bridges");
+        assert!(count(&s, PathKind::TopSolid) > 0, "the slab has a top surface");
+        assert_eq!(count(&s, PathKind::Ironing), 0);
+        // bridges run across the shorter span: here every bridge layer is on the slab's first layer
+        let first_bridge = s.slice_result().and_then(|o| {
+            o.layers
+                .iter()
+                .find(|l| l.paths.iter().any(|p| p.kind == PathKind::Bridge))
+                .map(|l| l.z)
+        });
+        assert!(first_bridge.is_some_and(|z| z > 10.0 && z < 10.6), "{first_bridge:?}");
+        let p = PrintSettings {
+            ironing_enabled: true,
+            bridging_enabled: false,
+            monotonic_solid: true,
+            ..s.document().settings.clone()
+        };
+        assert!(s.execute(Command::Profile(Box::new(p))).is_ok());
+        assert!(matches!(s.execute(Command::Slice), Ok(Outcome::Sliced { .. })));
+        assert!(count(&s, PathKind::Ironing) > 0);
+        assert_eq!(count(&s, PathKind::Bridge), 0);
     }
 
     #[test]

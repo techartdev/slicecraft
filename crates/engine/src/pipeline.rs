@@ -452,17 +452,49 @@ fn with_raft(raft: Raft, layers: Vec<LayerPaths>, skirt: Vec<ToolPath>) -> Vec<L
     out
 }
 
+/// Direction of a polygon's long axis, radians, from its outline's
+/// edge-weighted second moments.
+fn long_axis(ring: &[Point2]) -> f64 {
+    let n = ring.len();
+    let (mut sw, mut mx, mut my) = (0.0, 0.0, 0.0);
+    for i in 0..n {
+        let (Some(a), Some(b)) = (ring.get(i), ring.get((i + 1) % n)) else { continue };
+        let l = a.distance(*b);
+        sw += l;
+        mx += l * (a.x + b.x) / 2.0;
+        my += l * (a.y + b.y) / 2.0;
+    }
+    if sw <= 0.0 {
+        return 0.0;
+    }
+    let (mx, my) = (mx / sw, my / sw);
+    let (mut sxx, mut syy, mut sxy) = (0.0, 0.0, 0.0);
+    for i in 0..n {
+        let (Some(a), Some(b)) = (ring.get(i), ring.get((i + 1) % n)) else { continue };
+        let l = a.distance(*b);
+        let (x, y) = ((a.x + b.x) / 2.0 - mx, (a.y + b.y) / 2.0 - my);
+        sxx += l * x * x;
+        syy += l * y * y;
+        sxy += l * x * y;
+    }
+    0.5 * (2.0 * sxy).atan2(sxx - syy)
+}
+
 /// A layer's model paths as feature groups in print order: walls (in the
 /// profile's perimeter order), solid infill, sparse infill, or infill first.
 fn feature_groups(paths: Vec<ToolPath>, s: &slicecraft_doc::PrintSettings) -> Vec<Vec<ToolPath>> {
     let (mut outer, mut inner, mut solid, mut sparse) =
         (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-    let mut gaps = Vec::new();
+    let (mut gaps, mut bridges, mut tops, mut irons) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for p in paths {
         match p.kind {
             PathKind::OuterPerimeter => outer.push(p),
             PathKind::InnerPerimeter => inner.push(p),
             PathKind::GapFill => gaps.push(p),
+            PathKind::Bridge => bridges.push(p),
+            PathKind::TopSolid => tops.push(p),
+            PathKind::Ironing => irons.push(p),
             PathKind::SolidInfill => solid.push(p),
             _ => sparse.push(p),
         }
@@ -483,6 +515,10 @@ fn feature_groups(paths: Vec<ToolPath>, s: &slicecraft_doc::PrintSettings) -> Ve
         groups.push(solid);
         groups.push(sparse);
     }
+    // bridges after the walls they anchor on; top surfaces and ironing last
+    groups.push(bridges);
+    groups.push(tops);
+    groups.push(irons);
     groups.retain(|g| !g.is_empty());
     groups
 }
@@ -641,15 +677,99 @@ pub fn slice_document(
             }
             _ => sh.inner.clone(),
         };
-        let sparse = sh.inner.difference(&solid)?;
+        let mut solid = solid;
+        let mut sparse = sh.inner.difference(&solid)?;
+        // small sparse islands are stronger solid
+        if s.solid_min_area > 0.0 && !sparse.is_empty() {
+            let small = Region {
+                polygons: sparse
+                    .polygons
+                    .iter()
+                    .filter(|p| p.area() < s.solid_min_area)
+                    .cloned()
+                    .collect(),
+            };
+            if !small.is_empty() {
+                solid = solid.union(&small)?;
+                sparse = sparse.difference(&small)?;
+            }
+        }
+        if s.solid_expansion > 0.0 && !solid.is_empty() {
+            solid = solid.offset(s.solid_expansion)?.intersection(&sh.inner)?;
+            sparse = sh.inner.difference(&solid)?;
+        }
         let turn = s.infill_alternate && i % 2 == 1;
         let angle = if turn { base_angle + std::f64::consts::FRAC_PI_2 } else { base_angle };
-        let solid_area = solid.offset(overlap)?;
-        let mut paths = match s.solid_pattern {
-            SolidPattern::Rectilinear => line_infill(&solid_area, w, angle, PathKind::SolidInfill)?,
-            SolidPattern::Lines => line_infill(&solid_area, w, base_angle, PathKind::SolidInfill)?,
-            SolidPattern::Concentric => concentric_infill(&solid, w, PathKind::SolidInfill)?,
+        // solid splits into bridges (air below), top surfaces (air above) and the rest
+        let mut bridge = Region::new();
+        if s.bridging_enabled && i > 0 && !solid.is_empty() {
+            let below = regions.get(i - 1).unwrap_or(&empty);
+            bridge = solid.difference(below)?.without_slivers(4.0 * w * w);
+        }
+        let top = if solid.is_empty() {
+            Region::new()
+        } else {
+            match regions.get(i + 1) {
+                Some(up) => solid.difference(up)?.difference(&bridge)?.without_slivers(w * w),
+                None => solid.difference(&bridge)?,
+            }
         };
+        let rest = solid.difference(&bridge)?.difference(&top)?;
+        let solid_fill = |area: &Region, kind: PathKind| -> Result<Vec<ToolPath>, EngineError> {
+            let grown = area.offset(overlap)?;
+            Ok(match s.solid_pattern {
+                SolidPattern::Rectilinear => line_infill(&grown, w, angle, kind)?,
+                SolidPattern::Lines => line_infill(&grown, w, base_angle, kind)?,
+                SolidPattern::Concentric => concentric_infill(area, w, kind)?,
+            })
+        };
+        let mut paths = solid_fill(&rest, PathKind::SolidInfill)?;
+        paths.extend(solid_fill(&top, PathKind::TopSolid)?);
+        for poly in &bridge.polygons {
+            // across the gap: perpendicular to the bridge's long axis
+            let one = Region { polygons: vec![poly.clone()] };
+            let across = long_axis(&poly.outer) + std::f64::consts::FRAC_PI_2;
+            paths.extend(line_infill(
+                &one.offset(overlap + w)?.intersection(&sh.inner.offset(overlap)?)?,
+                w,
+                across,
+                PathKind::Bridge,
+            )?);
+        }
+        if s.ironing_enabled && !top.is_empty() {
+            let area = top.offset(-0.5 * w)?;
+            paths.extend(line_infill(
+                &area,
+                s.ironing_spacing,
+                angle + std::f64::consts::FRAC_PI_4,
+                PathKind::Ironing,
+            )?);
+        }
+        // denser infill just under top surfaces
+        if s.dense_layers > 0 && !sparse.is_empty() {
+            let first_above = i + above + 1;
+            let mut covered: Option<Region> = None;
+            for j in first_above..first_above + s.dense_layers as usize {
+                let rj = regions.get(j).unwrap_or(&empty);
+                covered = Some(match covered {
+                    None => rj.clone(),
+                    Some(c) => c.intersection(rj)?,
+                });
+            }
+            let dense = match covered {
+                Some(c) => sparse.difference(&c)?.without_slivers(w * w),
+                None => Region::new(),
+            };
+            if !dense.is_empty() && s.dense_percentage > 0.0 {
+                sparse = sparse.difference(&dense)?;
+                paths.extend(line_infill(
+                    &dense.offset(overlap)?,
+                    w * 100.0 / s.dense_percentage,
+                    angle,
+                    PathKind::SparseInfill,
+                )?);
+            }
+        }
         if let Some(spacing) = sparse_spacing {
             let area = if s.infill_pattern == InfillPattern::Concentric {
                 sparse
@@ -729,7 +849,28 @@ pub fn slice_document(
         let seam_target = Point2::new(s.seam_x, s.seam_y);
         let mut paths = Vec::new();
         let place = |g: Vec<ToolPath>, at: &mut Point2, paths: &mut Vec<ToolPath>| {
-            let (mut ordered, end) = order_paths(g, *at);
+            let monotonic =
+                s.monotonic_solid && g.first().is_some_and(|p| p.kind == PathKind::TopSolid);
+            let (mut ordered, end) = if monotonic {
+                // keep the scan order, one line after the next, starting at
+                // whichever end of the surface is nearer
+                let mut g = g;
+                let first = g
+                    .first()
+                    .and_then(ToolPath::start)
+                    .map_or(f64::INFINITY, |p| p.distance_sq(*at));
+                let last = g
+                    .last()
+                    .and_then(ToolPath::start)
+                    .map_or(f64::INFINITY, |p| p.distance_sq(*at));
+                if last < first {
+                    g.reverse();
+                }
+                let end = g.last().and_then(ToolPath::end).unwrap_or(*at);
+                (g, end)
+            } else {
+                order_paths(g, *at)
+            };
             *at = end;
             for (k, p) in ordered.iter_mut().enumerate() {
                 let is_wall = matches!(p.kind, PathKind::OuterPerimeter | PathKind::InnerPerimeter);

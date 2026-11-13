@@ -74,6 +74,10 @@ pub fn path_speed(s: &PrintSettings, kind: PathKind, layer_index: usize) -> f64 
         PathKind::SolidInfill | PathKind::GapFill => {
             s.print_speed * s.solid_infill_speed_percent / 100.0
         }
+        PathKind::TopSolid | PathKind::Ironing => {
+            s.print_speed * s.solid_infill_speed_percent / 100.0 * s.top_speed_percent / 100.0
+        }
+        PathKind::Bridge => s.print_speed * s.bridge_speed_percent / 100.0,
         PathKind::SparseInfill => s.print_speed,
         PathKind::Raft => s.first_layer_speed.max(s.print_speed * 0.5),
         PathKind::Support | PathKind::SupportInterface => {
@@ -124,6 +128,18 @@ pub struct GcodeWriter<'a> {
     speed_factor: f64,
     /// Current fan duty, 0–255.
     fan: u8,
+    /// The fan duty this layer runs at outside bridges and top surfaces.
+    layer_fan: u8,
+}
+
+/// Flow multiplier for a feature, on top of the profile's.
+pub fn kind_flow(s: &PrintSettings, kind: PathKind) -> f64 {
+    match kind {
+        PathKind::Bridge => s.bridge_flow_percent / 100.0,
+        PathKind::TopSolid => s.top_flow_percent / 100.0,
+        PathKind::Ironing => s.ironing_flow / 100.0,
+        _ => 1.0,
+    }
 }
 
 /// What happens at the end of a path that a retraction follows.
@@ -179,6 +195,7 @@ impl<'a> GcodeWriter<'a> {
             since_retract: 0.0,
             speed_factor: 1.0,
             fan: 0,
+            layer_fan: 0,
         }
     }
 
@@ -407,7 +424,8 @@ impl<'a> GcodeWriter<'a> {
         {
             duty = 255.0;
         }
-        self.set_fan(duty.clamp(0.0, 255.0) as u8);
+        self.layer_fan = duty.clamp(0.0, 255.0) as u8;
+        self.set_fan(self.layer_fan);
         self.kind = None;
     }
 
@@ -504,7 +522,19 @@ impl<'a> GcodeWriter<'a> {
         let full = path_speed(s, path.kind, layer.index);
         let speed = (full * self.speed_factor).max(s.min_layer_speed.min(full));
         let width = layer_line_width(s, layer.index);
-        let e_per_mm = filament_per_mm(width, layer.height, s);
+        let e_per_mm = filament_per_mm(width, layer.height, s) * kind_flow(s, path.kind);
+        // bridges and top surfaces may want their own fan, once the fan is on
+        let fan_for = |pct: f64| (pct / 100.0 * 255.0).round().clamp(0.0, 255.0) as u8;
+        let wanted = match path.kind {
+            PathKind::Bridge if self.layer_fan > 0 || layer.index > 0 => {
+                fan_for(s.bridge_fan_percent)
+            }
+            PathKind::TopSolid | PathKind::Ironing if self.layer_fan > 0 => {
+                fan_for(s.top_fan_percent)
+            }
+            _ => self.layer_fan,
+        };
+        self.set_fan(wanted);
         self.travel_to(start, inside);
         let mut pts: Vec<Point2> = path.points.clone();
         if path.closed && pts.len() > 2 {

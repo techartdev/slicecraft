@@ -38,12 +38,14 @@ the architecture document, not to a quieter line here.
   or block support (full height; height ranges exist in the data and file format
   but have no editor yet). Edit boxes are in bed coordinates and stay put when a
   model moves.
-- **Bridges** — absent.
+- **Bridges** — solid areas over air print straight across their short span with their own
+  flow, speed and fan; no bridge detection for perimeters.
 - **Adhesion** — skirt (loops, layers), brim and raft (base and top layers, margin, air
   gap); no prime tower or ooze shield (they need several tools).
 - **Infill patterns** — rectilinear, one-direction lines, grid, triangles, concentric, gyroid,
-  honeycomb, wiggle, cubic and octahedral all work. No dense layers, ironing or ordered
-  (monotonic) tops yet.
+  honeycomb, wiggle, cubic and octahedral all work, with dense layers under tops, small
+  islands made solid, solid expansion, top surfaces with their own flow/speed/fan,
+  monotonic tops and ironing.
 - **Thin walls / gap fill** — single lines along walls thinner than a line and in gaps the
   shells leave (on by default); inner loops are skipped where they would overlap
   themselves by more than 30 %. Gap lines use the normal line width (no variable
