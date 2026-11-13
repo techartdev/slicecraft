@@ -143,7 +143,8 @@ grouping is its own.
 | Dimensional (hole/outer) compensation | public | placeholder | P3 |
 | Bridging detection and modifiers | public | placeholder | P4 |
 | Ironing, ordered top lines, top-surface modifiers | public | placeholder | P4 |
-| Automatic support | public | done: region-based, own design ([R5](05-support.md)) | P4 |
+| Automatic support | public | done: pillars (default) or areas, own design ([R5](05-support.md)) | P4 |
+| Retract only when crossing outlines | public | done (on by default) | P4 |
 | Manual support add/remove, blockers, support preview before slicing | public | placeholder | P4 |
 | Retraction with Z lift, first-layer temperatures, wait-for-heat, scripts | public | done | P4 |
 | Coast, wipe, extra restart, retraction rules | public | placeholder | P4 |

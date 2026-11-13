@@ -26,10 +26,10 @@ and printer control are not there yet, and nothing has been printed — see
 | Phases complete | **P0**; P1, P3 most of the way; slices of P4–P6 | measured against the phase table |
 | Crates | 7 libraries, 2 apps, 1 tool | measured |
 | Lines of Rust | ≈ 15,900 | measured (`cargo xtask stats`) |
-| Tests | 152 in 17 test binaries, all green | measured (`cargo test --workspace`) |
+| Tests | 154 in 17 test binaries, all green | measured (`cargo test --workspace`) |
 | Commands | 47 (21 ready, 26 planned) | measured (`engine::COMMANDS`) |
-| Profile settings | 170 (76 used by the slicer, 94 placeholders) | measured (`doc::settings::SETTINGS`) |
-| Crown with support (350 layers, release) | sliced in ≈ 1.5 s; support filament 676 mm against the reference's 682 mm on the same job | measured on one Windows machine |
+| Profile settings | 170 (77 used by the slicer, 93 placeholders) | measured (`doc::settings::SETTINGS`) |
+| Crown with support (350 layers, release) | sliced in ≈ 1.5 s; support filament 676 mm vs the reference's 682 mm; 4927 retractions vs 4384 | measured on one Windows machine |
 | Direct external dependencies | 4 (`i_overlay`, `roxmltree`; `eframe`, `rfd` in the window only) | measured |
 | Simplify3D profiles imported | 16 of 16 operator files (4.0 and 5.1.2) | measured (`io::fff::tests::corpus_profiles_import`, corpus outside the repo) |
 | 20 mm cube, defaults | 99 layers, 1.17 m filament, ≈ 14 min (no acceleration) | measured, uncalibrated |
@@ -57,16 +57,14 @@ damaged meshes dominate the uncertainty.
 
 ## What is next (concrete)
 
-1. **Retract only when crossing outlines:** the reference skips retraction on travel
-   inside the part; we retract about twice as often.
-2. **Support editing:** a support preview before slicing, manual add/remove and
+1. **Support editing:** a support preview before slicing, manual add/remove and
    blockers on the pillar grid.
-3. **Turn placeholders into features in order of use** (from R2 §3): adaptive layers,
+2. **Turn placeholders into features in order of use** (combing is the next travel improvement) (from R2 §3): adaptive layers,
    gyroid infill, raft, thin walls/gap fill, combing, coast/wipe, schedules.
-4. **Several profiles per job and height zones.**
-5. **3MF import and model export.**
-6. **Real-print check** of the 20 mm cube and a torus; record results as measured.
-7. **Upstream the licence exceptions** recorded in [ATTRIBUTION.md](ATTRIBUTION.md).
+3. **Several profiles per job and height zones.**
+4. **3MF import and model export.**
+5. **Real-print check** of the 20 mm cube and a torus; record results as measured.
+6. **Upstream the licence exceptions** recorded in [ATTRIBUTION.md](ATTRIBUTION.md).
 
 ## By dimension
 
@@ -76,7 +74,7 @@ damaged meshes dominate the uncertainty.
 | Geometry | stitched loops, regions with holes, offsets and booleans on a 1 µm grid | [architecture.md](docs/architecture.md) |
 | Output | Marlin-style G-code with area-based extrusion, retraction, fan, estimates | [gaps.md](docs/gaps.md) |
 | Estimates | constant-feed time, filament length and PLA weight; uncalibrated | [gaps.md](docs/gaps.md) |
-| Stability | 152 tests, no fuzzing; worker failures become errors; hostile project files refused | [gaps.md](docs/gaps.md) |
+| Stability | 154 tests, no fuzzing; worker failures become errors; hostile project files refused | [gaps.md](docs/gaps.md) |
 | Platforms | Windows 11 only (built and run) | [gaps.md](docs/gaps.md) |
 | Ecosystem | CLI with `--json`; MCP dispatch without transport | [gaps.md](docs/gaps.md) |
 | Suite integration | house rules and layout present; licence exceptions to propose; CI, packaging, corpus, `craft-libs` deferred | [PLAN.md](docs/PLAN.md) §1.1, §7 |

@@ -609,6 +609,7 @@ mod tests {
                     closed: false,
                 },
             ],
+            inside_travel: Vec::new(),
         }]
     }
 

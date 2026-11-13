@@ -198,6 +198,8 @@ pub struct PrintSettings {
     /// Travel moves shorter than this do not retract, mm.
     pub retract_min_travel: f64,
     pub retract_on_layer_change: bool,
+    /// Retract only on travel that crosses the model's outline.
+    pub retract_only_outside: bool,
     // layer
     pub layer_height: f64,
     pub first_layer_height: f64,
@@ -315,6 +317,7 @@ impl Default for PrintSettings {
             retract_lift: 0.0,
             retract_min_travel: 2.0,
             retract_on_layer_change: true,
+            retract_only_outside: true,
             layer_height: 0.2,
             first_layer_height: 0.3,
             perimeter_count: 2,
@@ -1989,13 +1992,13 @@ pub static SETTINGS: &[SettingSpec] = &[
     ),
     row(
         "retract_only_outside",
-        "Retract only over gaps",
+        "Retract only when crossing outlines",
         Advanced,
         "Travel",
         B,
-        Db(false),
-        "Skip retraction when travel stays inside the part.",
-        None,
+        Db(true),
+        "Retract only when a travel crosses the part's outline. Travel inside the part or between support pillars leaves any string where it cannot be seen.",
+        bind_b!(retract_only_outside),
     ),
     row(
         "thin_walls",

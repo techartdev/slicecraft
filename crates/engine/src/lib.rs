@@ -1142,6 +1142,29 @@ mesh = AAAA
     }
 
     #[test]
+    fn travel_inside_a_part_skips_retraction_but_between_parts_does_not() {
+        let Some(mut s) = session_with(cube(20.0)) else { return };
+        let bytes = stl_of(&cube(20.0).unwrap_or_default());
+        assert!(
+            s.execute(Command::Import { name: "b".into(), bytes, extension: Some("stl".into()) })
+                .is_ok()
+        );
+        let count = |s: &mut Session, inside: bool| {
+            let p = PrintSettings { retract_only_outside: inside, ..s.document().settings.clone() };
+            let _ = s.execute(Command::Profile(Box::new(p)));
+            match s.execute(Command::Slice) {
+                Ok(Outcome::Sliced { stats, .. }) => stats.gcode.retractions,
+                _ => 0,
+            }
+        };
+        let always = count(&mut s, false);
+        let only_outside = count(&mut s, true);
+        assert!(only_outside < always, "{only_outside} vs {always}");
+        // the two cubes stand apart: every layer still retracts between them
+        assert!(only_outside >= 99, "{only_outside}");
+    }
+
+    #[test]
     fn restoring_a_profile_does_not_mark_changes() {
         let mut s = Session::new();
         let profile = Profile {

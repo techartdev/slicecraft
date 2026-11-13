@@ -270,13 +270,13 @@ impl<'a> GcodeWriter<'a> {
         self.kind = None;
     }
 
-    fn travel_to(&mut self, p: Point2) {
+    fn travel_to(&mut self, p: Point2, inside: bool) {
         let d = self.pos.map(|q| q.distance(p));
         if d.is_some_and(|d| d < 1e-6) {
             return;
         }
         let mut lifted = None;
-        if d.is_none_or(|d| d >= self.settings.retract_min_travel) {
+        if !inside && d.is_none_or(|d| d >= self.settings.retract_min_travel) {
             let was = self.retracted;
             self.retract();
             // Z hop only for a travel that retracted here, on a known layer
@@ -308,7 +308,7 @@ impl<'a> GcodeWriter<'a> {
 
     fn extrude_to(&mut self, p: Point2, speed: f64, e_per_mm: f64) {
         let Some(from) = self.pos else {
-            self.travel_to(p);
+            self.travel_to(p, false);
             return;
         };
         let d = from.distance(p);
@@ -329,6 +329,12 @@ impl<'a> GcodeWriter<'a> {
 
     /// One path: travel to its start, then extrude along it.
     pub fn path(&mut self, path: &ToolPath, layer: &LayerPaths) {
+        self.path_after(path, layer, false);
+    }
+
+    /// Like `path`; `inside` says the travel to it stays inside the printed
+    /// area and needs no retraction.
+    pub fn path_after(&mut self, path: &ToolPath, layer: &LayerPaths, inside: bool) {
         let Some(start) = path.start() else { return };
         if self.kind != Some(path.kind) {
             let _ = writeln!(self.out, ";TYPE:{}", path.kind.label());
@@ -336,7 +342,7 @@ impl<'a> GcodeWriter<'a> {
         }
         let speed = path_speed(self.settings, path.kind, layer.index);
         let e_per_mm = filament_per_mm(self.settings.line_width(), layer.height, self.settings);
-        self.travel_to(start);
+        self.travel_to(start, inside);
         for p in path.points.iter().skip(1) {
             self.extrude_to(*p, speed, e_per_mm);
         }
@@ -347,8 +353,9 @@ impl<'a> GcodeWriter<'a> {
 
     pub fn layer(&mut self, layer: &LayerPaths) {
         self.layer_change(layer);
-        for p in &layer.paths {
-            self.path(p, layer);
+        for (k, p) in layer.paths.iter().enumerate() {
+            let inside = layer.inside_travel.get(k).copied().unwrap_or(false);
+            self.path_after(p, layer, inside);
         }
         self.stats.layers += 1;
     }
@@ -445,7 +452,7 @@ mod tests {
     }
 
     fn one_layer(paths: Vec<ToolPath>) -> Vec<LayerPaths> {
-        vec![LayerPaths { index: 0, z: 0.3, height: 0.3, paths }]
+        vec![LayerPaths { index: 0, z: 0.3, height: 0.3, paths, inside_travel: Vec::new() }]
     }
 
     #[test]
@@ -505,6 +512,7 @@ mod tests {
             z: 0.5,
             height: 0.2,
             paths: vec![line((0.0, 0.0), (10.0, 0.0), PathKind::SparseInfill)],
+            inside_travel: Vec::new(),
         });
         let out = write_gcode(&layers, &s, &Bed::default());
         let t = &out.text;
@@ -540,6 +548,7 @@ mod tests {
             z: 0.5,
             height: 0.2,
             paths: vec![line((0.0, 0.0), (10.0, 0.0), PathKind::SparseInfill)],
+            inside_travel: Vec::new(),
         });
         let text = write_gcode(&layers, &s, &Bed::default()).text;
         let after = text.split(";LAYER:1").nth(1).unwrap_or_default();
@@ -587,7 +596,13 @@ mod tests {
     fn first_layer_temperatures_switch_on_layer_two() {
         let s = PrintSettings { first_layer_nozzle_temperature: 220.0, ..PrintSettings::default() };
         let mut layers = one_layer(vec![line((0.0, 0.0), (5.0, 0.0), PathKind::Skirt)]);
-        layers.push(LayerPaths { index: 1, z: 0.5, height: 0.2, paths: vec![] });
+        layers.push(LayerPaths {
+            index: 1,
+            z: 0.5,
+            height: 0.2,
+            paths: vec![],
+            inside_travel: Vec::new(),
+        });
         let t = write_gcode(&layers, &s, &Bed::default()).text;
         assert!(t.contains("M109 S220"));
         let l1 = t.find(";LAYER:1").unwrap_or(usize::MAX);
@@ -656,5 +671,28 @@ mod tests {
         );
         assert!(script_sets_temperatures("m104 s200"));
         assert!(!script_sets_temperatures("G28 ; M104 later"));
+    }
+
+    #[test]
+    fn travel_marked_inside_does_not_retract() {
+        let s = PrintSettings { retract_min_travel: 1.0, ..PrintSettings::default() };
+        let paths = vec![
+            line((0.0, 0.0), (10.0, 0.0), PathKind::SparseInfill),
+            line((0.0, 20.0), (10.0, 20.0), PathKind::SparseInfill),
+        ];
+        let mut layers = one_layer(paths.clone());
+        let normal = write_gcode(&layers, &s, &Bed::default());
+        // one retraction for the travel, one in the end sequence
+        assert_eq!(normal.stats.retractions, 2);
+        if let Some(l) = layers.first_mut() {
+            l.inside_travel = vec![false, true];
+        }
+        let inside = write_gcode(&layers, &s, &Bed::default());
+        assert_eq!(
+            inside.stats.retractions, 1,
+            "only the end sequence:
+{}",
+            inside.text
+        );
     }
 }

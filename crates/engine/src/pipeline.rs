@@ -477,9 +477,37 @@ pub fn slice_document(
             }
             paths.extend(ordered);
         }
-        layers.push(LayerPaths { index: slot.index, z: slot.top, height: slot.height, paths });
+        layers.push(LayerPaths {
+            index: slot.index,
+            z: slot.top,
+            height: slot.height,
+            paths,
+            inside_travel: Vec::new(),
+        });
     }
 
+    // Travel that does not cross the model's outline (inside the part, or
+    // outside it, between support pillars) needs no retraction: a string
+    // there is hidden in infill or in support.
+    if s.retract_only_outside {
+        let flags = par_map(&layers, Stage::Gcode, observer, |i, layer| {
+            let Some(area) = regions.get(i) else { return Ok(Vec::new()) };
+            let mut flags = Vec::with_capacity(layer.paths.len());
+            let mut prev: Option<Point2> = None;
+            for p in &layer.paths {
+                let inside = match (prev, p.start()) {
+                    (Some(a), Some(b)) => !area.crosses_boundary(a, b),
+                    _ => false,
+                };
+                flags.push(inside);
+                prev = p.end();
+            }
+            Ok(flags)
+        })?;
+        for (layer, f) in layers.iter_mut().zip(flags) {
+            layer.inside_travel = f;
+        }
+    }
     let out = write_gcode(&layers, s, &doc.bed);
     let mut warnings = Vec::new();
     if !s.infill_pattern.is_implemented() && s.infill_percentage > 0.0 {

@@ -91,6 +91,9 @@ pub struct LayerPaths {
     /// Layer thickness, mm.
     pub height: f64,
     pub paths: Vec<ToolPath>,
+    /// `inside_travel[k]`: the travel to `paths[k]` crosses no model outline,
+    /// so it needs no retraction. Missing entries mean "retract as usual".
+    pub inside_travel: Vec<bool>,
 }
 
 /// Perimeter shells of `region`, outermost first, and the area left inside the

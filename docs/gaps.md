@@ -38,8 +38,6 @@ the architecture document, not to a quieter line here.
   everywhere or bed-only, lines or grid, gaps, interface/floor/base layers, expansion,
   walls; each pillar is one zigzag. No support preview before slicing, no manual
   editing or blockers.
-- **Retraction on every long travel** — "retract only when crossing outlines" is still a
-  placeholder, so jobs retract roughly twice as often as the reference.
 - **Bridges** — absent.
 - **Adhesion** — skirt (loops, layers) and brim; no raft, prime tower or ooze shield.
 - **Infill patterns** — rectilinear, one-direction lines, grid, triangles and
@@ -53,8 +51,10 @@ the architecture document, not to a quieter line here.
 - **Multi-tool** — absent.
 - **Cooling** — fan on from a chosen layer; no schedules, minimum layer time,
   bridge or top-surface fan.
-- **Retraction** — distance, speed, minimum travel, Z lift and layer-change
-  retraction; no wipe, coasting or extra restart.
+- **Retraction** — distance, speed, minimum travel, Z lift, layer-change retraction and
+  "only when crossing outlines" (on by default); no wipe, coasting or extra restart.
+  Travel is a straight line: no combing around holes, so a travel across a hole
+  retracts.
 - **Adaptive layer heights, size compensation, layer ranges, per-object settings** —
   absent.
 - **First-layer width** — the first layer uses the normal line width.

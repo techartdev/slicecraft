@@ -10,7 +10,7 @@ describes code that exists. The rules that keep the shape are in
 ## Workspace
 
 13 packages: 7 libraries, 2 apps, `xtask`. About 13,700 lines of Rust
-(`cargo xtask stats`, 2026-11-13), 152 tests in 17 test binaries.
+(`cargo xtask stats`, 2026-11-13), 154 tests in 17 test binaries.
 
 | Layer | Crate | What it does |
 |---|---|---|

@@ -194,6 +194,30 @@ impl Region {
         self.contains(Point2::new((a.x + b.x) / 2.0, (a.y + b.y) / 2.0))
     }
 
+    /// True when the straight move from `a` to `b` crosses the region's
+    /// boundary: it enters or leaves the region. Touching is not crossing.
+    pub fn crosses_boundary(&self, a: Point2, b: Point2) -> bool {
+        let (lo_x, hi_x) = (a.x.min(b.x), a.x.max(b.x));
+        let (lo_y, hi_y) = (a.y.min(b.y), a.y.max(b.y));
+        self.contours().any(|ring| {
+            let n = ring.len();
+            (0..n).any(|i| {
+                let (Some(&c), Some(&d)) = (ring.get(i), ring.get((i + 1) % n)) else {
+                    return false;
+                };
+                // cheap reject before the orientation test
+                if c.x.max(d.x) < lo_x
+                    || c.x.min(d.x) > hi_x
+                    || c.y.max(d.y) < lo_y
+                    || c.y.min(d.y) > hi_y
+                {
+                    return false;
+                }
+                segments_cross(a, b, c, d)
+            })
+        })
+    }
+
     /// Drop polygons whose area is below `min_area` mm².
     pub fn without_slivers(mut self, min_area: f64) -> Self {
         self.polygons.retain(|p| p.area() >= min_area);
@@ -299,6 +323,15 @@ mod tests {
         let two =
             Region::from_loops(&[square(0.0, 0.0, 2.0), square(2.5, 0.0, 2.0)]).unwrap_or_default();
         assert!(!two.segment_inside(Point2::new(2.0, 1.0), Point2::new(2.5, 1.0)));
+        assert!(
+            two.crosses_boundary(Point2::new(1.0, 1.0), Point2::new(3.5, 1.0)),
+            "from one into the other"
+        );
+        assert!(
+            !two.crosses_boundary(Point2::new(5.0, 1.0), Point2::new(5.0, 9.0)),
+            "outside both"
+        );
+        assert!(!two.crosses_boundary(Point2::new(0.5, 0.5), Point2::new(1.5, 1.5)), "inside one");
     }
 
     #[test]

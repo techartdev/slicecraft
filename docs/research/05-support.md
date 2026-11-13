@@ -82,7 +82,7 @@ work on the same grid later.
 | support filament, 1.5 mm grid | 682 mm | **676 mm** with pillars; 1432 mm with areas |
 | support filament by pillar size, our grid | — | 1.5 mm: 676 · 2 mm: 782 · 3 mm: 1773 · 4 mm: 1181 |
 | body line spacing at 30 % | 1.33 mm | 1.33 mm |
-| retractions, whole job | 4384 | 9660 (5046 with no support at all; see question 1) |
+| retractions, whole job | 4384 | 4927 with "only when crossing outlines" (9660 before it) |
 | slice time, crown, release build | — | about 1.5 s with or without support |
 
 The non-monotonic 3 mm figure comes from how the grid falls on this model's columns.
@@ -90,10 +90,10 @@ The best size depends on the model.
 
 ## 6. Open questions
 
-1. Retractions: the model alone already retracts more than the reference's whole
-   job. The reference does not retract on travel that stays inside the part
-   ("only retract when crossing outlines"); ours retracts on every long travel. That
-   setting is the next step.
+1. Retractions: answered. Retracting only when a travel crosses the model's outline
+   (so not inside the part, and not between pillars) brought the crown from 9660 to
+   4927 retractions, against the reference's 4384. The remaining difference is
+   likely combing: routing travel around holes instead of across them.
 2. Pillar or grid quantisation as an option, and manual support editing and
    blockers. Those need a support preview before slicing.
 3. Measure the reference's dense support layers on a job that uses them.
