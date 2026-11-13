@@ -290,6 +290,25 @@ struct Shelled {
     inner: Region,
 }
 
+/// Gap fill for one layer: single lines in thin walls (and, with gap fill on,
+/// in gaps between the shells and the infill).
+fn gap_fill(
+    region: &Region,
+    inner: &Region,
+    s: &slicecraft_doc::PrintSettings,
+    w: f64,
+) -> Result<Vec<ToolPath>, EngineError> {
+    use slicecraft_doc::ThinWalls;
+    use slicecraft_render::patterns::{fill_narrow, uncovered};
+    if s.thin_walls == ThinWalls::Off {
+        return Ok(Vec::new());
+    }
+    let min_width = w * 0.3;
+    let (thin, gaps) = uncovered(region, s.perimeter_count, w, inner, min_width)?;
+    let area = if s.thin_walls == ThinWalls::GapFill { gaps } else { thin };
+    Ok(fill_narrow(&area, w, PathKind::GapFill)?)
+}
+
 /// The layer schedule and each layer's model region, plus the open loops
 /// dropped while stitching.
 fn layer_regions(
@@ -438,10 +457,12 @@ fn with_raft(raft: Raft, layers: Vec<LayerPaths>, skirt: Vec<ToolPath>) -> Vec<L
 fn feature_groups(paths: Vec<ToolPath>, s: &slicecraft_doc::PrintSettings) -> Vec<Vec<ToolPath>> {
     let (mut outer, mut inner, mut solid, mut sparse) =
         (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let mut gaps = Vec::new();
     for p in paths {
         match p.kind {
             PathKind::OuterPerimeter => outer.push(p),
             PathKind::InnerPerimeter => inner.push(p),
+            PathKind::GapFill => gaps.push(p),
             PathKind::SolidInfill => solid.push(p),
             _ => sparse.push(p),
         }
@@ -450,13 +471,15 @@ fn feature_groups(paths: Vec<ToolPath>, s: &slicecraft_doc::PrintSettings) -> Ve
         PerimeterOrder::InsideOut => [inner, outer],
         PerimeterOrder::OutsideIn => [outer, inner],
     };
-    let mut groups = Vec::with_capacity(4);
+    let mut groups = Vec::with_capacity(5);
     if s.infill_before_perimeters {
         groups.push(solid);
         groups.push(sparse);
         groups.extend(walls);
+        groups.push(gaps);
     } else {
         groups.extend(walls);
+        groups.push(gaps);
         groups.push(solid);
         groups.push(sparse);
     }
@@ -574,7 +597,8 @@ pub fn slice_document(
 
     // 3. shells
     let shelled = par_map(&regions, Stage::Shells, observer, |_, region| {
-        let (shells, inner) = perimeters(region, s.perimeter_count, w)?;
+        let (mut shells, inner) = perimeters(region, s.perimeter_count, w)?;
+        shells.extend(gap_fill(region, &inner, s, w)?);
         Ok(Shelled { shells, inner })
     })?;
 

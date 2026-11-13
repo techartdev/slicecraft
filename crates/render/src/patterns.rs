@@ -425,6 +425,105 @@ pub fn honeycomb(
     clip_polylines(region, lines, kind, spacing * 0.25)
 }
 
+/// What the shells and the infill area leave empty in `region`: `thin` is the
+/// part too narrow for even the outer shell (thin walls of the model), `gaps`
+/// adds the slivers between shells and infill. Both drop anything narrower
+/// than `min_width`.
+pub fn uncovered(
+    region: &Region,
+    count: u32,
+    width: f64,
+    inner: &Region,
+    min_width: f64,
+) -> Result<(Region, Region), GeomError> {
+    if region.is_empty() || count == 0 {
+        return Ok((Region::new(), Region::new()));
+    }
+    let half = width * 0.5;
+    let mut covered = inner.clone();
+    let mut outer_reach = Region::new();
+    for k in 0..count {
+        let centre = crate::paths::inner_shell(region, k, width)?;
+        if centre.is_empty() {
+            break;
+        }
+        let band = centre.offset(half)?.difference(&centre.offset(-half)?)?;
+        if k == 0 {
+            outer_reach = centre.offset(half)?;
+        }
+        covered = covered.union(&band)?;
+    }
+    let clean = |r: Region| -> Result<Region, GeomError> {
+        let m = (min_width * 0.5).max(0.01);
+        Ok(r.offset(-m)?.offset(m)?.without_slivers(width * width * 0.5))
+    };
+    let thin = clean(region.difference(&outer_reach)?)?;
+    let gaps = clean(region.difference(&covered)?)?;
+    Ok((thin, gaps))
+}
+
+/// Fill narrow areas with lines along their length: each island gets as many
+/// lines as fit across it (at least one, down its middle).
+pub fn fill_narrow(
+    region: &Region,
+    width: f64,
+    kind: PathKind,
+) -> Result<Vec<ToolPath>, GeomError> {
+    let mut out = Vec::new();
+    for poly in &region.polygons {
+        let one = Region { polygons: vec![poly.clone()] };
+        let ring = &poly.outer;
+        if ring.len() < 3 {
+            continue;
+        }
+        // long axis from the edge-weighted second moments of the outline
+        let n = ring.len();
+        let (mut sw, mut mx, mut my) = (0.0, 0.0, 0.0);
+        for i in 0..n {
+            let (Some(a), Some(b)) = (ring.get(i), ring.get((i + 1) % n)) else { continue };
+            let l = a.distance(*b);
+            sw += l;
+            mx += l * (a.x + b.x) / 2.0;
+            my += l * (a.y + b.y) / 2.0;
+        }
+        if sw <= 0.0 {
+            continue;
+        }
+        let (mx, my) = (mx / sw, my / sw);
+        let (mut sxx, mut syy, mut sxy) = (0.0, 0.0, 0.0);
+        for i in 0..n {
+            let (Some(a), Some(b)) = (ring.get(i), ring.get((i + 1) % n)) else { continue };
+            let l = a.distance(*b);
+            let (x, y) = ((a.x + b.x) / 2.0 - mx, (a.y + b.y) / 2.0 - my);
+            sxx += l * x * x;
+            syy += l * y * y;
+            sxy += l * x * y;
+        }
+        let angle = 0.5 * (2.0 * sxy).atan2(sxx - syy);
+        let (s_, c) = angle.sin_cos();
+        // extent across (v) and along (u) the long axis
+        let (mut u0, mut u1, mut v0, mut v1) =
+            (f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY);
+        for p in ring {
+            let (u, v) = (p.x * c + p.y * s_, -p.x * s_ + p.y * c);
+            u0 = u0.min(u);
+            u1 = u1.max(u);
+            v0 = v0.min(v);
+            v1 = v1.max(v);
+        }
+        let across = v1 - v0;
+        let lines = ((across / width).round() as usize).clamp(1, 64);
+        let back = |u: f64, v: f64| Point2::new(u * c - v * s_, u * s_ + v * c);
+        let mut polylines = Vec::with_capacity(lines);
+        for j in 0..lines {
+            let v = v0 + (j as f64 + 0.5) * across / lines as f64;
+            polylines.push(vec![back(u0 - 1.0, v), back(u1 + 1.0, v)]);
+        }
+        out.extend(clip_polylines(&one, polylines, kind, width * 0.5)?);
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -515,6 +614,31 @@ mod tests {
         let c0 = cubic(&r, 2.0, 0.2, PathKind::SparseInfill).unwrap_or_default();
         let c1 = cubic(&r, 2.0, 0.4, PathKind::SparseInfill).unwrap_or_default();
         assert_ne!(c0.first().map(|p| p.points.clone()), c1.first().map(|p| p.points.clone()));
+    }
+
+    #[test]
+    fn a_thin_wall_gets_one_line_and_gaps_are_found() {
+        // a 0.35 mm wall, 20 mm long: thinner than one 0.45 mm line
+        let wall = Region::from_loops(&[vec![
+            Point2::new(0.0, 0.0),
+            Point2::new(20.0, 0.0),
+            Point2::new(20.0, 0.35),
+            Point2::new(0.0, 0.35),
+        ]])
+        .unwrap_or_default();
+        let inner = wall.offset(-0.9).unwrap_or_default();
+        let (thin, gaps) = uncovered(&wall, 2, 0.45, &inner, 0.2).unwrap_or_default();
+        assert!(thin.area() > 6.0, "{}", thin.area());
+        assert!(gaps.area() >= thin.area() - 1e-6);
+        let lines = fill_narrow(&thin, 0.45, PathKind::GapFill).unwrap_or_default();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        let len = total(&lines);
+        assert!(len > 18.0 && len < 21.0, "{len}");
+        // a square that fits two loops leaves (almost) nothing
+        let sq = square(10.0);
+        let inner = sq.offset(-0.9).unwrap_or_default();
+        let (thin, gaps) = uncovered(&sq, 2, 0.45, &inner, 0.2).unwrap_or_default();
+        assert!(thin.is_empty() && gaps.area() < 0.5, "{} {}", thin.area(), gaps.area());
     }
 
     #[test]

@@ -57,7 +57,9 @@ pub fn path_speed(s: &PrintSettings, kind: PathKind, layer_index: usize) -> f64 
         PathKind::Skirt | PathKind::Brim => s.first_layer_speed,
         PathKind::OuterPerimeter => s.perimeter_speed * s.outer_perimeter_speed_percent / 100.0,
         PathKind::InnerPerimeter => s.perimeter_speed,
-        PathKind::SolidInfill => s.print_speed * s.solid_infill_speed_percent / 100.0,
+        PathKind::SolidInfill | PathKind::GapFill => {
+            s.print_speed * s.solid_infill_speed_percent / 100.0
+        }
         PathKind::SparseInfill => s.print_speed,
         PathKind::Raft => s.first_layer_speed.max(s.print_speed * 0.5),
         PathKind::Support | PathKind::SupportInterface => {

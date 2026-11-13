@@ -29,8 +29,6 @@ the architecture document, not to a quieter line here.
 
 - **Self-intersecting or overlapping shells** are merged by the non-zero rule, which
   is right for overlapping bodies and wrong for meshes with inverted inner shells.
-- **Thin walls / gap fill** — walls thinner than two line widths lose their shells and
-  print nothing in the gap.
 
 ## Slicing pipeline
 
@@ -46,7 +44,10 @@ the architecture document, not to a quieter line here.
 - **Infill patterns** — rectilinear, one-direction lines, grid, triangles, concentric, gyroid,
   honeycomb, wiggle, cubic and octahedral all work. No dense layers, ironing or ordered
   (monotonic) tops yet.
-- **Thin walls / gap fill** — absent.
+- **Thin walls / gap fill** — single lines along walls thinner than a line and in gaps the
+  shells leave (on by default); inner loops are skipped where they would overlap
+  themselves by more than 30 %. Gap lines use the normal line width (no variable
+  width).
 - **Seams** — nearest, aligned to a point, or scattered; no preferred-region hiding.
 - **Travel** — nearest-neighbour ordering per feature group; combing walks around holes
   inside the part.

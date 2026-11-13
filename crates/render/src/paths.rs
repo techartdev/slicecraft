@@ -29,10 +29,12 @@ pub enum PathKind {
     SupportInterface,
     /// The raft under the part.
     Raft,
+    /// Single lines in thin walls and in gaps the shells leave.
+    GapFill,
 }
 
 impl PathKind {
-    pub const ALL: [PathKind; 9] = [
+    pub const ALL: [PathKind; 10] = [
         PathKind::Skirt,
         PathKind::Brim,
         PathKind::OuterPerimeter,
@@ -42,6 +44,7 @@ impl PathKind {
         PathKind::Support,
         PathKind::SupportInterface,
         PathKind::Raft,
+        PathKind::GapFill,
     ];
 
     pub fn label(self) -> &'static str {
@@ -55,6 +58,7 @@ impl PathKind {
             PathKind::Support => "support",
             PathKind::SupportInterface => "dense support",
             PathKind::Raft => "raft",
+            PathKind::GapFill => "gap fill",
         }
     }
 }
@@ -115,7 +119,7 @@ pub fn perimeters(
         return Ok((paths, region.clone()));
     }
     for k in 0..count {
-        let shell = region.offset(-(width * 0.5 + f64::from(k) * width))?;
+        let shell = inner_shell(region, k, width)?;
         if shell.is_empty() {
             break;
         }
@@ -128,6 +132,22 @@ pub fn perimeters(
     }
     let inner = region.offset(-(f64::from(count) * width))?;
     Ok((paths, inner))
+}
+
+/// How much an inner loop may overlap itself, as a share of the line width,
+/// before the narrow part is left to gap fill instead.
+pub const INNER_LOOP_OVERLAP: f64 = 0.3;
+
+/// The centreline area of shell `k`. Inner shells keep only the part with room
+/// for both sides of the loop (within `INNER_LOOP_OVERLAP`); a loop squeezed
+/// into a narrow wall would print on top of itself.
+pub fn inner_shell(region: &Region, k: u32, width: f64) -> Result<Region, GeomError> {
+    let centre = region.offset(-(width * 0.5 + f64::from(k) * width))?;
+    if k == 0 || centre.is_empty() {
+        return Ok(centre);
+    }
+    let r = width * (1.0 - INNER_LOOP_OVERLAP) * 0.5;
+    centre.offset(-r)?.offset(r)
 }
 
 /// Parallel lines `spacing` apart at `angle` radians, clipped to `region`.

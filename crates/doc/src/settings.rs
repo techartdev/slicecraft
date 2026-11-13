@@ -148,6 +148,21 @@ impl SupportPlacement {
     const NAMES: &'static [&'static str] = &["everywhere", "from the bed only"];
 }
 
+/// What to print where two walls do not fit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThinWalls {
+    /// Only full loops.
+    Off,
+    /// One line along parts of the model too thin for a loop.
+    SingleLine,
+    /// That, and single lines in gaps between the walls and the infill.
+    GapFill,
+}
+
+impl ThinWalls {
+    pub const ALL: [ThinWalls; 3] = [ThinWalls::Off, ThinWalls::SingleLine, ThinWalls::GapFill];
+}
+
 /// The order islands (separate parts of a layer) are printed in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IslandOrder {
@@ -223,6 +238,7 @@ pub struct PrintSettings {
     pub solid_layers_bottom: u32,
     pub perimeter_order: PerimeterOrder,
     pub island_order: IslandOrder,
+    pub thin_walls: ThinWalls,
     pub seam_mode: SeamMode,
     pub seam_x: f64,
     pub seam_y: f64,
@@ -353,6 +369,7 @@ impl Default for PrintSettings {
             solid_layers_bottom: 3,
             perimeter_order: PerimeterOrder::InsideOut,
             island_order: IslandOrder::Nearest,
+            thin_walls: ThinWalls::GapFill,
             seam_mode: SeamMode::Nearest,
             seam_x: 0.0,
             seam_y: 300.0,
@@ -2041,9 +2058,9 @@ pub static SETTINGS: &[SettingSpec] = &[
         Advanced,
         "Walls",
         SettingKind::Choice(&["off", "single line", "gap fill"]),
-        Dc(0),
-        "What to print where two walls do not fit.",
-        None,
+        Dc(2),
+        "Single line: one line down parts too thin for a loop. Gap fill: also the gaps the walls leave.",
+        bind_e!(thin_walls, ThinWalls),
     ),
     row(
         "gap_fill",
