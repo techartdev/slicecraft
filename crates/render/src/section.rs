@@ -94,6 +94,8 @@ pub struct Stitched {
     pub loops: Vec<Vec<Point2>>,
     /// Chains that could not be closed and were dropped (a mesh defect).
     pub dropped_chains: usize,
+    /// Chains that could not be closed, kept when asked for (else empty).
+    pub open: Vec<Vec<Point2>>,
 }
 
 /// Join directed segments into closed loops.
@@ -103,6 +105,13 @@ pub struct Stitched {
 /// `JOIN_TOLERANCE` (in either direction), then close chains whose own gap is
 /// under `CLOSE_GAP`. Whatever is still open is dropped and counted.
 pub fn stitch(segs: &[Segment]) -> Stitched {
+    stitch_with(segs, CLOSE_GAP, false)
+}
+
+/// Like [`stitch`]: chains whose own gap is up to `close_gap` mm are closed
+/// (0 closes none), and with `keep_open` what stays open is returned in
+/// `open` instead of being dropped.
+pub fn stitch_with(segs: &[Segment], close_gap: f64, keep_open: bool) -> Stitched {
     let mut starts: HashMap<Key, Vec<usize>> = HashMap::with_capacity(segs.len());
     for (i, s) in segs.iter().enumerate() {
         starts.entry(key(s.a)).or_default().push(i);
@@ -150,25 +159,28 @@ pub fn stitch(segs: &[Segment]) -> Stitched {
     }
 
     let mut dropped = 0usize;
+    let mut kept = Vec::new();
+    let close_gap = if close_gap.is_finite() { close_gap.max(0.0) } else { 0.0 };
     if !open.is_empty() {
         if open.len() <= MAX_OPEN_CHAINS_TO_JOIN {
             join_open_chains(&mut open);
         }
         for chain in open {
             match (chain.first(), chain.last()) {
-                (Some(a), Some(b)) if chain.len() >= 3 && a.distance(*b) <= CLOSE_GAP => {
+                (Some(a), Some(b)) if chain.len() >= 3 && a.distance(*b) <= close_gap.max(1e-9) => {
                     let mut ring = chain;
                     if ring.first().zip(ring.last()).is_some_and(|(a, b)| a.same(*b)) {
                         ring.pop();
                     }
                     loops.push(ring);
                 }
+                _ if keep_open && chain.len() >= 2 => kept.push(chain),
                 _ => dropped += 1,
             }
         }
     }
     loops.retain(|l| l.len() >= 3);
-    Stitched { loops, dropped_chains: dropped }
+    Stitched { loops, dropped_chains: dropped, open: kept }
 }
 
 /// Greedily append chains whose start (or reversed end) meets another chain's end.

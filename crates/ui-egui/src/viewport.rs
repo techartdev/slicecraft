@@ -57,6 +57,7 @@ pub fn viewport(app: &mut SliceCraftApp, ui: &mut Ui) {
         height: f64::from(rect.height()),
     };
     let (shift, command) = ui.input(|i| (i.modifiers.shift, i.modifiers.command));
+    app.camera.ortho = app.prefs.ortho;
     let frame0 = app.camera.frame(vp);
 
     // support boxes: drag on the bed, the box is added on release
@@ -89,6 +90,54 @@ pub fn viewport(app: &mut SliceCraftApp, ui: &mut Ui) {
         }
     }
 
+    // a click with a support tool edits one pillar: block removes the pillar
+    // under the pointer, add puts a pillar where the pointer meets the bed
+    if let (Mode::Prepare, Some(kind)) = (app.mode, support_tool)
+        && resp.clicked()
+        && let Some(p) = resp.interact_pointer_pos()
+    {
+        let (x, y) = (f64::from(p.x), f64::from(p.y));
+        match kind {
+            SupportEditKind::Block => {
+                let (origin, dir) = frame0.ray(x, y);
+                let hit = app.support_view.as_ref().and_then(|(_, prisms)| {
+                    prisms
+                        .iter()
+                        .filter_map(|pr| pr.hit(origin, dir).map(|t| (t, pr)))
+                        .min_by(|a, b| a.0.total_cmp(&b.0))
+                        .and_then(|(_, pr)| pr.footprint())
+                });
+                match hit {
+                    Some((x0, y0, x1, y1)) => {
+                        let e = SupportEdit::columns(
+                            kind,
+                            (x0 - 0.05, y0 - 0.05),
+                            (x1 + 0.05, y1 + 0.05),
+                        );
+                        if e.is_valid() {
+                            app.run(Command::AddSupportEdit(e));
+                        }
+                    }
+                    None => app
+                        .info("No support pillar there. Turn on Show before slicing to see them."),
+                }
+            }
+            SupportEditKind::Add => {
+                if let Some(at) = frame0.bed_point(x, y) {
+                    let half = app.session.document().settings.support_pillar_size.max(1.0) / 2.0;
+                    let e = SupportEdit::columns(
+                        kind,
+                        (at.x - half, at.y - half),
+                        (at.x + half, at.y + half),
+                    );
+                    if e.is_valid() {
+                        app.run(Command::AddSupportEdit(e));
+                    }
+                }
+            }
+        }
+    }
+
     // start of a left drag: a model tool, or the camera
     if app.mode == Mode::Prepare
         && support_tool.is_none()
@@ -109,7 +158,7 @@ pub fn viewport(app: &mut SliceCraftApp, ui: &mut Ui) {
                     Tool::Move => {
                         if let Some(at) = frame0.bed_point(f64::from(p.x), f64::from(p.y)) {
                             app.drag = Some(Drag::Move { index, grab: t.translate - at });
-                            app.selected = std::iter::once(index).collect();
+                            app.selected = app.with_group(index);
                         }
                     }
                     Tool::Rotate => app.drag = Some(Drag::Rotate { index, start: t, x0: p.x }),
@@ -126,12 +175,8 @@ pub fn viewport(app: &mut SliceCraftApp, ui: &mut Ui) {
         if let Some(p) = resp.interact_pointer_pos() {
             match drag {
                 Drag::Move { index, grab } => {
-                    if let (Some(at), Some(mut t)) = (
-                        frame0.bed_point(f64::from(p.x), f64::from(p.y)),
-                        app.session.document().objects.get(index).map(|o| o.transform),
-                    ) {
-                        t.translate = Vec3::new(at.x + grab.x, at.y + grab.y, 0.0);
-                        app.place(index, t);
+                    if let Some(at) = frame0.bed_point(f64::from(p.x), f64::from(p.y)) {
+                        app.move_with_group(index, Vec3::new(at.x + grab.x, at.y + grab.y, 0.0));
                     }
                 }
                 Drag::Rotate { index, start, x0 } => {
@@ -175,12 +220,7 @@ pub fn viewport(app: &mut SliceCraftApp, ui: &mut Ui) {
     if resp.clicked() && app.mode == Mode::Prepare {
         let hit = resp.interact_pointer_pos().and_then(|p| pick(app, &frame, p));
         match (hit, command || shift) {
-            (Some(i), true) => {
-                if !app.selected.remove(&i) {
-                    app.selected.insert(i);
-                }
-            }
-            (Some(i), false) => app.selected = std::iter::once(i).collect(),
+            (Some(i), add) => app.click_select(i, add),
             (None, false) => app.selected.clear(),
             (None, true) => {}
         }
@@ -227,7 +267,13 @@ pub fn viewport(app: &mut SliceCraftApp, ui: &mut Ui) {
                         &mut b,
                         &frame,
                         geo,
-                        ModelStyle { selected: &none, support: &[], alpha: 0.15, cut_z: None },
+                        ModelStyle {
+                            selected: &none,
+                            support: &[],
+                            alpha: 0.15,
+                            cut_z: None,
+                            wireframe: false,
+                        },
                     );
                 }
                 let p = &app.preview;
@@ -245,6 +291,7 @@ pub fn viewport(app: &mut SliceCraftApp, ui: &mut Ui) {
                     show_retractions: p.show_retractions,
                     width_mm: app.session.document().settings.line_width(),
                     speed_range: scene::speed_range(layers),
+                    flow_range: scene::flow_range(layers),
                     z_range: (0.0, layers.last().map_or(1.0, |l| l.z)),
                 };
                 head = scene::toolpaths(&mut b, &frame, layers, &style);
@@ -262,8 +309,13 @@ pub fn viewport(app: &mut SliceCraftApp, ui: &mut Ui) {
                 _ => &no_support,
             };
             if let Some((_, geo)) = &app.geometry {
-                let style =
-                    ModelStyle { selected: &app.selected, support, alpha: 1.0, cut_z: app.section };
+                let style = ModelStyle {
+                    selected: &app.selected,
+                    support,
+                    alpha: 1.0,
+                    cut_z: app.section,
+                    wireframe: app.prefs.wireframe,
+                };
                 scene::models(&mut b, &frame, geo, style);
             }
             let doc = app.session.document();
@@ -306,10 +358,10 @@ fn overlays(app: &mut SliceCraftApp, ui: &mut Ui, rect: Rect, head: Option<Vec3>
         }
         (Mode::Prepare, Tool::Scale) => "drag up/down to scale the selection",
         (Mode::Prepare, Tool::SupportAdd) => {
-            "drag a box on the bed: every surface facing down inside it gets support · Q: back to select"
+            "click: one pillar here · drag a box: every surface facing down inside it gets support · Q: back to select"
         }
         (Mode::Prepare, Tool::SupportBlock) => {
-            "drag a box on the bed: no support inside it · Q: back to select"
+            "click a pillar to remove it · drag a box: no support inside it · Q: back to select"
         }
         (Mode::Preview, _) => {
             "drag: orbit · right-drag: pan · wheel: zoom · Up/Down: layer · Space: play"

@@ -193,8 +193,16 @@ where
 
 /// The models as they sit on the bed, each dropped so its lowest point is z = 0.
 pub fn bed_meshes(doc: &Document) -> Result<Vec<Mesh>, EngineError> {
+    role_meshes(doc, slicecraft_doc::ModelRole::Print)
+}
+
+/// The visible models of one role as they sit on the bed.
+pub fn role_meshes(
+    doc: &Document,
+    role: slicecraft_doc::ModelRole,
+) -> Result<Vec<Mesh>, EngineError> {
     let mut out = Vec::new();
-    for o in doc.objects.iter().filter(|o| o.visible) {
+    for o in doc.objects.iter().filter(|o| o.visible && o.role == role) {
         let world = o.world_mesh()?;
         let drop = world.bounds().min().z;
         let mesh = if drop == 0.0 {
@@ -208,14 +216,40 @@ pub fn bed_meshes(doc: &Document) -> Result<Vec<Mesh>, EngineError> {
 }
 
 /// Fill `region` with `pattern` at an average line spacing of `spacing`.
+/// Parallel fill lines, each island's lines joined into zigzags along its
+/// edge: fewer travels and retractions, and short strokes in narrow areas
+/// become one longer path.
+fn linked_lines(
+    region: &Region,
+    spacing: f64,
+    angle: f64,
+    kind: PathKind,
+    width: f64,
+) -> Result<Vec<ToolPath>, EngineError> {
+    let mut out = Vec::new();
+    // dense lines get linked at the edge: they stop half a link short of it,
+    // so the links add no material over unlinked lines
+    let dense = spacing <= width * 1.5;
+    for poly in &region.polygons {
+        let one = Region { polygons: vec![poly.clone()] };
+        let area = if dense { one.offset(-0.5 * width)? } else { one.clone() };
+        let lines = line_infill(&area, spacing, angle, kind)?;
+        // only neighbours a few line widths apart are linked: dense fill
+        // becomes zigzags, sparse lines stay apart (a link there would be a
+        // long extrusion along the wall)
+        out.extend(slicecraft_render::paths::zigzag(lines, &one, width * 3.0));
+    }
+    Ok(out)
+}
+
 fn pattern_infill(
     region: &Region,
     pattern: InfillPattern,
     spacing: f64,
     angle: f64,
     kind: PathKind,
-    z: f64,
-    layer: usize,
+    (z, layer): (f64, usize),
+    width: f64,
 ) -> Result<Vec<ToolPath>, EngineError> {
     use slicecraft_render::patterns;
     use std::f64::consts::{FRAC_PI_2, FRAC_PI_3};
@@ -249,7 +283,7 @@ fn pattern_infill(
         InfillPattern::Cubic => out.extend(patterns::cubic(region, spacing, z, kind)?),
         InfillPattern::Octahedral => out.extend(patterns::octahedral(region, spacing, z, kind)?),
         InfillPattern::Rectilinear | InfillPattern::Lines => {
-            out.extend(line_infill(region, spacing, angle, kind)?);
+            out.extend(linked_lines(region, spacing, angle, kind, width)?);
         }
     }
     Ok(out)
@@ -279,7 +313,7 @@ fn rings_around(
     for k in 0..count {
         let ring = outline.offset(gap + w * 0.5 + f64::from(k) * w)?;
         for p in &ring.polygons {
-            out.push(ToolPath { kind, points: p.outer.clone(), closed: true });
+            out.push(ToolPath { kind, points: p.outer.clone(), closed: true, tool: 0 });
         }
     }
     Ok(out)
@@ -299,14 +333,55 @@ fn gap_fill(
     w: f64,
 ) -> Result<Vec<ToolPath>, EngineError> {
     use slicecraft_doc::ThinWalls;
-    use slicecraft_render::patterns::{fill_narrow, uncovered};
+    use slicecraft_render::patterns::uncovered;
     if s.thin_walls == ThinWalls::Off {
         return Ok(Vec::new());
     }
-    let min_width = w * 0.3;
+    let min_width = w * s.single_line_min_width / 100.0;
     let (thin, gaps) = uncovered(region, s.perimeter_count, w, inner, min_width)?;
     let area = if s.thin_walls == ThinWalls::GapFill { gaps } else { thin };
-    Ok(fill_narrow(&area, w, PathKind::GapFill)?)
+    let pieces = slicecraft_render::patterns::fill_narrow_with(
+        &area,
+        w,
+        w * s.single_line_max_width / 100.0,
+        PathKind::GapFill,
+    )?;
+    // pieces that meet end to end print as one line: fewer stops and travels
+    let (open, closed): (Vec<ToolPath>, Vec<ToolPath>) =
+        pieces.into_iter().partition(|p| !p.closed);
+    let joined = slicecraft_render::patterns::join_polylines(
+        open.into_iter().map(|p| p.points).collect(),
+        w * 0.75,
+    );
+    let mut out = closed;
+    out.extend(joined.into_iter().filter(|l| l.len() >= 2).map(|points| ToolPath {
+        kind: PathKind::GapFill,
+        points,
+        closed: false,
+        tool: 0,
+    }));
+    Ok(out)
+}
+
+/// Layer slots that follow height zones changing the layer height: each
+/// layer takes the height the zones give at its bottom.
+pub fn zoned_schedule(doc: &Document, model_top: f64) -> Result<Vec<LayerSlot>, EngineError> {
+    let first = doc.settings.first_layer_height;
+    let mut out = vec![LayerSlot { index: 0, top: first, height: first }];
+    let mut top = first;
+    while top < model_top {
+        if out.len() >= MAX_LAYERS {
+            return Err(EngineError::TooManyLayers);
+        }
+        let h = doc.settings_at(top + 1e-6).layer_height.clamp(0.01, 2.0);
+        let slot = LayerSlot { index: out.len(), top: top + h, height: h };
+        if slot.cut_z() >= model_top {
+            break;
+        }
+        top += h;
+        out.push(slot);
+    }
+    Ok(out)
 }
 
 /// Adaptive layer slots: each layer as tall as the surface allows. A surface
@@ -386,39 +461,109 @@ fn compensate(region: Region, outer: f64, hole: f64) -> Result<Region, EngineErr
     Ok(outers.offset(outer)?.difference(&holes.offset(hole)?)?)
 }
 
+/// Layer slots, each layer's part region, the open loops dropped while
+/// stitching, each layer's region of models used as support, and the open
+/// outlines kept to print as lines.
+struct Sections {
+    slots: Vec<LayerSlot>,
+    regions: Vec<Region>,
+    dropped_chains: usize,
+    role_support: Vec<Region>,
+    open: Vec<Vec<Vec<Point2>>>,
+}
+
+fn fill_mode(rule: slicecraft_doc::FillRule) -> slicecraft_geom::region::FillMode {
+    use slicecraft_doc::FillRule;
+    use slicecraft_geom::region::FillMode;
+    match rule {
+        FillRule::Merge => FillMode::Merge,
+        FillRule::Alternate => FillMode::Alternate,
+        FillRule::Outlines => FillMode::Outlines,
+    }
+}
+
 /// The layer schedule and each layer's model region, plus the open loops
-/// dropped while stitching.
+/// dropped while stitching and the support-role regions.
 fn layer_regions(
     doc: &Document,
     observer: &mut dyn SliceObserver,
-) -> Result<(Vec<LayerSlot>, Vec<Region>, usize), EngineError> {
+) -> Result<Sections, EngineError> {
     doc.sliceable()?;
     let s = &doc.settings;
     let meshes = bed_meshes(doc)?;
-    let top = meshes.iter().map(|m| m.bounds().max().z).fold(0.0f64, f64::max);
+    let cutters = role_meshes(doc, slicecraft_doc::ModelRole::Cutter)?;
+    let supports = role_meshes(doc, slicecraft_doc::ModelRole::Support)?;
+    let top = meshes.iter().chain(&supports).map(|m| m.bounds().max().z).fold(0.0f64, f64::max);
     let slots = if s.adaptive_layers {
         adaptive_schedule(&meshes, s, top)?
+    } else if doc
+        .zones
+        .iter()
+        .any(|z| z.objects.is_empty() && z.overrides.contains_key("layer_height"))
+    {
+        zoned_schedule(doc, top)?
     } else {
         layer_schedule(s.first_layer_height, s.layer_height, top)?
     };
     if slots.is_empty() {
         return Err(EngineError::NothingToSlice);
     }
+    use slicecraft_doc::OpenOutlines;
+    let close_gap = match s.open_outline_mode {
+        OpenOutlines::Drop => 0.0,
+        OpenOutlines::CloseGaps | OpenOutlines::Lines => s.slice_close_gap,
+    };
+    let keep_open = s.open_outline_mode == OpenOutlines::Lines;
+    let mode = fill_mode(s.fill_rule);
     let sections = par_map(&slots, Stage::Sections, observer, |_, slot| {
         let mut loops = Vec::new();
         let mut dropped = 0usize;
+        let mut open = Vec::new();
         for m in &meshes {
-            let layer = cross_section(m, slot.cut_z());
+            let layer =
+                slicecraft_render::cross_section_with(m, slot.cut_z(), close_gap, keep_open);
             dropped += layer.dropped_chains;
             loops.extend(layer.loops.into_iter().map(|l| l.points));
+            open.extend(layer.open);
         }
-        let region =
-            compensate(Region::from_loops(&loops)?, s.outer_size_offset, s.hole_size_offset)?;
-        Ok((region, dropped))
+        let region = compensate(
+            Region::from_loops_mode(&loops, mode)?,
+            s.outer_size_offset,
+            s.hole_size_offset,
+        )?;
+        Ok((region, dropped, open))
     })?;
-    let dropped_chains: usize = sections.iter().map(|(_, d)| d).sum();
-    let regions: Vec<Region> = sections.into_iter().map(|(r, _)| r).collect();
-    Ok((slots, regions, dropped_chains))
+    let dropped_chains: usize = sections.iter().map(|(_, d, _)| d).sum();
+    let mut open_lines = Vec::with_capacity(sections.len());
+    let mut regions: Vec<Region> = Vec::with_capacity(sections.len());
+    for (r, _, o) in sections {
+        regions.push(r);
+        open_lines.push(o);
+    }
+    // models of the other roles, cut at the same heights
+    let section_of = |meshes: &[Mesh], z: f64| -> Result<Region, EngineError> {
+        let mut loops = Vec::new();
+        for m in meshes {
+            loops.extend(cross_section(m, z).loops.into_iter().map(|l| l.points));
+        }
+        Ok(Region::from_loops(&loops)?)
+    };
+    if !cutters.is_empty() {
+        let cut = par_map(&slots, Stage::Sections, observer, |_, slot| {
+            section_of(&cutters, slot.cut_z())
+        })?;
+        for (r, c) in regions.iter_mut().zip(cut) {
+            if !c.is_empty() {
+                *r = r.difference(&c)?;
+            }
+        }
+    }
+    let role_support = if supports.is_empty() {
+        Vec::new()
+    } else {
+        par_map(&slots, Stage::Sections, observer, |_, slot| section_of(&supports, slot.cut_z()))?
+    };
+    Ok(Sections { slots, regions, dropped_chains, role_support, open: open_lines })
 }
 
 /// One layer of a support preview.
@@ -435,7 +580,7 @@ pub fn support_preview(
     doc: &Document,
     observer: &mut dyn SliceObserver,
 ) -> Result<Vec<SupportPreviewLayer>, EngineError> {
-    let (slots, regions, _) = layer_regions(doc, observer)?;
+    let Sections { slots, regions, .. } = layer_regions(doc, observer)?;
     let s = &doc.settings;
     let layers = crate::support::support_layers(
         &regions,
@@ -535,6 +680,134 @@ fn with_raft(raft: Raft, layers: Vec<LayerPaths>, skirt: Vec<ToolPath>) -> Vec<L
     out
 }
 
+/// The tool a set of settings prints with.
+fn tool_of(s: &slicecraft_doc::PrintSettings) -> u8 {
+    u8::try_from(s.tool_number.min(15)).unwrap_or(0)
+}
+
+/// Group each layer's paths into one run per tool (the tool that ended the
+/// layer below first, so a layer changes tools as few times as it can), and
+/// on every layer up to the last one that changes tools, print the ooze
+/// shield and a share of the prime tower before each run.
+fn arrange_tools(
+    layers: &mut [LayerPaths],
+    regions: &[Region],
+    slots: &[LayerSlot],
+    s: &slicecraft_doc::PrintSettings,
+    w: f64,
+    base_tool: u8,
+) -> Result<(), EngineError> {
+    let tools_on = |l: &LayerPaths| {
+        let mut t: Vec<u8> = l.paths.iter().map(|p| p.tool).collect();
+        t.sort_unstable();
+        t.dedup();
+        t
+    };
+    let single = |t: &Vec<u8>| t.is_empty() || t.as_slice() == [base_tool];
+    let Some(last_multi) = layers.iter().rposition(|l| !single(&tools_on(l))) else {
+        return Ok(());
+    };
+    // the shield, from the top down: around this layer's part, and leaning
+    // in at most the shield's slope from the shield above
+    let mut shields: Vec<Region> = vec![Region::new(); last_multi + 1];
+    if s.ooze_shield_enabled {
+        let slope = s.ooze_shield_angle.clamp(0.0, 89.0).to_radians().tan();
+        let mut above: Option<Region> = None;
+        for i in (0..=last_multi).rev() {
+            let own = match regions.get(i) {
+                Some(r) if !r.is_empty() => r.offset(s.ooze_shield_distance)?,
+                _ => Region::new(),
+            };
+            let here = match &above {
+                Some(a) => {
+                    let h = slots.get(i + 1).map_or(s.layer_height, |sl| sl.height);
+                    let leaned = if slope > 0.0 { a.offset(-h * slope)? } else { a.clone() };
+                    if own.is_empty() { leaned } else { own.union(&leaned)? }
+                }
+                None => own,
+            };
+            if let Some(slot) = shields.get_mut(i) {
+                *slot = here.clone();
+            }
+            above = Some(here);
+        }
+    }
+    let half = s.prime_tower_size / 2.0;
+    let (cx, cy) = (s.prime_tower_x, s.prime_tower_y);
+    let tower_part =
+        |j: usize, k: usize, i: usize, tool: u8| -> Result<Vec<ToolPath>, EngineError> {
+            let k = k.max(1) as f64;
+            let x0 = cx - half + 2.0 * half * j as f64 / k;
+            let x1 = cx - half + 2.0 * half * (j as f64 + 1.0) / k;
+            let rect = vec![
+                Point2::new(x0, cy - half),
+                Point2::new(x1, cy - half),
+                Point2::new(x1, cy + half),
+                Point2::new(x0, cy + half),
+            ];
+            let area = Region::from_loops(&[rect])?;
+            let angle = if i.is_multiple_of(2) {
+                std::f64::consts::FRAC_PI_4
+            } else {
+                -std::f64::consts::FRAC_PI_4
+            };
+            let mut out: Vec<ToolPath> = Vec::new();
+            if j == 0 {
+                // one wall around the whole tower keeps it straight
+                let ring = vec![
+                    Point2::new(cx - half, cy - half),
+                    Point2::new(cx + half, cy - half),
+                    Point2::new(cx + half, cy + half),
+                    Point2::new(cx - half, cy + half),
+                ];
+                out.push(ToolPath { kind: PathKind::PrimeTower, points: ring, closed: true, tool });
+            }
+            let inner = area.offset(-0.5 * w)?;
+            out.extend(
+                line_infill(&inner, w, angle, PathKind::PrimeTower)?
+                    .into_iter()
+                    .map(|p| ToolPath { tool, ..p }),
+            );
+            Ok(out)
+        };
+    let mut current = layers.first().and_then(|l| l.paths.first()).map_or(base_tool, |p| p.tool);
+    for (i, layer) in layers.iter_mut().enumerate() {
+        let mut tools = tools_on(layer);
+        if tools.is_empty() {
+            continue;
+        }
+        if let Some(pos) = tools.iter().position(|&t| t == current) {
+            let t = tools.remove(pos);
+            tools.insert(0, t);
+        }
+        let paths = std::mem::take(&mut layer.paths);
+        let mut out = Vec::with_capacity(paths.len() + 16);
+        for (j, &t) in tools.iter().enumerate() {
+            if i <= last_multi {
+                if j == 0
+                    && let Some(shield) = shields.get(i)
+                {
+                    for poly in &shield.polygons {
+                        out.push(ToolPath {
+                            kind: PathKind::OozeShield,
+                            points: poly.outer.clone(),
+                            closed: true,
+                            tool: t,
+                        });
+                    }
+                }
+                if s.prime_tower_enabled {
+                    out.extend(tower_part(j, tools.len(), i, t)?);
+                }
+            }
+            out.extend(paths.iter().filter(|p| p.tool == t).cloned());
+        }
+        current = tools.last().copied().unwrap_or(current);
+        layer.paths = out;
+    }
+    Ok(())
+}
+
 /// One piece of slicing work: a layer, or the part of a layer that a model
 /// zone covers, with the settings that apply there.
 struct Job {
@@ -598,6 +871,130 @@ fn layer_jobs(
     Ok(jobs)
 }
 
+fn point_segment_distance(p: Point2, a: Point2, b: Point2) -> f64 {
+    let (dx, dy) = (b.x - a.x, b.y - a.y);
+    let len2 = dx * dx + dy * dy;
+    let t = if len2 > 0.0 {
+        (((p.x - a.x) * dx + (p.y - a.y) * dy) / len2).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    p.distance(Point2::new(a.x + t * dx, a.y + t * dy))
+}
+
+/// Distance from `p` to a path's line, open or closed.
+fn path_distance(p: Point2, path: &ToolPath) -> f64 {
+    let n = path.points.len();
+    let segs = if path.closed { n } else { n.saturating_sub(1) };
+    let mut best = path.points.first().map_or(f64::INFINITY, |q| q.distance(p));
+    for i in 0..segs {
+        if let (Some(a), Some(b)) = (path.points.get(i), path.points.get((i + 1) % n)) {
+            best = best.min(point_segment_distance(p, *a, *b));
+        }
+    }
+    best
+}
+
+/// Walls in sets: every inner wall joins the outer wall of the outline it
+/// follows, and each set is printed whole (inside first or outside first)
+/// before travelling to the nearest next set. Fewer hops between letters or
+/// holes mean fewer retractions.
+fn order_walls(
+    paths: Vec<ToolPath>,
+    from: Point2,
+    inside_first: bool,
+    crosses: &dyn Fn(Point2, Point2) -> bool,
+) -> (Vec<ToolPath>, Point2) {
+    if paths.len() > 20_000 {
+        return order_paths(paths, from);
+    }
+    let (gaps, paths): (Vec<ToolPath>, Vec<ToolPath>) =
+        paths.into_iter().partition(|p| p.kind == PathKind::GapFill);
+    let (outers, inners): (Vec<ToolPath>, Vec<ToolPath>) =
+        paths.into_iter().partition(|p| p.kind == PathKind::OuterPerimeter);
+    // outline boxes to find candidates quickly
+    let boxes: Vec<(f64, f64, f64, f64)> = outers
+        .iter()
+        .map(|o| {
+            o.points.iter().fold(
+                (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY),
+                |b, q| (b.0.min(q.x), b.1.min(q.y), b.2.max(q.x), b.3.max(q.y)),
+            )
+        })
+        .collect();
+    let mut sets: Vec<(Vec<ToolPath>, Vec<ToolPath>, Vec<ToolPath>)> =
+        outers.into_iter().map(|o| (Vec::new(), vec![o], Vec::new())).collect();
+    let mut loose: Vec<(Vec<ToolPath>, Vec<ToolPath>, Vec<ToolPath>)> = Vec::new();
+    let tagged = inners.into_iter().map(|p| (p, false)).chain(gaps.into_iter().map(|p| (p, true)));
+    for (w, is_gap) in tagged {
+        let Some(at) = w.start() else { continue };
+        let mut best: Option<(f64, usize)> = None;
+        for (k, b) in boxes.iter().enumerate() {
+            // an inner wall lies inside its outline's box, or close to it
+            let reach = 5.0;
+            if at.x < b.0 - reach || at.x > b.2 + reach || at.y < b.1 - reach || at.y > b.3 + reach
+            {
+                continue;
+            }
+            let Some((_, outer, _)) = sets.get(k) else { continue };
+            let d = outer.first().map_or(f64::INFINITY, |o| path_distance(at, o));
+            if best.is_none_or(|(bd, _)| d < bd) {
+                best = Some((d, k));
+            }
+        }
+        match (best.and_then(|(_, k)| sets.get_mut(k)), is_gap) {
+            (Some(set), false) => set.0.push(w),
+            (Some(set), true) => set.2.push(w),
+            (None, false) => loose.push((vec![w], Vec::new(), Vec::new())),
+            (None, true) => loose.push((Vec::new(), Vec::new(), vec![w])),
+        }
+    }
+    sets.extend(loose);
+    // the nearest point of a set, and its distance
+    let near = |set: &(Vec<ToolPath>, Vec<ToolPath>, Vec<ToolPath>), at: Point2| {
+        set.0
+            .iter()
+            .chain(set.1.iter())
+            .chain(set.2.iter())
+            .flat_map(|p| p.points.iter())
+            .map(|q| (q.distance_sq(at), *q))
+            .fold((f64::INFINITY, at), |a, b| if b.0 < a.0 { b } else { a })
+    };
+    let mut out = Vec::new();
+    let mut at = from;
+    while !sets.is_empty() {
+        // among the nearest few sets, one reachable without leaving the part
+        let mut ranked: Vec<(f64, usize, Point2)> = sets
+            .iter()
+            .enumerate()
+            .map(|(i, set)| {
+                let (d, q) = near(set, at);
+                (d, i, q)
+            })
+            .collect();
+        ranked.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut k = ranked.first().map_or(0, |r| r.1);
+        let mut best = f64::INFINITY;
+        for (d, i, q) in ranked.into_iter().take(6) {
+            let cost = d.sqrt() + if crosses(at, q) { 10.0 } else { 0.0 };
+            if cost < best {
+                best = cost;
+                k = i;
+            }
+        }
+        let (ins, outs, fill) = sets.swap_remove(k);
+        let (first, second) = if inside_first { (ins, outs) } else { (outs, ins) };
+        let (a, end) = order_paths(first, at);
+        let (b, end) = order_paths(second, end);
+        let (c, end) = order_paths(fill, end);
+        out.extend(a);
+        out.extend(b);
+        out.extend(c);
+        at = end;
+    }
+    (out, at)
+}
+
 /// Direction of a polygon's long axis, radians, from its outline's
 /// edge-weighted second moments.
 fn long_axis(ring: &[Point2]) -> f64 {
@@ -645,10 +1042,11 @@ fn feature_groups(paths: Vec<ToolPath>, s: &slicecraft_doc::PrintSettings) -> Ve
             _ => sparse.push(p),
         }
     }
-    let walls = match s.perimeter_order {
-        PerimeterOrder::InsideOut => [inner, outer],
-        PerimeterOrder::OutsideIn => [outer, inner],
-    };
+    // inner and outer walls go together: each outline's walls are printed as
+    // a set before the next outline's (see `order_walls`)
+    let mut together = inner;
+    together.extend(outer);
+    let walls = [together, Vec::new()];
     let mut groups = Vec::with_capacity(5);
     if s.infill_before_perimeters {
         groups.push(solid);
@@ -755,18 +1153,150 @@ fn island_key(groups: &[Vec<ToolPath>]) -> f64 {
 }
 
 /// Slice a document into toolpaths and G-code.
+/// Toolpaths for every layer, before G-code: the layers, each layer's
+/// settings, the slice notes and how many open outlines were dropped.
+struct Layered {
+    layers: Vec<LayerPaths>,
+    settings: Vec<slicecraft_doc::PrintSettings>,
+    warnings: Vec<String>,
+    dropped_chains: usize,
+}
+
 pub fn slice_document(
     doc: &Document,
     observer: &mut dyn SliceObserver,
 ) -> Result<SliceOutput, EngineError> {
     let s = &doc.settings;
+    let parts = doc
+        .objects
+        .iter()
+        .filter(|o| o.visible && o.role == slicecraft_doc::ModelRole::Print)
+        .count();
+    let l = if s.sequential_printing && parts > 1 {
+        sequential(doc, observer)?
+    } else {
+        slice_layers(doc, observer)?
+    };
+    let per_layer: Vec<&slicecraft_doc::PrintSettings> = l.settings.iter().collect();
+    let out = slicecraft_io::gcode::write_gcode_layers(&l.layers, s, &per_layer, &doc.bed);
+    Ok(SliceOutput {
+        layers: l.layers,
+        gcode: out.text,
+        stats: SliceStats {
+            gcode: out.stats,
+            dropped_chains: l.dropped_chains,
+            warnings: l.warnings,
+        },
+    })
+}
+
+/// Sequential printing: each part sliced alone, printed to its top before
+/// the next. Refused when the parts stand too close for the head or a part
+/// other than the last is taller than the gantry clearance.
+fn sequential(doc: &Document, observer: &mut dyn SliceObserver) -> Result<Layered, EngineError> {
+    use slicecraft_doc::ModelRole;
+    let s = &doc.settings;
+    let parts: Vec<usize> = doc
+        .objects
+        .iter()
+        .enumerate()
+        .filter(|(_, o)| o.visible && o.role == ModelRole::Print)
+        .map(|(i, _)| i)
+        .collect();
+    // footprints and heights, as placed
+    let mut boxes = Vec::with_capacity(parts.len());
+    for &i in &parts {
+        let Some(o) = doc.objects.get(i) else { continue };
+        boxes.push((i, o.world_mesh()?.bounds()));
+    }
+    // shortest first, so the tallest goes last and may rise above the gantry
+    boxes.sort_by(|a, b| a.1.size().z.total_cmp(&b.1.size().z));
+    for (k, (i, b)) in boxes.iter().enumerate() {
+        if k + 1 < boxes.len() && b.size().z > s.gantry_height {
+            return Err(EngineError::File(format!(
+                "one model at a time: model {i} is {:.1} mm tall, above the {:.1} mm gantry clearance; only the last model may be taller",
+                b.size().z,
+                s.gantry_height
+            )));
+        }
+        for (j, c) in boxes.iter().skip(k + 1) {
+            let dx = (c.min().x - b.max().x).max(b.min().x - c.max().x).max(0.0);
+            let dy = (c.min().y - b.max().y).max(b.min().y - c.max().y).max(0.0);
+            if dx.hypot(dy) < s.head_clearance {
+                return Err(EngineError::File(format!(
+                    "one model at a time: models {i} and {j} stand {:.1} mm apart; the head needs {:.1} mm",
+                    dx.hypot(dy),
+                    s.head_clearance
+                )));
+            }
+        }
+    }
+    let mut out = Layered {
+        layers: Vec::new(),
+        settings: Vec::new(),
+        warnings: Vec::new(),
+        dropped_chains: 0,
+    };
+    for (k, (i, _)) in boxes.iter().enumerate() {
+        // this part alone, with the models that cut it; zones that name it follow it
+        let mut sub = doc.clone();
+        let mut keep = Vec::new();
+        for (j, o) in doc.objects.iter().enumerate() {
+            let take = j == *i
+                || (o.visible && o.role == ModelRole::Cutter)
+                || (k == 0 && o.visible && o.role == ModelRole::Support);
+            if take {
+                keep.push(j);
+            }
+        }
+        sub.objects = keep.iter().filter_map(|&j| doc.objects.get(j).cloned()).collect();
+        sub.zones = doc
+            .zones
+            .iter()
+            .filter_map(|z| {
+                let mut z = z.clone();
+                if z.objects.is_empty() {
+                    return Some(z);
+                }
+                z.objects =
+                    z.objects.iter().filter_map(|o| keep.iter().position(|j| j == o)).collect();
+                (!z.objects.is_empty()).then_some(z)
+            })
+            .collect();
+        // only the first part gets a skirt
+        if k > 0 {
+            sub.settings.skirt_enabled = false;
+        }
+        let mut l = slice_layers(&sub, observer)?;
+        out.layers.append(&mut l.layers);
+        out.settings.append(&mut l.settings);
+        out.dropped_chains += l.dropped_chains;
+        for w in l.warnings {
+            if !out.warnings.contains(&w) {
+                out.warnings.push(w);
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn slice_layers(doc: &Document, observer: &mut dyn SliceObserver) -> Result<Layered, EngineError> {
+    let s = &doc.settings;
     let w = s.line_width();
     // 1. regions
-    let (slots, regions, dropped_chains) = layer_regions(doc, observer)?;
+    let Sections { slots, regions, dropped_chains, role_support, open: open_lines } =
+        layer_regions(doc, observer)?;
 
     // 2. support, from the model's layers
     let support_areas =
         crate::support::support_layers(&regions, &slots, s, w, &doc.support_edits, observer)?;
+    // models used as support print as support, where they stand
+    let mut support_areas = support_areas;
+    for (layer, extra) in support_areas.iter_mut().zip(&role_support) {
+        if !extra.is_empty() {
+            layer.body = layer.body.union(extra)?;
+        }
+    }
     let support_first = match support_areas.first() {
         Some(l) if !l.is_empty() => l.area()?,
         _ => Region::new(),
@@ -776,6 +1306,10 @@ pub fn slice_document(
         crate::support::support_paths(layer, i, s, w)
     })?;
     drop(support_areas);
+    let base_tool = tool_of(s);
+    for p in support_toolpaths.iter_mut().flatten() {
+        p.tool = base_tool;
+    }
 
     // 3. per-layer settings (height zones) and the parts of each layer that
     // model zones give their own settings
@@ -802,8 +1336,12 @@ pub fn slice_document(
         let base_angle = s.infill_angle.to_radians();
         let w = slicecraft_io::gcode::layer_line_width(s, i);
         let overlap = s.infill_overlap / 100.0 * w;
-        let sparse_spacing =
-            if s.infill_percentage > 0.0 { Some(w * 100.0 / s.infill_percentage) } else { None };
+        let infill_w = w * s.infill_width_percent / 100.0;
+        let sparse_spacing = if s.infill_percentage > 0.0 {
+            Some(infill_w * 100.0 / s.infill_percentage)
+        } else {
+            None
+        };
         if sh.inner.is_empty() {
             return Ok(Vec::new());
         }
@@ -832,6 +1370,13 @@ pub fn slice_document(
             }
             _ => sh.inner.clone(),
         };
+        // reinforcement: whole solid layers at a fixed interval
+        let every = s.solid_every_layers as usize;
+        let solid = if every > 0 && i > 0 && i % every < s.solid_every_count.max(1) as usize {
+            sh.inner.clone()
+        } else {
+            solid
+        };
         let mut solid = solid;
         let mut sparse = sh.inner.difference(&solid)?;
         // small sparse islands are stronger solid
@@ -855,6 +1400,8 @@ pub fn slice_document(
         }
         let turn = s.infill_alternate && i % 2 == 1;
         let angle = if turn { base_angle + std::f64::consts::FRAC_PI_2 } else { base_angle };
+        let solid_angle = angle + s.solid_angle_offset.to_radians();
+        let solid_base = base_angle + s.solid_angle_offset.to_radians();
         // solid splits into bridges (air below), top surfaces (air above) and the rest
         let mut bridge = Region::new();
         if s.bridging_enabled && i > 0 && !solid.is_empty() {
@@ -873,8 +1420,8 @@ pub fn slice_document(
         let solid_fill = |area: &Region, kind: PathKind| -> Result<Vec<ToolPath>, EngineError> {
             let grown = area.offset(overlap)?;
             Ok(match s.solid_pattern {
-                SolidPattern::Rectilinear => line_infill(&grown, w, angle, kind)?,
-                SolidPattern::Lines => line_infill(&grown, w, base_angle, kind)?,
+                SolidPattern::Rectilinear => linked_lines(&grown, w, solid_angle, kind, w)?,
+                SolidPattern::Lines => linked_lines(&grown, w, solid_base, kind, w)?,
                 SolidPattern::Concentric => concentric_infill(area, w, kind)?,
             })
         };
@@ -941,8 +1488,8 @@ pub fn slice_document(
                 spacing,
                 a,
                 PathKind::SparseInfill,
-                slots.get(i).map_or(0.0, LayerSlot::cut_z),
-                i,
+                (slots.get(i).map_or(0.0, LayerSlot::cut_z), i),
+                infill_w,
             )?);
         }
         Ok(paths)
@@ -952,11 +1499,22 @@ pub fn slice_document(
     let mut per_layer_shells: Vec<Vec<ToolPath>> = vec![Vec::new(); n];
     let mut per_layer_infill: Vec<Vec<ToolPath>> = vec![Vec::new(); n];
     for ((job, sh), fill) in jobs.iter().zip(shelled).zip(infilled) {
+        let tool = tool_of(&job.settings);
         if let Some(v) = per_layer_shells.get_mut(job.layer) {
-            v.extend(sh.shells);
+            v.extend(sh.shells.into_iter().map(|p| ToolPath { tool, ..p }));
         }
         if let Some(v) = per_layer_infill.get_mut(job.layer) {
-            v.extend(fill);
+            v.extend(fill.into_iter().map(|p| ToolPath { tool, ..p }));
+        }
+    }
+    for (shells, open) in per_layer_shells.iter_mut().zip(&open_lines) {
+        for chain in open {
+            shells.push(ToolPath {
+                kind: PathKind::OuterPerimeter,
+                points: chain.clone(),
+                closed: false,
+                tool: base_tool,
+            });
         }
     }
     let shelled: Vec<Shelled> = per_layer_shells
@@ -979,6 +1537,7 @@ pub fn slice_document(
     } else {
         Vec::new()
     };
+    let brim: Vec<ToolPath> = brim.into_iter().map(|p| ToolPath { tool: base_tool, ..p }).collect();
     // a skirt goes around the brim, not through it
     let brim_reach = if s.brim_enabled { f64::from(s.brim_loops) * w0 } else { 0.0 };
     let skirt = if s.skirt_enabled {
@@ -986,9 +1545,12 @@ pub fn slice_document(
     } else {
         Vec::new()
     };
+    let skirt: Vec<ToolPath> =
+        skirt.into_iter().map(|p| ToolPath { tool: base_tool, ..p }).collect();
 
     // 6. order everything
-    let mut at = Point2::new(0.0, 0.0);
+    let (hx, hy) = s.homing_corner.point(doc.bed.width, doc.bed.depth);
+    let mut at = Point2::new(hx, hy);
     let mut layers = Vec::with_capacity(n);
     for (i, (slot, (sh, infill))) in slots.iter().zip(shelled.into_iter().zip(infilled)).enumerate()
     {
@@ -1007,10 +1569,22 @@ pub fn slice_document(
             pre.push(brim.clone());
         }
         if let Some(sup) = support_toolpaths.get_mut(i) {
-            pre.push(std::mem::take(sup));
+            let mut sup = std::mem::take(sup);
+            // support printed once per N layers, N times thicker
+            let every = s.support_every_layers.max(1) as usize;
+            if every > 1 && i > 0 && (i + 1) % every != 0 {
+                sup.retain(|p| p.kind != PathKind::Support);
+            }
+            pre.push(sup);
         }
         let mut model: Vec<ToolPath> = sh.shells;
-        model.extend(infill);
+        if s.infill_min_length > 0.0 {
+            model.extend(infill.into_iter().filter(|p| {
+                p.kind != PathKind::SparseInfill || p.closed || p.length() >= s.infill_min_length
+            }));
+        } else {
+            model.extend(infill);
+        }
         if s.vase_mode && i >= s.solid_layers_bottom as usize {
             let wall = model
                 .into_iter()
@@ -1051,6 +1625,18 @@ pub fn slice_document(
                 }
                 let end = g.last().and_then(ToolPath::end).unwrap_or(*at);
                 (g, end)
+            } else if g.first().is_some_and(|p| {
+                matches!(p.kind, PathKind::OuterPerimeter | PathKind::InnerPerimeter)
+            }) {
+                let area = regions.get(i).filter(|_| s.retract_only_outside);
+                let crosses = |a: Point2, b: Point2| area.is_some_and(|r| r.crosses_boundary(a, b));
+                order_walls(g, *at, s.perimeter_order == PerimeterOrder::InsideOut, &crosses)
+            } else if s.retract_only_outside
+                && let Some(area) = regions.get(i).filter(|r| !r.is_empty())
+            {
+                // prefer the next path reachable without leaving the part
+                let crosses = |a: Point2, b: Point2| area.crosses_boundary(a, b);
+                slicecraft_render::paths::order_paths_avoiding(g, *at, &crosses, 10.0)
             } else {
                 order_paths(g, *at)
             };
@@ -1108,6 +1694,10 @@ pub fn slice_document(
         });
     }
 
+    // several tools: one run per tool on each layer, with the prime tower
+    // and the ooze shield
+    arrange_tools(&mut layers, &regions, &slots, s, w, base_tool)?;
+
     // Travel that does not cross the model's outline (inside the part, or
     // outside it, between support pillars) needs no retraction: a string
     // there is hidden in infill or in support. With combing, travel that
@@ -1117,6 +1707,25 @@ pub fn slice_document(
             let Some(area) = regions.get(i) else { return Ok((Vec::new(), Vec::new())) };
             let comb_area =
                 if s.avoid_crossing_walls { Some(area.offset(-0.25 * w)?) } else { None };
+            // the surfaces this layer leaves exposed: travel over them retracts
+            let tops = if s.retract_over_tops {
+                match regions.get(i + 1) {
+                    Some(up) => area.difference(up)?.without_slivers(w * w),
+                    None => area.clone(),
+                }
+            } else {
+                Region::new()
+            };
+            let over_tops = |legs: &[Point2]| {
+                !tops.is_empty()
+                    && legs.windows(2).any(|l| match l {
+                        [a, b] => {
+                            tops.crosses_boundary(*a, *b)
+                                || tops.contains(Point2::new((a.x + b.x) / 2.0, (a.y + b.y) / 2.0))
+                        }
+                        _ => false,
+                    })
+            };
             let mut flags = Vec::with_capacity(layer.paths.len());
             let mut vias = Vec::with_capacity(layer.paths.len());
             let mut prev: Option<Point2> = None;
@@ -1133,6 +1742,15 @@ pub fn slice_document(
                             via = route;
                         }
                     }
+                    if inside {
+                        let mut legs = vec![a];
+                        legs.extend(via.iter().copied());
+                        legs.push(b);
+                        if over_tops(&legs) {
+                            inside = false;
+                            via.clear();
+                        }
+                    }
                 }
                 flags.push(inside);
                 vias.push(via);
@@ -1147,14 +1765,20 @@ pub fn slice_document(
     }
     if let Some(r) = raft {
         layers = with_raft(r, layers, if s.skirt_enabled { skirt.clone() } else { Vec::new() });
+        for p in layers.iter_mut().flat_map(|l| l.paths.iter_mut()) {
+            if p.kind == PathKind::Raft {
+                p.tool = base_tool;
+            }
+        }
     }
     // each printed layer's settings: raft layers use the profile
     let raft_count = layers.len().saturating_sub(n);
-    let per_layer: Vec<&slicecraft_doc::PrintSettings> = layers
+    let per_layer: Vec<slicecraft_doc::PrintSettings> = layers
         .iter()
-        .map(|l| l.index.checked_sub(raft_count).and_then(|i| layer_settings.get(i)).unwrap_or(s))
+        .map(|l| {
+            l.index.checked_sub(raft_count).and_then(|i| layer_settings.get(i)).unwrap_or(s).clone()
+        })
         .collect();
-    let out = slicecraft_io::gcode::write_gcode_layers(&layers, s, &per_layer, &doc.bed);
     let mut warnings = Vec::new();
     if !s.infill_pattern.is_implemented() && s.infill_percentage > 0.0 {
         warnings.push(
@@ -1183,11 +1807,7 @@ pub fn slice_document(
     if layers.iter().all(|l| l.paths.is_empty()) {
         return Err(EngineError::NothingToSlice);
     }
-    Ok(SliceOutput {
-        layers,
-        gcode: out.text,
-        stats: SliceStats { gcode: out.stats, dropped_chains, warnings },
-    })
+    Ok(Layered { layers, settings: per_layer, warnings, dropped_chains })
 }
 
 #[cfg(test)]

@@ -44,6 +44,7 @@ every capability and its status. Nothing has been test-printed yet.
 cargo run --release -p slicecraft -- examples/cube.stl     # the window
 cargo run -p slicecraft-cli -- info examples/cube.stl
 cargo run -p slicecraft-cli -- slice examples/cube.stl -o cube.gcode --infill 15 --json
+cargo run -p slicecraft-cli -- mcp                         # an MCP server on stdio, for agents
 cargo test --workspace          # 158 tests
 cargo xtask ci                  # fmt, clippy -D warnings, tests, layering
 ```

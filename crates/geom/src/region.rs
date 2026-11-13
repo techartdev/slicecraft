@@ -56,6 +56,30 @@ fn to_pt(p: &Point2) -> Pt {
     [p.x, p.y]
 }
 
+/// How loops from a cross-section become solid areas.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FillMode {
+    /// Overlapping bodies merge; holes are holes (non-zero winding).
+    #[default]
+    Merge,
+    /// Every crossing of an outline toggles inside and outside (even-odd).
+    Alternate,
+    /// Everything inside any outline is solid, holes included.
+    Outlines,
+}
+
+/// Twice-signed shoelace area halved: positive for counter-clockwise rings.
+pub fn signed_area(ring: &[Point2]) -> f64 {
+    let n = ring.len();
+    let mut a = 0.0;
+    for i in 0..n {
+        if let (Some(p), Some(q)) = (ring.get(i), ring.get((i + 1) % n)) {
+            a += p.x * q.y - q.x * p.y;
+        }
+    }
+    a / 2.0
+}
+
 fn ring_to_pts(ring: &[Point2]) -> Vec<Pt> {
     ring.iter().map(to_pt).collect()
 }
@@ -110,6 +134,37 @@ impl Region {
     /// Non-zero rather than even-odd so that overlapping bodies in one mesh merge
     /// instead of cancelling, and a mesh with every facet inverted still fills.
     pub fn from_loops(loops: &[Contour]) -> Result<Self, GeomError> {
+        Self::from_loops_mode(loops, FillMode::Merge)
+    }
+
+    /// Like [`Region::from_loops`], with a choice of how nested and
+    /// overlapping loops become solid.
+    pub fn from_loops_mode(loops: &[Contour], mode: FillMode) -> Result<Self, GeomError> {
+        let rule = match mode {
+            FillMode::Merge | FillMode::Outlines => FillRule::NonZero,
+            FillMode::Alternate => FillRule::EvenOdd,
+        };
+        let oriented: Vec<Contour>;
+        let loops = if mode == FillMode::Outlines {
+            // every loop counter-clockwise: holes become solid too
+            oriented = loops
+                .iter()
+                .map(|l| {
+                    let mut l = l.clone();
+                    if crate::region::signed_area(&l) < 0.0 {
+                        l.reverse();
+                    }
+                    l
+                })
+                .collect();
+            oriented.as_slice()
+        } else {
+            loops
+        };
+        Self::from_loops_rule(loops, rule)
+    }
+
+    fn from_loops_rule(loops: &[Contour], rule: FillRule) -> Result<Self, GeomError> {
         let subj: Vec<Vec<Pt>> =
             loops.iter().filter(|l| l.len() >= 3).map(|l| ring_to_pts(l)).collect();
         if subj.is_empty() {
@@ -117,7 +172,7 @@ impl Region {
         }
         let clip: Vec<Vec<Pt>> = Vec::new();
         let shapes = subj
-            .overlay_with_fixed_scale(&clip, OverlayRule::Subject, FillRule::NonZero, GRID_SCALE)
+            .overlay_with_fixed_scale(&clip, OverlayRule::Subject, rule, GRID_SCALE)
             .map_err(|_| GeomError::RegionRange)?;
         Ok(Self::from_shapes(shapes))
     }
@@ -287,6 +342,34 @@ fn segments_cross(a: Point2, b: Point2, c: Point2, d: Point2) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fill_modes_treat_nested_loops_differently() {
+        let sq = |h: f64, ccw: bool| {
+            let mut v = vec![
+                Point2::new(-h, -h),
+                Point2::new(h, -h),
+                Point2::new(h, h),
+                Point2::new(-h, h),
+            ];
+            if !ccw {
+                v.reverse();
+            }
+            v
+        };
+        let area = |loops: &[Contour], m: FillMode| {
+            Region::from_loops_mode(loops, m).map_or(-1.0, |r| r.area())
+        };
+        // a proper hole: clockwise inside counter-clockwise
+        let holed = [sq(5.0, true), sq(2.0, false)];
+        assert!((area(&holed, FillMode::Merge) - 84.0).abs() < 1e-6);
+        assert!((area(&holed, FillMode::Outlines) - 100.0).abs() < 1e-6);
+        // two bodies, one inside the other, both counter-clockwise
+        let nested = [sq(5.0, true), sq(2.0, true)];
+        assert!((area(&nested, FillMode::Merge) - 100.0).abs() < 1e-6);
+        assert!((area(&nested, FillMode::Alternate) - 84.0).abs() < 1e-6);
+        assert!(signed_area(&sq(1.0, true)) > 0.0 && signed_area(&sq(1.0, false)) < 0.0);
+    }
 
     fn square(x0: f64, y0: f64, s: f64) -> Contour {
         vec![

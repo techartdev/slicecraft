@@ -62,6 +62,9 @@ const fn ready(id: &'static str, label: &'static str) -> CommandSpec {
     CommandSpec { id, label, state: CommandState::Ready }
 }
 
+// Every listed command is implemented today; new capabilities are listed with
+// this first, so the menus show them disabled until they work.
+#[allow(dead_code)]
 const fn planned(id: &'static str, label: &'static str) -> CommandSpec {
     CommandSpec { id, label, state: CommandState::Planned }
 }
@@ -83,19 +86,20 @@ pub const COMMANDS: &[CommandSpec] = &[
     ready("lay-flat", "Lay Face Flat"),
     ready("split-parts", "Split into Parts"),
     ready("merge-models", "Merge Models"),
-    planned("group-models", "Group Models"),
-    planned("model-role", "Use Model as Support or Cutter"),
+    ready("group-models", "Group Models"),
+    ready("model-role", "Use Model as Support or Cutter"),
     ready("export-models", "Export Models (STL, OBJ, 3MF)"),
     // projects and profiles
     ready("profile", "Print Settings"),
     ready("load-profile", "Load Profile"),
+    ready("compare-profile", "Compare with a Profile File"),
     ready("save-profile", "Save Profile"),
     ready("new-project", "New Project"),
     ready("open-project", "Open Project"),
     ready("save-project", "Save Project"),
     ready("multi-profile", "Several Profiles per Job"),
     ready("setting-zones", "Height and Model Setting Zones"),
-    planned("profile-wizard", "Printer Setup Assistant"),
+    ready("profile-wizard", "Printer Setup Assistant"),
     // mesh tools
     ready("repair-mesh", "Repair Mesh"),
     ready("analyze-mesh", "Analyse Mesh"),
@@ -117,13 +121,13 @@ pub const COMMANDS: &[CommandSpec] = &[
     ready("export-gcode", "Export G-code"),
     ready("gcode-preview", "Toolpath Preview"),
     ready("open-gcode", "Open G-code for Preview"),
-    planned("variable-layers", "Variable Layer Heights"),
+    ready("variable-layers", "Variable Layer Heights"),
     // machine
     ready("machine-control", "Machine Control Panel"),
     ready("print-usb", "Print over USB"),
-    planned("print-network", "Send to a Network Printer"),
+    ready("print-network", "Send to a Network Printer"),
     ready("firmware-terminal", "Firmware Terminal"),
-    planned("camera-monitor", "Print Camera"),
+    ready("camera-monitor", "Print Camera"),
 ];
 
 /// A request to the engine. `Command::id` names its `COMMANDS` entry.
@@ -167,6 +171,21 @@ pub enum Command {
     MergeModels {
         indices: Vec<usize>,
     },
+    /// Print a model as a part, as support, or use it to cut the others.
+    SetRole {
+        index: usize,
+        role: slicecraft_doc::ModelRole,
+    },
+    /// Put models in one group (they select and move together).
+    GroupModels {
+        indices: Vec<usize>,
+    },
+    /// Take models out of their groups.
+    UngroupModels {
+        indices: Vec<usize>,
+    },
+    /// Place several models at once (a group being moved): one undo step.
+    PlaceMany(Vec<(usize, Transform)>),
     /// Turn a model so its largest flat face lies on the bed.
     LayFlat {
         index: usize,
@@ -251,6 +270,9 @@ pub enum Command {
         baud: u32,
     },
     DisconnectPrinter,
+    /// Make another connected printer the one the controls talk to; the
+    /// current one keeps printing in the background.
+    SwitchPrinter(String),
     /// Send one line to the printer (terminal, jogging, temperatures).
     SendToPrinter(String),
     /// Print the current slice (slicing first if needed) over the connection.
@@ -258,6 +280,20 @@ pub enum Command {
     PausePrint,
     ResumePrint,
     CancelPrint,
+    /// Read a profile file (SliceCraft or Simplify3D) and list how it differs
+    /// from the current profile, without loading it.
+    CompareProfile(PathBuf),
+    /// Make and load a profile from the printer setup assistant's answers.
+    SetupPrinter(Box<slicecraft_doc::setup::PrinterSetup>),
+    /// Ask a network print host whether it answers (and accepts the key).
+    CheckNetworkPrinter(slicecraft_io::network::NetworkPrinter),
+    /// Upload the current slice (slicing first if needed) to a network print
+    /// host as `name`; with `start`, the host prints it at once.
+    UploadToNetwork {
+        printer: slicecraft_io::network::NetworkPrinter,
+        name: String,
+        start: bool,
+    },
 }
 
 impl Command {
@@ -274,6 +310,9 @@ impl Command {
             Command::SplitParts { .. } => "split-parts",
             Command::MergeModels { .. } => "merge-models",
             Command::LayFlat { .. } => "lay-flat",
+            Command::SetRole { .. } => "model-role",
+            Command::GroupModels { .. } | Command::UngroupModels { .. } => "group-models",
+            Command::PlaceMany(_) => "place",
             Command::CutPlane { .. } => "cut-plane",
             Command::ReduceMesh { .. } => "reduce-mesh",
             Command::FindIntersections { .. } => "find-intersections",
@@ -307,19 +346,132 @@ impl Command {
             Command::ExportGcode(_) => "export-gcode",
             Command::ExportModels(_) => "export-models",
             Command::OpenGcode(_) => "open-gcode",
-            Command::ConnectPrinter { .. } | Command::DisconnectPrinter => "machine-control",
+            Command::ConnectPrinter { .. }
+            | Command::DisconnectPrinter
+            | Command::SwitchPrinter(_) => "machine-control",
             Command::SendToPrinter(_) => "firmware-terminal",
             Command::PrintOverUsb
             | Command::PausePrint
             | Command::ResumePrint
             | Command::CancelPrint => "print-usb",
+            Command::CheckNetworkPrinter(_) | Command::UploadToNetwork { .. } => "print-network",
+            Command::SetupPrinter(_) => "profile-wizard",
+            Command::CompareProfile(_) => "compare-profile",
         }
     }
+}
+
+/// A slice as binary G-code: the facts a printer shows before printing, the
+/// preview image when the profile asks for one, then the G-code.
+fn binary_gcode(out: &SliceOutput, s: &PrintSettings, profile: &str) -> Vec<u8> {
+    let g = &out.stats.gcode;
+    let kv = |k: &str, v: String| (k.to_string(), v);
+    let printer = vec![
+        kv("nozzle_diameter", format!("{}", s.nozzle_diameter)),
+        kv("filament_diameter", format!("{}", s.filament_diameter)),
+        kv("temperature", format!("{:.0}", s.nozzle_temperature)),
+        kv("bed_temperature", format!("{:.0}", s.bed_temperature)),
+        kv("layer_height", format!("{}", s.layer_height)),
+        kv(
+            "estimated printing time (normal mode)",
+            slicecraft_io::format_duration(g.estimated_seconds),
+        ),
+        kv("filament used [mm]", format!("{:.2}", g.filament_mm)),
+        kv("filament used [g]", format!("{:.2}", g.filament_grams)),
+    ];
+    let print = vec![
+        kv("filament used [mm]", format!("{:.2}", g.filament_mm)),
+        kv("filament used [g]", format!("{:.2}", g.filament_grams)),
+        kv("filament cost", format!("{:.2}", g.filament_cost)),
+        kv(
+            "estimated printing time (normal mode)",
+            slicecraft_io::format_duration(g.estimated_seconds),
+        ),
+    ];
+    let slicer = vec![
+        kv("generator", format!("SliceCraft {}", env!("CARGO_PKG_VERSION"))),
+        kv("profile", profile.to_string()),
+        kv("layers", g.layers.to_string()),
+    ];
+    let size = s.thumbnail_size.clamp(16, 512);
+    let png = if s.thumbnail_size > 0 {
+        let rgba = slicecraft_io::thumbnail::render(&out.layers, size);
+        slicecraft_io::thumbnail::png(&rgba, size, size)
+    } else {
+        Vec::new()
+    };
+    let side = u16::try_from(size).unwrap_or(16);
+    let thumbnails = if png.is_empty() { Vec::new() } else { vec![(side, side, png.as_slice())] };
+    // the plain file's thumbnail comments are not needed in a binary file
+    let text: String = out
+        .gcode
+        .lines()
+        .scan(false, |inside, l| {
+            if l.starts_with("; thumbnail begin") {
+                *inside = true;
+            }
+            let keep = !*inside;
+            if l.starts_with("; thumbnail end") {
+                *inside = false;
+            }
+            Some(keep.then_some(l))
+        })
+        .flatten()
+        .fold(String::with_capacity(out.gcode.len()), |mut acc, l| {
+            acc.push_str(l);
+            acc.push('\n');
+            acc
+        });
+    slicecraft_io::bgcode::encode(
+        &text,
+        &slicecraft_io::bgcode::BgcodeParts { printer, print, slicer, thumbnails },
+    )
+}
+
+/// Talking to a network print host, off the window's thread: a check, or an
+/// upload of a finished slice.
+#[derive(Debug, Clone)]
+pub struct NetworkJob {
+    printer: slicecraft_io::network::NetworkPrinter,
+    upload: Option<(String, bool, Arc<SliceOutput>)>,
+}
+
+impl NetworkJob {
+    /// Run it (blocking: seconds on a local network).
+    pub fn run(self) -> Result<Outcome, EngineError> {
+        let net = |e: slicecraft_io::network::NetError| EngineError::File(e.to_string());
+        let message = match &self.upload {
+            None => slicecraft_io::network::check(&self.printer).map_err(net)?,
+            Some((name, start, output)) => {
+                slicecraft_io::network::upload(&self.printer, name, output.gcode.as_bytes(), *start)
+                    .map_err(net)?
+            }
+        };
+        Ok(Outcome::Network { message })
+    }
+}
+
+/// One setting that differs between the current profile and another.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProfileDiff {
+    pub key: &'static str,
+    pub label: &'static str,
+    pub ours: slicecraft_doc::SettingValue,
+    pub theirs: slicecraft_doc::SettingValue,
 }
 
 /// What a command did.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Outcome {
+    /// How another profile differs from the current one.
+    ProfileCompared {
+        name: String,
+        diffs: Vec<ProfileDiff>,
+    },
+    /// What a network print host said.
+    Network {
+        message: String,
+    },
     Imported {
         index: usize,
         triangles: usize,
@@ -438,11 +590,34 @@ pub struct Session {
     /// Revision at the last project save or open; differs when there are
     /// unsaved changes.
     saved_revision: u64,
-    /// The printer connection, when there is one.
+    /// The printer the controls talk to, when there is one.
     printer: Option<slicecraft_io::printer::Connection>,
+    /// Other connected printers, still printing in the background.
+    background: Vec<(slicecraft_io::printer::Connection, PrinterStatus)>,
     /// A person drives this session (the window): the profile's
     /// post-processing program may run. Never set for agents or scripts.
     interactive: bool,
+}
+
+/// What a printer running in the background last reported.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PrinterStatus {
+    pub nozzle: f64,
+    pub bed: f64,
+    /// Lines sent of the print's total.
+    pub progress: Option<(usize, usize)>,
+    pub finished: bool,
+    pub error: Option<String>,
+}
+
+/// One connected printer, for a list.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PrinterSummary {
+    pub port: String,
+    /// The one the controls talk to.
+    pub active: bool,
+    /// Background printers only; the active one reports through its events.
+    pub status: Option<PrinterStatus>,
 }
 
 impl Session {
@@ -527,9 +702,48 @@ impl Session {
         events
     }
 
-    /// Use an already running connection (tests, other transports).
+    /// Use an already running connection (tests, other transports); a
+    /// printer already connected keeps running in the background.
     pub fn attach_printer(&mut self, c: slicecraft_io::printer::Connection) {
+        if let Some(old) = self.printer.take() {
+            self.background.push((old, PrinterStatus::default()));
+        }
         self.printer = Some(c);
+    }
+
+    /// Every connected printer, the active one first. Reading it collects what
+    /// the background printers said; ones that dropped their link are removed.
+    pub fn printers(&mut self) -> Vec<PrinterSummary> {
+        use slicecraft_io::printer::HostEvent;
+        self.background.retain_mut(|(c, st)| {
+            for e in c.events() {
+                match e {
+                    HostEvent::Temperatures { nozzle, bed, .. } => {
+                        st.nozzle = nozzle;
+                        st.bed = bed;
+                    }
+                    HostEvent::Progress { done, total } => st.progress = Some((done, total)),
+                    HostEvent::PrintFinished => {
+                        st.progress = None;
+                        st.finished = true;
+                    }
+                    HostEvent::Error(err) => st.error = Some(err),
+                    HostEvent::Disconnected => return false,
+                    HostEvent::Line(_) => {}
+                }
+            }
+            true
+        });
+        let mut out = Vec::with_capacity(self.background.len() + 1);
+        if let Some(c) = &self.printer {
+            out.push(PrinterSummary { port: c.port.clone(), active: true, status: None });
+        }
+        out.extend(self.background.iter().map(|(c, st)| PrinterSummary {
+            port: c.port.clone(),
+            active: false,
+            status: Some(st.clone()),
+        }));
+        out
     }
 
     fn printer_send(&self, cmd: slicecraft_io::printer::HostCommand) -> Result<(), EngineError> {
@@ -560,6 +774,44 @@ impl Session {
     /// A job that previews the support of the document as it is now.
     pub fn support_job(&self) -> SupportJob {
         SupportJob { doc: self.doc.clone(), revision: self.revision }
+    }
+
+    /// A job that uploads the current slice to a network print host, to run
+    /// off the window's thread. `None` until the document is sliced.
+    pub fn upload_job(
+        &self,
+        printer: slicecraft_io::network::NetworkPrinter,
+        name: String,
+        start: bool,
+    ) -> Option<NetworkJob> {
+        self.slice_result()
+            .map(|output| NetworkJob { printer, upload: Some((name, start, output)) })
+    }
+
+    /// A job that asks a network print host whether it answers.
+    pub fn check_job(&self, printer: slicecraft_io::network::NetworkPrinter) -> NetworkJob {
+        NetworkJob { printer, upload: None }
+    }
+
+    /// A name for the job: the project's file name, else the first part's name.
+    pub fn job_name(&self) -> String {
+        if let Some(stem) =
+            self.project_path.as_deref().and_then(Path::file_stem).and_then(|s| s.to_str())
+        {
+            return stem.to_string();
+        }
+        self.doc
+            .objects
+            .iter()
+            .find(|o| o.visible && o.role == slicecraft_doc::ModelRole::Print)
+            .map(|o| {
+                o.name
+                    .trim_end_matches(".stl")
+                    .trim_end_matches(".3mf")
+                    .trim_end_matches(".obj")
+                    .to_string()
+            })
+            .unwrap_or_else(|| "slicecraft".into())
     }
 
     /// A job that slices the document as it is now.
@@ -617,7 +869,10 @@ impl Session {
     pub fn execute(&mut self, command: Command) -> Result<Outcome, EngineError> {
         if !matches!(
             command,
-            Command::Place { .. } | Command::Profile(_) | Command::UpdateZone { .. }
+            Command::Place { .. }
+                | Command::Profile(_)
+                | Command::UpdateZone { .. }
+                | Command::PlaceMany(_)
         ) {
             // anything else ends a run of merged edits
             self.last_edit = None;
@@ -825,6 +1080,68 @@ impl Session {
                 }
                 Ok(self.changed())
             }
+            Command::SetRole { index, role } => {
+                let index = self.object_index(index)?;
+                if self.doc.objects.get(index).is_some_and(|o| o.role == role) {
+                    return Ok(Outcome::Unchanged);
+                }
+                self.checkpoint(None);
+                if let Some(o) = self.doc.objects.get_mut(index) {
+                    o.role = role;
+                }
+                Ok(self.changed())
+            }
+            Command::GroupModels { indices } => {
+                for &i in &indices {
+                    self.object_index(i)?;
+                }
+                if indices.len() < 2 {
+                    return Ok(Outcome::Unchanged);
+                }
+                let id = self
+                    .doc
+                    .objects
+                    .iter()
+                    .filter_map(|o| o.group)
+                    .max()
+                    .map_or(1, |g| g.saturating_add(1));
+                self.checkpoint(None);
+                for i in indices {
+                    if let Some(o) = self.doc.objects.get_mut(i) {
+                        o.group = Some(id);
+                    }
+                }
+                Ok(self.changed())
+            }
+            Command::UngroupModels { indices } => {
+                for &i in &indices {
+                    self.object_index(i)?;
+                }
+                self.checkpoint(None);
+                for i in indices {
+                    if let Some(o) = self.doc.objects.get_mut(i) {
+                        o.group = None;
+                    }
+                }
+                Ok(self.changed())
+            }
+            Command::PlaceMany(moves) => {
+                for (i, t) in &moves {
+                    self.object_index(*i)?;
+                    if !t.is_valid() {
+                        return Err(EngineError::Doc(DocError::BadTransform));
+                    }
+                }
+                let key = moves.first().map_or(0, |(i, _)| *i);
+                self.checkpoint(Some(("place-many", key)));
+                for (i, mut t) in moves {
+                    t.translate.z = 0.0;
+                    if let Some(o) = self.doc.objects.get_mut(i) {
+                        o.transform = t;
+                    }
+                }
+                Ok(self.changed())
+            }
             Command::LayFlat { index } => {
                 let index = self.object_index(index)?;
                 let Some(o) = self.doc.objects.get(index).cloned() else {
@@ -885,13 +1202,35 @@ impl Session {
                 self.doc.set_settings(*settings);
                 Ok(self.changed())
             }
+            Command::CompareProfile(path) => {
+                let text = read_profile_text(&path)?;
+                let profile = if looks_like_fff(&text) {
+                    import_fff(&text)?.0
+                } else if slicecraft_io::looks_like_s3d_gcode(&text) {
+                    slicecraft_io::import_s3d_gcode(&text)?.0
+                } else {
+                    Profile::from_text(&text)?.0
+                };
+                let diffs =
+                    slicecraft_doc::settings::differences(&self.doc.settings, &profile.settings)
+                        .into_iter()
+                        .map(|(s, ours, theirs)| ProfileDiff {
+                            key: s.key,
+                            label: s.label,
+                            ours,
+                            theirs,
+                        })
+                        .collect();
+                Ok(Outcome::ProfileCompared { name: profile.name, diffs })
+            }
             Command::LoadProfile(path) => {
-                let limit = MAX_PROFILE_BYTES.max(MAX_FFF_BYTES) as u64;
-                let bytes = read_bounded(&path, limit)?;
-                let text =
-                    String::from_utf8(bytes).map_err(|_| EngineError::Io(IoError::NotUtf8))?;
-                if looks_like_fff(&text) {
-                    let (profile, report) = import_fff(&text)?;
+                let text = read_profile_text(&path)?;
+                if looks_like_fff(&text) || slicecraft_io::looks_like_s3d_gcode(&text) {
+                    let (profile, report) = if looks_like_fff(&text) {
+                        import_fff(&text)?
+                    } else {
+                        slicecraft_io::import_s3d_gcode(&text)?
+                    };
                     profile.settings.validate()?;
                     self.checkpoint(None);
                     self.doc.set_settings(profile.settings);
@@ -1037,9 +1376,25 @@ impl Session {
                 Ok(Outcome::Sliced { layers: out.layers.len(), stats: out.stats.clone() })
             }
             Command::ConnectPrinter { port, baud } => {
+                if self.printer.as_ref().is_some_and(|c| c.port == port)
+                    || self.background.iter().any(|(c, _)| c.port == port)
+                {
+                    return Err(EngineError::File(format!("{port} is already connected")));
+                }
                 let c = slicecraft_io::printer::connect(&port, baud).map_err(EngineError::File)?;
-                self.printer = Some(c);
+                self.attach_printer(c);
                 Ok(Outcome::PrinterConnected { port })
+            }
+            Command::SwitchPrinter(port) => {
+                if self.printer.as_ref().is_some_and(|c| c.port == port) {
+                    return Ok(Outcome::Unchanged);
+                }
+                let Some(k) = self.background.iter().position(|(c, _)| c.port == port) else {
+                    return Err(EngineError::File(format!("{port} is not connected")));
+                };
+                let (c, _) = self.background.remove(k);
+                self.attach_printer(c);
+                Ok(Outcome::Changed)
             }
             Command::DisconnectPrinter => {
                 if self.printer.take().is_none() {
@@ -1069,6 +1424,22 @@ impl Session {
                 let count = lines.len();
                 self.printer_send(slicecraft_io::printer::HostCommand::Print(lines))?;
                 Ok(Outcome::PrintStarted { lines: count })
+            }
+            Command::CheckNetworkPrinter(printer) => self.check_job(printer).run(),
+            Command::SetupPrinter(setup) => {
+                let profile = setup.profile()?;
+                self.checkpoint(None);
+                self.doc.set_settings(profile.settings);
+                self.profile_name = profile.name.clone();
+                self.changed();
+                Ok(Outcome::ProfileLoaded { name: profile.name, warnings: Vec::new() })
+            }
+            Command::UploadToNetwork { printer, name, start } => {
+                let output = match self.slice_result() {
+                    Some(out) => out,
+                    None => self.slice_now()?,
+                };
+                NetworkJob { printer, upload: Some((name, start, output)) }.run()
             }
             Command::PausePrint => {
                 self.printer_send(slicecraft_io::printer::HostCommand::Pause)?;
@@ -1130,14 +1501,22 @@ impl Session {
                     Some(out) => out,
                     None => self.slice_now()?,
                 };
-                std::fs::write(&path, out.gcode.as_bytes()).map_err(|e| {
+                let binary = self.doc.settings.output_format
+                    == slicecraft_doc::OutputFormat::Binary
+                    || path.extension().is_some_and(|e| e.eq_ignore_ascii_case("bgcode"));
+                let bytes = if binary {
+                    binary_gcode(&out, &self.doc.settings, &self.profile_name)
+                } else {
+                    out.gcode.as_bytes().to_vec()
+                };
+                std::fs::write(&path, &bytes).map_err(|e| {
                     EngineError::File(format!("cannot write {}: {e}", path.display()))
                 })?;
                 let program = self.doc.settings.post_process.trim().to_string();
                 if self.interactive && !program.is_empty() {
                     post_process(&program, &path)?;
                 }
-                Ok(Outcome::Exported { path, bytes: out.gcode.len() })
+                Ok(Outcome::Exported { path, bytes: bytes.len() })
             }
         }
     }
@@ -1219,6 +1598,34 @@ impl Session {
             format: imported.format,
         })
     }
+}
+
+/// A profile file's text: a SliceCraft profile or Simplify3D `.fff` within
+/// their size limit, or the settings header at the top of a Simplify3D
+/// G-code file of any size (only its first megabyte is read).
+fn read_profile_text(path: &Path) -> Result<String, EngineError> {
+    use std::io::Read;
+    let limit = MAX_PROFILE_BYTES.max(MAX_FFF_BYTES) as u64;
+    let cannot =
+        |e: std::io::Error| EngineError::File(format!("cannot read {}: {e}", path.display()));
+    let mut head = Vec::new();
+    std::fs::File::open(path)
+        .map_err(cannot)?
+        .take(1 << 20)
+        .read_to_end(&mut head)
+        .map_err(cannot)?;
+    let len = std::fs::metadata(path).map_err(cannot)?.len();
+    if len > limit {
+        let text = String::from_utf8_lossy(&head);
+        if slicecraft_io::looks_like_s3d_gcode(&text) {
+            // cut at the last whole line
+            let end = text.rfind('\n').unwrap_or(text.len());
+            return Ok(text.get(..end).unwrap_or("").to_string());
+        }
+        return Err(EngineError::Io(IoError::TooLarge));
+    }
+    let bytes = read_bounded(path, limit)?;
+    String::from_utf8(bytes).map_err(|_| EngineError::Io(IoError::NotUtf8))
 }
 
 fn read_bounded(path: &Path, limit: u64) -> Result<Vec<u8>, EngineError> {
@@ -1379,6 +1786,15 @@ mod tests {
             Command::DisconnectPrinter,
             Command::SendToPrinter(String::new()),
             Command::PrintOverUsb,
+            Command::SetupPrinter(Box::default()),
+            Command::SwitchPrinter(String::new()),
+            Command::CompareProfile(PathBuf::new()),
+            Command::CheckNetworkPrinter(slicecraft_io::network::NetworkPrinter::default()),
+            Command::UploadToNetwork {
+                printer: slicecraft_io::network::NetworkPrinter::default(),
+                name: String::new(),
+                start: false,
+            },
             Command::PausePrint,
             Command::ResumePrint,
             Command::CancelPrint,
@@ -1387,6 +1803,10 @@ mod tests {
             Command::SplitParts { index: 0 },
             Command::MergeModels { indices: vec![] },
             Command::LayFlat { index: 0 },
+            Command::SetRole { index: 0, role: slicecraft_doc::ModelRole::Print },
+            Command::GroupModels { indices: vec![] },
+            Command::UngroupModels { indices: vec![] },
+            Command::PlaceMany(vec![]),
             Command::CutPlane { index: 0, z: 1.0 },
             Command::ReduceMesh { index: 0, cell: 0.5 },
             Command::FindIntersections { index: 0 },
@@ -1410,7 +1830,6 @@ mod tests {
         for c in samples {
             assert_eq!(s.command(c.id()).map(|spec| spec.state), Some(CommandState::Ready));
         }
-        assert_eq!(s.command("camera-monitor").map(|c| c.state), Some(CommandState::Planned));
         assert!(s.command("nope").is_none());
     }
 
@@ -2269,6 +2688,47 @@ mesh = AAAA
     }
 
     #[test]
+    fn two_printers_run_and_the_controls_switch_between_them() {
+        use slicecraft_io::printer::spawn_host;
+        let Some(mut s) = session_with(cube(5.0)) else { return };
+        let lines_a = std::sync::Arc::new(std::sync::Mutex::new(0usize));
+        let lines_b = std::sync::Arc::new(std::sync::Mutex::new(0usize));
+        s.attach_printer(spawn_host(
+            OkPrinter { pending: Default::default(), lines: std::sync::Arc::clone(&lines_a) },
+            "A".into(),
+        ));
+        assert!(matches!(s.execute(Command::PrintOverUsb), Ok(Outcome::PrintStarted { .. })));
+        // a second printer: A keeps printing in the background
+        s.attach_printer(spawn_host(
+            OkPrinter { pending: Default::default(), lines: std::sync::Arc::clone(&lines_b) },
+            "B".into(),
+        ));
+        assert_eq!(s.printer_port(), Some("B"));
+        assert!(matches!(s.execute(Command::PrintOverUsb), Ok(Outcome::PrintStarted { .. })));
+        let start = std::time::Instant::now();
+        let mut a_done = false;
+        let b_sent = || lines_b.lock().map(|n| *n).unwrap_or(0) > 0;
+        while start.elapsed() < std::time::Duration::from_secs(30) && !(a_done && b_sent()) {
+            let _ = s.printer_events();
+            a_done = s
+                .printers()
+                .iter()
+                .any(|p| p.port == "A" && p.status.as_ref().is_some_and(|st| st.finished));
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(a_done, "the background print finished");
+        let ports: Vec<String> = s.printers().into_iter().map(|p| p.port).collect();
+        assert_eq!(ports, vec!["B".to_string(), "A".to_string()]);
+        assert!(s.execute(Command::SwitchPrinter("A".into())).is_ok());
+        assert_eq!(s.printer_port(), Some("A"));
+        assert!(s.execute(Command::SwitchPrinter("C".into())).is_err());
+        assert!(
+            lines_a.lock().map(|n| *n).unwrap_or(0) > 0
+                && lines_b.lock().map(|n| *n).unwrap_or(0) > 0
+        );
+    }
+
+    #[test]
     fn a_slice_prints_to_a_connected_printer() {
         use slicecraft_io::printer::{HostEvent, spawn_host};
         let Some(mut s) = session_with(cube(5.0)) else { return };
@@ -2313,6 +2773,377 @@ mesh = AAAA
         let v = s.document().objects.first().map_or(0.0, |o| o.mesh.report().volume);
         assert!(v > 0.0 && v < 20.0 * 20.0 * 5.0, "{v}");
         assert!(s.execute(Command::Hollow { index: 0, wall: -1.0 }).is_err());
+    }
+
+    #[test]
+    fn two_tools_change_once_per_layer_with_tower_and_shield() {
+        use slicecraft_doc::SettingZone;
+        use slicecraft_doc::settings::SettingValue;
+        let Some(mut s) = session_with(cube(10.0)) else { return };
+        let bytes = stl_of(&cube(10.0).unwrap_or_default());
+        assert!(
+            s.execute(Command::Import { name: "b".into(), bytes, extension: Some("stl".into()) })
+                .is_ok()
+        );
+        assert!(s.execute(Command::Arrange).is_ok());
+        let mut second = SettingZone::new("second tool");
+        second.objects = vec![1];
+        second.overrides.insert("tool_number".into(), SettingValue::Int(1));
+        assert!(s.execute(Command::AddZone(Box::new(second))).is_ok());
+        let p = PrintSettings {
+            prime_tower_enabled: true,
+            ooze_shield_enabled: true,
+            skirt_enabled: false,
+            ..s.document().settings.clone()
+        };
+        assert!(s.execute(Command::Profile(Box::new(p))).is_ok());
+        assert!(matches!(s.execute(Command::Slice), Ok(Outcome::Sliced { .. })));
+        let Some(out) = s.slice_result() else { return };
+        let layers = out.layers.len();
+        let changes = out.stats.gcode.tool_changes;
+        assert!(
+            changes >= layers - 1 && changes <= layers + 1,
+            "{changes} changes on {layers} layers"
+        );
+        assert!(
+            out.gcode.contains(
+                "
+T1 ; tool change"
+            ) && out.gcode.contains(
+                "
+T0 ; tool change"
+            )
+        );
+        assert!(out.gcode.contains("M104 T1 S175"));
+        for l in &out.layers {
+            let tower = l.paths.iter().filter(|p| p.kind == PathKind::PrimeTower).count();
+            let shield = l.paths.iter().filter(|p| p.kind == PathKind::OozeShield).count();
+            assert!(tower > 0 && shield > 0, "layer {}", l.index);
+            // each tool's paths are one run
+            let runs = l.paths.windows(2).filter(|w| w[0].tool != w[1].tool).count();
+            assert!(runs <= 1, "layer {} has {runs} tool switches", l.index);
+        }
+        // one tool only: nothing changes
+        assert!(s.execute(Command::RemoveZone { index: 0 }).is_ok());
+        assert!(matches!(s.execute(Command::Slice), Ok(Outcome::Sliced { .. })));
+        let Some(out) = s.slice_result() else { return };
+        assert_eq!(out.stats.gcode.tool_changes, 0);
+        assert!(out.layers.iter().all(|l| l.paths.iter().all(|p| p.kind != PathKind::PrimeTower)));
+    }
+
+    #[test]
+    fn open_outlines_close_drop_or_print_as_lines() {
+        use slicecraft_doc::OpenOutlines;
+        // a cube with one side missing: every section is a U, open 20 mm wide
+        let Some(c) = cube(20.0) else { return };
+        let b = c.bounds();
+        let min_x = b.min().x;
+        let kept: Vec<_> = c
+            .triangles()
+            .iter()
+            .filter(|t| !t.vertices().iter().all(|v| (v.x - min_x).abs() < 1e-9))
+            .copied()
+            .collect();
+        let Ok(open) = slicecraft_geom::Mesh::new(kept) else { return };
+        let Some(mut s) = session_with(Some(open)) else { return };
+        let run = |s: &mut Session, mode: OpenOutlines| {
+            let p = PrintSettings {
+                open_outline_mode: mode,
+                skirt_enabled: false,
+                ..s.document().settings.clone()
+            };
+            let _ = s.execute(Command::Profile(Box::new(p)));
+            s.execute(Command::Slice)
+        };
+        // dropped: nothing to print
+        assert!(run(&mut s, OpenOutlines::Drop).is_err());
+        assert!(run(&mut s, OpenOutlines::CloseGaps).is_err(), "a 20 mm gap is too wide to close");
+        let r = run(&mut s, OpenOutlines::Lines);
+        assert!(matches!(r, Ok(Outcome::Sliced { .. })), "{r:?}");
+        let Some(out) = s.slice_result() else { return };
+        let lines = out
+            .layers
+            .iter()
+            .flat_map(|l| &l.paths)
+            .filter(|p| p.kind == PathKind::OuterPerimeter && !p.closed)
+            .count();
+        assert!(lines >= out.layers.len().saturating_sub(1), "{lines} open walls");
+    }
+
+    #[test]
+    fn travel_over_top_surfaces_retracts_when_asked() {
+        let Some(mut s) = session_with(cube(20.0)) else { return };
+        let count = |s: &mut Session, on: bool| {
+            let p = PrintSettings { retract_over_tops: on, ..s.document().settings.clone() };
+            let _ = s.execute(Command::Profile(Box::new(p)));
+            let _ = s.execute(Command::Slice);
+            s.slice_result().map_or(0, |o| o.stats.gcode.retractions)
+        };
+        let off = count(&mut s, false);
+        let on = count(&mut s, true);
+        assert!(on > off, "{on} vs {off}");
+    }
+
+    #[test]
+    fn reinforcement_infill_width_and_short_lines() {
+        let Some(mut s) = session_with(cube(20.0)) else { return };
+        let solid_layers = |s: &mut Session, p: PrintSettings| -> (usize, f64) {
+            let _ = s.execute(Command::Profile(Box::new(p)));
+            let _ = s.execute(Command::Slice);
+            let Some(out) = s.slice_result() else { return (0, 0.0) };
+            let n = out
+                .layers
+                .iter()
+                .filter(|l| l.paths.iter().any(|p| p.kind == PathKind::SolidInfill))
+                .count();
+            (n, out.stats.gcode.filament_mm)
+        };
+        let base = s.document().settings.clone();
+        let (plain, f0) = solid_layers(&mut s, base.clone());
+        let (reinforced, _) = solid_layers(
+            &mut s,
+            PrintSettings { solid_every_layers: 10, solid_every_count: 2, ..base.clone() },
+        );
+        assert!(reinforced > plain, "{reinforced} vs {plain}");
+        let (_, wide) =
+            solid_layers(&mut s, PrintSettings { infill_width_percent: 150.0, ..base.clone() });
+        assert!(
+            (wide - f0).abs() / f0 < 0.05,
+            "same density, wider lines: about the same filament ({wide} vs {f0})"
+        );
+        let _ = solid_layers(&mut s, PrintSettings { infill_min_length: 15.0, ..base });
+        let Some(out) = s.slice_result() else { return };
+        assert!(
+            out.layers
+                .iter()
+                .flat_map(|l| &l.paths)
+                .all(|p| p.kind != PathKind::SparseInfill || p.closed || p.length() >= 15.0)
+        );
+    }
+
+    #[test]
+    fn one_model_at_a_time() {
+        let Some(mut s) = session_with(cube(10.0)) else { return };
+        let bytes = stl_of(&cube(10.0).unwrap_or_default());
+        assert!(
+            s.execute(Command::Import { name: "b".into(), bytes, extension: Some("stl".into()) })
+                .is_ok()
+        );
+        let p = PrintSettings {
+            sequential_printing: true,
+            head_clearance: 20.0,
+            ..s.document().settings.clone()
+        };
+        assert!(s.execute(Command::Profile(Box::new(p))).is_ok());
+        // side by side, 10 mm apart: too close for the head
+        let place = |s: &mut Session, i: usize, x: f64| {
+            let mut t = s.document().objects.get(i).map(|o| o.transform).unwrap_or_default();
+            t.translate.x = x;
+            t.translate.y = 100.0;
+            s.execute(Command::Place { index: i, transform: t })
+        };
+        assert!(place(&mut s, 0, 80.0).is_ok() && place(&mut s, 1, 100.0).is_ok());
+        assert!(
+            matches!(s.execute(Command::Slice), Err(EngineError::File(m)) if m.contains("apart"))
+        );
+        assert!(place(&mut s, 1, 140.0).is_ok());
+        assert!(matches!(s.execute(Command::Slice), Ok(Outcome::Sliced { .. })));
+        let Some(out) = s.slice_result() else { return };
+        // two models of 49 layers each, one after the other
+        let zs: Vec<f64> = out.layers.iter().map(|l| l.z).collect();
+        let drops = zs.windows(2).filter(|w| w[1] < w[0]).count();
+        assert_eq!(drops, 1, "z goes down once, between the models");
+        assert!(
+            out.gcode.contains("; clear the printed models")
+                && out.gcode.contains("; to the next model")
+        );
+        // a tall first model must fit under the gantry
+        let p = PrintSettings { gantry_height: 5.0, ..s.document().settings.clone() };
+        assert!(s.execute(Command::Profile(Box::new(p))).is_ok());
+        assert!(
+            matches!(s.execute(Command::Slice), Err(EngineError::File(m)) if m.contains("gantry"))
+        );
+    }
+
+    #[test]
+    fn comparing_a_profile_lists_differences_without_loading_it() {
+        let mut s = Session::new();
+        let path = std::env::temp_dir()
+            .join(format!("slicecraft-compare-{}.scprofile", std::process::id()));
+        let other = slicecraft_doc::PrintSettings {
+            infill_percentage: 45.0,
+            layer_height: 0.12,
+            ..PrintSettings::default()
+        };
+        let text = Profile { name: "other".into(), settings: other }.to_text();
+        assert!(std::fs::write(&path, text).is_ok());
+        let r = s.execute(Command::CompareProfile(path.clone()));
+        let _ = std::fs::remove_file(&path);
+        let Ok(Outcome::ProfileCompared { name, diffs }) = r else { return };
+        assert_eq!(name, "other");
+        let keys: Vec<&str> = diffs.iter().map(|d| d.key).collect();
+        assert_eq!(keys.len(), 2, "{keys:?}");
+        assert!(keys.contains(&"infill_percentage") && keys.contains(&"layer_height"));
+        assert_eq!(
+            s.document().settings.infill_percentage,
+            PrintSettings::default().infill_percentage,
+            "not loaded"
+        );
+        assert!(s.execute(Command::CompareProfile(PathBuf::from("no/such/file"))).is_err());
+    }
+
+    #[test]
+    fn binary_gcode_export_reads_back() {
+        let Some(mut s) = session_with(cube(10.0)) else { return };
+        let p = PrintSettings {
+            output_format: slicecraft_doc::OutputFormat::Binary,
+            thumbnail_size: 32,
+            ..s.document().settings.clone()
+        };
+        assert!(s.execute(Command::Profile(Box::new(p))).is_ok());
+        let path = std::env::temp_dir().join(format!("slicecraft-{}.bgcode", std::process::id()));
+        assert!(s.execute(Command::ExportGcode(path.clone())).is_ok());
+        let bytes = std::fs::read(&path).unwrap_or_default();
+        let _ = std::fs::remove_file(&path);
+        let d = slicecraft_io::bgcode::decode(&bytes);
+        assert!(d.is_ok(), "{d:?}");
+        let Ok(d) = d else { return };
+        assert!(d.gcode.contains("G28") && !d.gcode.contains("thumbnail begin"));
+        assert!(d.blocks.contains(&slicecraft_io::bgcode::BlockType::Thumbnail));
+        assert!(bytes.len() < s.slice_result().map_or(0, |o| o.gcode.len()) + 4096);
+    }
+
+    #[test]
+    fn the_setup_assistant_loads_a_profile() {
+        use slicecraft_doc::setup::{Material, PrinterSetup};
+        let mut s = Session::new();
+        let setup = PrinterSetup {
+            name: "Desk".into(),
+            material: Material::Petg,
+            ..PrinterSetup::default()
+        };
+        let r = s.execute(Command::SetupPrinter(Box::new(setup)));
+        assert!(
+            matches!(&r, Ok(Outcome::ProfileLoaded { name, .. }) if name.contains("Desk")),
+            "{r:?}"
+        );
+        assert_eq!(s.document().settings.nozzle_temperature, 240.0);
+        assert!(s.execute(Command::Undo).is_ok());
+        assert_eq!(s.document().settings.nozzle_temperature, 210.0);
+        let bad = PrinterSetup { nozzle_diameter: -1.0, ..PrinterSetup::default() };
+        assert!(s.execute(Command::SetupPrinter(Box::new(bad))).is_err());
+    }
+
+    #[test]
+    fn a_slice_uploads_to_a_network_host() {
+        use std::io::{Read, Write};
+        let Ok(listener) = std::net::TcpListener::bind("127.0.0.1:0") else { return };
+        let Ok(addr) = listener.local_addr() else { return };
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let Ok((mut c, _)) = listener.accept() else { return };
+            let _ = c.set_read_timeout(Some(std::time::Duration::from_secs(10)));
+            let mut got = Vec::new();
+            let mut buf = [0u8; 65536];
+            while let Ok(n) = c.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                got.extend_from_slice(buf.get(..n).unwrap_or(&[]));
+                if got.ends_with(b"--\r\n") {
+                    break;
+                }
+            }
+            let _ = c.write_all(b"HTTP/1.1 201 Created\r\nContent-Length: 2\r\n\r\n{}");
+            let _ = tx.send(got);
+        });
+        let Some(mut s) = session_with(cube(10.0)) else { return };
+        let printer = slicecraft_io::network::NetworkPrinter {
+            kind: slicecraft_io::network::HostKind::Moonraker,
+            url: format!("http://{addr}"),
+            api_key: String::new(),
+        };
+        let r = s.execute(Command::UploadToNetwork { printer, name: s.job_name(), start: true });
+        assert!(
+            matches!(&r, Ok(Outcome::Network { message }) if message.contains("started")),
+            "{r:?}"
+        );
+        let got = rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap_or_default();
+        let text = String::from_utf8_lossy(&got);
+        assert!(text.starts_with("POST /server/files/upload "));
+        assert!(text.contains(";TYPE:") || text.contains("G1 "), "the G-code is in the body");
+    }
+
+    #[test]
+    fn roles_groups_and_variable_layers() {
+        use slicecraft_doc::settings::SettingValue;
+        use slicecraft_doc::{ModelRole, SettingZone};
+        // a 20 mm cube with a 10 mm cube inside it as a cutter: a hole
+        let Some(mut s) = session_with(cube(20.0)) else { return };
+        let bytes = stl_of(&cube(10.0).unwrap_or_default());
+        assert!(
+            s.execute(Command::Import { name: "c".into(), bytes, extension: Some("stl".into()) })
+                .is_ok()
+        );
+        let centre = s.document().objects.first().map(|o| o.transform).unwrap_or_default();
+        assert!(s.execute(Command::Place { index: 1, transform: centre }).is_ok());
+        assert!(s.execute(Command::SetRole { index: 1, role: ModelRole::Cutter }).is_ok());
+        assert!(matches!(s.execute(Command::Slice), Ok(Outcome::Sliced { .. })));
+        let walls = |s: &Session, z: usize| {
+            s.slice_result().and_then(|o| {
+                o.layers
+                    .get(z)
+                    .map(|l| l.paths.iter().filter(|p| p.kind == PathKind::OuterPerimeter).count())
+            })
+        };
+        assert_eq!(
+            walls(&s, 20),
+            Some(2),
+            "the cutter leaves a hole: an outer and an inner outline"
+        );
+        // as support it prints as support and is no part
+        assert!(s.execute(Command::SetRole { index: 1, role: ModelRole::Support }).is_ok());
+        let p = PrintSettings { support_enabled: false, ..s.document().settings.clone() };
+        assert!(s.execute(Command::Profile(Box::new(p))).is_ok());
+        assert!(matches!(s.execute(Command::Slice), Ok(Outcome::Sliced { .. })));
+        assert!(s.slice_result().is_some_and(|o| o.gcode.contains(";TYPE:support")));
+        // a group moves as one undo step
+        assert!(s.execute(Command::GroupModels { indices: vec![0, 1] }).is_ok());
+        assert!(s.document().objects.iter().all(|o| o.group == Some(1)));
+        let moved: Vec<(usize, Transform)> = s
+            .document()
+            .objects
+            .iter()
+            .enumerate()
+            .map(|(i, o)| {
+                let mut t = o.transform;
+                t.translate.x += 5.0;
+                (i, t)
+            })
+            .collect();
+        assert!(s.execute(Command::PlaceMany(moved)).is_ok());
+        assert!(s.execute(Command::Undo).is_ok());
+        assert!(
+            (s.document().objects.first().map_or(0.0, |o| o.transform.translate.x)
+                - centre.translate.x)
+                .abs()
+                < 1e-9
+        );
+        // variable layer heights: 0.1 mm layers above 10 mm
+        let mut fine = SettingZone::new("fine top");
+        fine.z_from = 10.0;
+        fine.overrides.insert("layer_height".into(), SettingValue::Float(0.1));
+        assert!(s.execute(Command::AddZone(Box::new(fine))).is_ok());
+        assert!(s.execute(Command::SetRole { index: 1, role: ModelRole::Print }).is_ok());
+        assert!(matches!(s.execute(Command::Slice), Ok(Outcome::Sliced { .. })));
+        let heights: Vec<f64> = s
+            .slice_result()
+            .map(|o| o.layers.iter().map(|l| l.height).collect())
+            .unwrap_or_default();
+        assert!(
+            heights.iter().any(|h| (h - 0.1).abs() < 1e-9)
+                && heights.iter().any(|h| (h - 0.2).abs() < 1e-9)
+        );
     }
 
     #[test]

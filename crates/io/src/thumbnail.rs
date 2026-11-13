@@ -158,6 +158,7 @@ mod tests {
                     Point2::new(20.0, 20.0),
                 ],
                 closed: true,
+                tool: 0,
             }],
             inside_travel: Vec::new(),
             travel_via: Vec::new(),

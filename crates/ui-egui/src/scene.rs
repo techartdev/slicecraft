@@ -7,7 +7,7 @@
 
 use crate::camera::{Frame, Projected};
 use eframe::egui::{Color32, Mesh, Pos2, Shape};
-use slicecraft_doc::{Document, PrintSettings};
+use slicecraft_doc::{Document, ModelRole, PrintSettings};
 use slicecraft_geom::{Bounds3, MeshReport, Vec3};
 use slicecraft_io::path_speed;
 use slicecraft_render::{LayerPaths, PathKind};
@@ -21,6 +21,10 @@ pub const MAX_DRAWN_SEGMENTS: usize = 200_000;
 pub const MODEL: Color32 = Color32::from_rgb(0x6f, 0xa8, 0xdc);
 pub const MODEL_SELECTED: Color32 = Color32::from_rgb(0xf2, 0xa6, 0x4b);
 pub const MODEL_OUTSIDE: Color32 = Color32::from_rgb(0xd9, 0x55, 0x55);
+/// A model printed as support.
+pub const MODEL_SUPPORT: Color32 = Color32::from_rgb(0xb8, 0xb8, 0xb0);
+/// A model that cuts the others.
+pub const MODEL_CUTTER: Color32 = Color32::from_rgb(0xc0, 0x60, 0xc8);
 pub const TRAVEL: Color32 = Color32::from_rgb(0x9a, 0xa4, 0xb4);
 pub const RETRACTION: Color32 = Color32::from_rgb(0xff, 0x4f, 0x8b);
 const BED: Color32 = Color32::from_rgb(0x2b, 0x2e, 0x33);
@@ -45,6 +49,8 @@ pub fn kind_color(kind: PathKind) -> Color32 {
         PathKind::Bridge => Color32::from_rgb(0x3c, 0xb4, 0xe6),
         PathKind::TopSolid => Color32::from_rgb(0xd0, 0x4a, 0x9a),
         PathKind::Ironing => Color32::from_rgb(0xf0, 0xf0, 0xa0),
+        PathKind::PrimeTower => Color32::from_rgb(0x9a, 0x7a, 0xd8),
+        PathKind::OozeShield => Color32::from_rgb(0x7a, 0x9a, 0xb0),
     }
 }
 
@@ -231,6 +237,7 @@ pub struct ObjectGeometry {
     pub bounds: Bounds3,
     pub outside_bed: bool,
     pub visible: bool,
+    pub role: ModelRole,
     /// Facts about the placed mesh, for the analysis window.
     pub report: MeshReport,
 }
@@ -250,6 +257,7 @@ impl ModelGeometry {
                     bounds: world.bounds(),
                     outside_bed: o.visible && outside.contains(&o.name),
                     visible: o.visible,
+                    role: o.role,
                     report: world.report(),
                 }
             })
@@ -282,6 +290,8 @@ pub struct ModelStyle<'a> {
     pub alpha: f32,
     /// Hide everything above this height (a section view).
     pub cut_z: Option<f64>,
+    /// Draw triangle edges instead of shaded faces.
+    pub wireframe: bool,
 }
 
 /// A vertical prism: an outline extruded from `z0` to `z1`.
@@ -290,6 +300,45 @@ pub struct Prism {
     pub outline: Vec<slicecraft_geom::Point2>,
     pub z0: f64,
     pub z1: f64,
+}
+
+impl Prism {
+    /// Footprint box: (x0, y0, x1, y1).
+    pub fn footprint(&self) -> Option<(f64, f64, f64, f64)> {
+        let mut it = self.outline.iter();
+        let first = it.next()?;
+        let mut b = (first.x, first.y, first.x, first.y);
+        for p in it {
+            b = (b.0.min(p.x), b.1.min(p.y), b.2.max(p.x), b.3.max(p.y));
+        }
+        Some(b)
+    }
+
+    /// Distance along the ray to where it enters the prism's box, if it does.
+    pub fn hit(&self, origin: Vec3, dir: Vec3) -> Option<f64> {
+        let (x0, y0, x1, y1) = self.footprint()?;
+        let mut t0 = 0.0f64;
+        let mut t1 = f64::INFINITY;
+        for (o, d, lo, hi) in [
+            (origin.x, dir.x, x0, x1),
+            (origin.y, dir.y, y0, y1),
+            (origin.z, dir.z, self.z0, self.z1),
+        ] {
+            if d.abs() < 1e-12 {
+                if o < lo || o > hi {
+                    return None;
+                }
+                continue;
+            }
+            let (a, b) = ((lo - o) / d, (hi - o) / d);
+            t0 = t0.max(a.min(b));
+            t1 = t1.min(a.max(b));
+            if t0 > t1 {
+                return None;
+            }
+        }
+        Some(t0)
+    }
 }
 
 /// Most support prisms drawn; past it the preview is thinned.
@@ -350,9 +399,14 @@ pub fn models(out: &mut Builder, f: &Frame, geo: &ModelGeometry, style: ModelSty
         } else if style.selected.contains(&oi) {
             MODEL_SELECTED
         } else {
-            MODEL
+            match o.role {
+                ModelRole::Print => MODEL,
+                ModelRole::Support => MODEL_SUPPORT,
+                ModelRole::Cutter => MODEL_CUTTER,
+            }
         };
-        let alpha = if o.visible { style.alpha } else { style.alpha * 0.25 };
+        let see_through = if o.role == ModelRole::Cutter { 0.45 } else { 1.0 };
+        let alpha = if o.visible { style.alpha * see_through } else { style.alpha * 0.25 };
         for (ti, (v, n)) in o.triangles.iter().enumerate() {
             if ti % stride != 0 {
                 continue;
@@ -363,9 +417,21 @@ pub fn models(out: &mut Builder, f: &Frame, geo: &ModelGeometry, style: ModelSty
                 continue;
             }
             let centroid = (v[0] + v[1] + v[2]).scale(1.0 / 3.0);
+            if style.wireframe {
+                let (Some(a), Some(b), Some(c)) =
+                    (f.project(v[0]), f.project(v[1]), f.project(v[2]))
+                else {
+                    continue;
+                };
+                let col = base.gamma_multiply(alpha * 0.8);
+                out.line(pos(a), pos(b), 1.0, col);
+                out.line(pos(b), pos(c), 1.0, col);
+                out.line(pos(c), pos(a), 1.0, col);
+                continue;
+            }
             let k = match n {
                 Some(n) => {
-                    if n.dot(eye - centroid) < 0.0 {
+                    if n.dot(f.toward_viewer(centroid)) < 0.0 {
                         // inside faces show only through a section cut, darker
                         if style.cut_z.is_none() {
                             continue;
@@ -523,6 +589,10 @@ pub struct PreviewSeg {
     pub kind: SegKind,
     /// Feed speed, mm/s.
     pub speed: f32,
+    /// The tool that prints it.
+    pub tool: u8,
+    /// Plastic pushed through the nozzle, mm³/s.
+    pub flow: f32,
 }
 
 /// A layer's moves in print order.
@@ -559,21 +629,28 @@ pub fn build_preview(layers: &[LayerPaths], s: &PrintSettings) -> Vec<PreviewLay
                     b: s0,
                     kind: SegKind::Travel,
                     speed: s.travel_speed as f32,
+                    tool: p.tool,
+                    flow: 0.0,
                 });
             }
             first_in_layer = false;
             let speed = path_speed(s, p.kind, l.index) as f32;
             let kind = SegKind::Path(p.kind);
+            let tool = p.tool;
+            let width = slicecraft_io::gcode::layer_line_width(s, l.index);
+            let flow = (f64::from(speed)
+                * slicecraft_io::gcode::bead_area(width, l.height)
+                * slicecraft_io::gcode::kind_flow(s, p.kind)) as f32;
             for w in p.points.windows(2) {
                 if let (Some(&a), Some(&b)) = (w.first(), w.get(1)) {
-                    pl.segs.push(PreviewSeg { a: at(a), b: at(b), kind, speed });
+                    pl.segs.push(PreviewSeg { a: at(a), b: at(b), kind, speed, tool, flow });
                 }
             }
             if p.closed
                 && p.points.len() > 2
                 && let (Some(&a), Some(&b)) = (p.points.last(), p.points.first())
             {
-                pl.segs.push(PreviewSeg { a: at(a), b: at(b), kind, speed });
+                pl.segs.push(PreviewSeg { a: at(a), b: at(b), kind, speed, tool, flow });
             }
             last = p.end().map(at);
         }
@@ -584,11 +661,11 @@ pub fn build_preview(layers: &[LayerPaths], s: &PrintSettings) -> Vec<PreviewLay
 
 /// Which toolpath features are drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct KindFilter(pub [bool; 13]);
+pub struct KindFilter(pub [bool; PathKind::ALL.len()]);
 
 impl Default for KindFilter {
     fn default() -> Self {
-        Self([true; 13])
+        Self([true; PathKind::ALL.len()])
     }
 }
 
@@ -605,18 +682,64 @@ pub enum Coloring {
     Feature,
     Speed,
     Height,
+    Tool,
+    Flow,
 }
 
 impl Coloring {
-    pub const ALL: [Coloring; 3] = [Coloring::Feature, Coloring::Speed, Coloring::Height];
+    pub const ALL: [Coloring; 5] =
+        [Coloring::Feature, Coloring::Speed, Coloring::Height, Coloring::Tool, Coloring::Flow];
 
     pub fn label(self) -> &'static str {
         match self {
             Coloring::Feature => "Feature type",
             Coloring::Speed => "Speed",
             Coloring::Height => "Height (Z)",
+            Coloring::Tool => "Tool",
+            Coloring::Flow => "Flow rate",
         }
     }
+}
+
+/// A colour per tool, repeating after eight.
+pub fn tool_color(tool: u8) -> Color32 {
+    const TOOLS: [Color32; 8] = [
+        Color32::from_rgb(0xe8, 0x8a, 0x3c),
+        Color32::from_rgb(0x4c, 0x9b, 0xe8),
+        Color32::from_rgb(0x6c, 0xc4, 0x5a),
+        Color32::from_rgb(0xd9, 0x5c, 0xc8),
+        Color32::from_rgb(0xe8, 0xd2, 0x4c),
+        Color32::from_rgb(0x5c, 0xd6, 0xd0),
+        Color32::from_rgb(0xb0, 0x7a, 0x50),
+        Color32::from_rgb(0xa8, 0xa8, 0xb8),
+    ];
+    TOOLS.get(usize::from(tool) % TOOLS.len()).copied().unwrap_or(Color32::GRAY)
+}
+
+/// Flow range over a whole slice, mm³/s, for the flow colouring.
+pub fn flow_range(layers: &[PreviewLayer]) -> (f32, f32) {
+    let mut lo = f32::INFINITY;
+    let mut hi = f32::NEG_INFINITY;
+    for s in layers.iter().flat_map(|l| l.segs.iter()) {
+        if matches!(s.kind, SegKind::Path(_)) && s.flow.is_finite() {
+            lo = lo.min(s.flow);
+            hi = hi.max(s.flow);
+        }
+    }
+    if lo.is_finite() && hi.is_finite() { (lo, hi) } else { (0.0, 1.0) }
+}
+
+/// The tools a slice uses, ascending.
+pub fn tools_used(layers: &[PreviewLayer]) -> Vec<u8> {
+    let mut t: Vec<u8> = layers
+        .iter()
+        .flat_map(|l| l.segs.iter())
+        .filter(|s| matches!(s.kind, SegKind::Path(_)))
+        .map(|s| s.tool)
+        .collect();
+    t.sort_unstable();
+    t.dedup();
+    t
 }
 
 /// Everything that decides what the toolpath view shows.
@@ -632,6 +755,7 @@ pub struct PreviewStyle {
     pub show_retractions: bool,
     pub width_mm: f64,
     pub speed_range: (f32, f32),
+    pub flow_range: (f32, f32),
     pub z_range: (f64, f64),
 }
 
@@ -686,6 +810,11 @@ pub fn toolpaths(
                             ramp(f64::from((seg.speed - s_lo) / (s_hi - s_lo).max(1e-3)))
                         }
                         Coloring::Height => ramp((layer.z - z_lo) / (z_hi - z_lo).max(1e-6)),
+                        Coloring::Tool => tool_color(seg.tool),
+                        Coloring::Flow => {
+                            let (f_lo, f_hi) = style.flow_range;
+                            ramp(f64::from((seg.flow - f_lo) / (f_hi - f_lo).max(1e-3)))
+                        }
                     }
                 }
             };
@@ -777,11 +906,13 @@ mod tests {
                         Point2::new(1.0, 1.0),
                     ],
                     closed: true,
+                    tool: 0,
                 },
                 ToolPath {
                     kind: PathKind::SparseInfill,
                     points: vec![Point2::new(30.0, 0.0), Point2::new(40.0, 0.0)],
                     closed: false,
+                    tool: 0,
                 },
             ],
             inside_travel: Vec::new(),

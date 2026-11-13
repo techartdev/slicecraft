@@ -14,10 +14,12 @@
 //! end sequences and the flavour table are SliceCraft's own design, informed
 //! by public firmware documentation and observed behaviour only.
 
+pub mod bgcode;
 pub mod fff;
 pub mod gcode;
 pub mod gcode_in;
 pub mod mesh_in;
+pub mod network;
 pub mod printer;
 pub mod project;
 pub mod threemf;
@@ -25,7 +27,7 @@ pub mod thumbnail;
 
 use std::fmt;
 
-pub use fff::{ImportReport, import_fff, looks_like_fff};
+pub use fff::{ImportReport, import_fff, import_s3d_gcode, looks_like_fff, looks_like_s3d_gcode};
 pub use gcode::{GcodeOutput, GcodeStats, GcodeWriter, format_duration, path_speed, write_gcode};
 pub use mesh_in::{
     Imported, MAX_FACETS_DECLARED, MAX_TRIANGLES, MeshFormat, read_ascii_stl, read_binary_stl,

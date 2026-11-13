@@ -10,6 +10,8 @@ const MIN_PITCH: f64 = -1.55;
 const MAX_PITCH: f64 = 1.55;
 /// Nearest depth that is drawn, mm.
 pub const NEAR: f64 = 1.0;
+/// How far behind the orbit point a parallel view stands, mm.
+const ORTHO_BACKOFF: f64 = 10_000.0;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct OrbitCamera {
@@ -21,6 +23,8 @@ pub struct OrbitCamera {
     pub distance: f64,
     /// Vertical field of view, radians.
     pub fov: f64,
+    /// Parallel projection: sizes do not shrink with distance.
+    pub ortho: bool,
 }
 
 /// A point on screen with its depth along the view direction.
@@ -50,6 +54,8 @@ pub struct Frame {
     focal: f64,
     cx: f64,
     cy: f64,
+    /// Parallel projection: pixels per millimetre.
+    ortho: Option<f64>,
 }
 
 /// Standard directions to look at the bed from.
@@ -129,6 +135,7 @@ impl OrbitCamera {
             pitch: 0.62,
             distance: span * 1.4,
             fov: 40f64.to_radians(),
+            ortho: false,
         }
     }
 
@@ -174,7 +181,15 @@ impl OrbitCamera {
             .unwrap_or(Vec3::new(1.0, 0.0, 0.0));
         let up = right.cross(forward);
         let focal = (viewport.height.max(1.0) / 2.0) / (self.fov / 2.0).tan();
+        // a parallel view keeps the perspective view's scale at the target, and
+        // stands far back so nothing on the bed falls behind it
+        let (eye, ortho) = if self.ortho {
+            (eye - forward.scale(ORTHO_BACKOFF), Some(focal / self.distance.max(1e-6)))
+        } else {
+            (eye, None)
+        };
         Frame {
+            ortho,
             eye,
             right,
             up,
@@ -199,9 +214,10 @@ impl Frame {
         if depth < NEAR || !depth.is_finite() {
             return None;
         }
+        let k = self.ortho.unwrap_or(self.focal / depth);
         Some(Projected {
-            x: self.cx + v.dot(self.right) / depth * self.focal,
-            y: self.cy - v.dot(self.up) / depth * self.focal,
+            x: self.cx + v.dot(self.right) * k,
+            y: self.cy - v.dot(self.up) * k,
             depth,
         })
     }
@@ -226,7 +242,16 @@ impl Frame {
 
     /// Pixels per millimetre at `depth`.
     pub fn scale_at(&self, depth: f64) -> f64 {
-        if depth > 0.0 { self.focal / depth } else { 0.0 }
+        match self.ortho {
+            Some(k) => k,
+            None if depth > 0.0 => self.focal / depth,
+            None => 0.0,
+        }
+    }
+
+    /// The direction from `p` towards the viewer (for back-face tests).
+    pub fn toward_viewer(&self, p: Vec3) -> Vec3 {
+        if self.ortho.is_some() { self.forward.scale(-1.0) } else { self.eye - p }
     }
 
     /// The light direction for simple shading: from over the viewer's shoulder.
@@ -236,8 +261,35 @@ impl Frame {
             .unwrap_or(Vec3::new(0.0, 0.0, 1.0))
     }
 
+    /// The ray through a screen point: origin and unit direction.
+    pub fn ray(&self, x: f64, y: f64) -> (Vec3, Vec3) {
+        match self.ortho {
+            Some(k) => (
+                self.eye + self.right.scale((x - self.cx) / k) + self.up.scale((self.cy - y) / k),
+                self.forward,
+            ),
+            None => {
+                let d = self.forward.scale(self.focal)
+                    + self.right.scale(x - self.cx)
+                    + self.up.scale(self.cy - y);
+                (self.eye, d.normalized().unwrap_or(self.forward))
+            }
+        }
+    }
+
     /// Where the screen point hits the bed plane z = 0, if it does.
     pub fn bed_point(&self, x: f64, y: f64) -> Option<Vec3> {
+        if let Some(k) = self.ortho {
+            // parallel rays from the screen plane
+            let origin =
+                self.eye + self.right.scale((x - self.cx) / k) + self.up.scale((self.cy - y) / k);
+            let d = self.forward;
+            if d.z.abs() < 1e-12 {
+                return None;
+            }
+            let t = -origin.z / d.z;
+            return (t > 0.0 && t.is_finite()).then(|| origin + d.scale(t));
+        }
         let dir = self.forward.scale(self.focal)
             + self.right.scale(x - self.cx)
             + self.up.scale(self.cy - y);
@@ -257,6 +309,26 @@ mod tests {
     use super::*;
 
     const VP: Viewport = Viewport { left: 0.0, top: 0.0, width: 800.0, height: 600.0 };
+
+    #[test]
+    fn a_parallel_view_keeps_sizes_and_finds_the_bed() {
+        let mut cam = OrbitCamera::for_bed(200.0, 200.0, 200.0);
+        cam.ortho = true;
+        let f = cam.frame(VP);
+        let near = f.project(Vec3::new(0.0, 0.0, 0.0));
+        let a = f.project(Vec3::new(100.0, 100.0, 0.0));
+        let b = f.project(Vec3::new(110.0, 100.0, 0.0));
+        let c = f.project(Vec3::new(0.0, 0.0, 0.0));
+        let d = f.project(Vec3::new(10.0, 0.0, 0.0));
+        let (Some(a), Some(b), Some(c), Some(d), Some(_)) = (a, b, c, d, near) else { return };
+        let len = |p: Projected, q: Projected| ((p.x - q.x).powi(2) + (p.y - q.y).powi(2)).sqrt();
+        assert!((len(a, b) - len(c, d)).abs() < 1e-6, "10 mm is as long anywhere");
+        let hit = f.bed_point(a.x, a.y);
+        assert!(
+            hit.is_some_and(|h| (h.x - 100.0).abs() < 1e-6 && (h.y - 100.0).abs() < 1e-6),
+            "{hit:?}"
+        );
+    }
 
     #[test]
     fn target_projects_to_centre() {

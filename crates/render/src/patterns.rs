@@ -99,7 +99,12 @@ pub fn clip_polylines(
                     })
                     .sum();
                 if len >= min_len {
-                    out.push(ToolPath { kind, points: std::mem::take(current), closed: false });
+                    out.push(ToolPath {
+                        kind,
+                        points: std::mem::take(current),
+                        closed: false,
+                        tool: 0,
+                    });
                 }
             }
             current.clear();
@@ -469,6 +474,16 @@ pub fn fill_narrow(
     width: f64,
     kind: PathKind,
 ) -> Result<Vec<ToolPath>, GeomError> {
+    fill_narrow_with(region, width, width * 1.5, kind)
+}
+
+/// Like [`fill_narrow`]; a strip up to `max_single` mm across gets one line.
+pub fn fill_narrow_with(
+    region: &Region,
+    width: f64,
+    max_single: f64,
+    kind: PathKind,
+) -> Result<Vec<ToolPath>, GeomError> {
     let mut out = Vec::new();
     for poly in &region.polygons {
         let one = Region { polygons: vec![poly.clone()] };
@@ -512,7 +527,11 @@ pub fn fill_narrow(
             v1 = v1.max(v);
         }
         let across = v1 - v0;
-        let lines = ((across / width).round() as usize).clamp(1, 64);
+        let lines = if across <= max_single.max(width) {
+            1
+        } else {
+            ((across / width).round() as usize).clamp(1, 64)
+        };
         let back = |u: f64, v: f64| Point2::new(u * c - v * s_, u * s_ + v * c);
         let mut polylines = Vec::with_capacity(lines);
         for j in 0..lines {

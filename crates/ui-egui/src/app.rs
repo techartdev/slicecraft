@@ -217,6 +217,23 @@ pub struct Preferences {
     pub orbit_sensitivity: f32,
     pub preview_after_slice: bool,
     pub fit_on_import: bool,
+    /// The network print host and camera, remembered between sessions.
+    pub network: slicecraft_io::network::NetworkPrinter,
+    pub camera_url: String,
+    /// Keyboard shortcuts the user changed.
+    pub keys: crate::keys::Shortcuts,
+    /// Parallel projection instead of perspective.
+    pub ortho: bool,
+    /// Models drawn as triangle edges.
+    pub wireframe: bool,
+    /// Scale a model under 10 mm across by 25.4 on import (it is likely in inches).
+    pub inch_check: bool,
+    /// Turn every imported model by these angles (degrees, X Y Z) ...
+    pub import_rotate: [f64; 3],
+    /// ... and scale it by this factor.
+    pub import_scale: f64,
+    /// The window's language.
+    pub language: crate::i18n::Language,
 }
 
 impl Default for Preferences {
@@ -228,6 +245,15 @@ impl Default for Preferences {
             orbit_sensitivity: 1.0,
             preview_after_slice: true,
             fit_on_import: false,
+            network: slicecraft_io::network::NetworkPrinter::default(),
+            camera_url: String::new(),
+            keys: crate::keys::Shortcuts::default(),
+            ortho: false,
+            wireframe: false,
+            inch_check: false,
+            import_rotate: [0.0; 3],
+            import_scale: 1.0,
+            language: crate::i18n::Language::English,
         }
     }
 }
@@ -258,6 +284,8 @@ pub struct SliceCraftApp {
     /// Show the support a slice would print while preparing.
     pub(crate) show_support: bool,
     pub(crate) machine: MachineState,
+    pub(crate) net: crate::network::NetState,
+    pub(crate) wizard: Option<crate::wizard::Wizard>,
     pub(crate) support_job: Option<SupportPreviewJob>,
     /// The latest support preview: the revision it was made for and its prisms.
     pub(crate) support_view: Option<(u64, Vec<scene::Prism>)>,
@@ -304,6 +332,8 @@ impl SliceCraftApp {
             recent: Vec::new(),
             show_support: false,
             machine: MachineState::default(),
+            net: crate::network::NetState::default(),
+            wizard: None,
             support_job: None,
             support_view: None,
             support_note: None,
@@ -336,6 +366,7 @@ impl SliceCraftApp {
             app.camera = OrbitCamera::for_bed(bed.width, bed.depth, bed.height);
         }
         app.config_dir = dir;
+        crate::i18n::set_language(app.prefs.language);
         app
     }
 
@@ -536,7 +567,12 @@ impl SliceCraftApp {
     /// Take in what the printer said.
     fn poll_printer(&mut self, ctx: &egui::Context) {
         use slicecraft_io::printer::HostEvent;
+        // printers in the background report through their status
+        let background = self.session.printers().len() > 1;
         if self.session.printer_port().is_none() {
+            if background {
+                ctx.request_repaint_after(std::time::Duration::from_millis(500));
+            }
             return;
         }
         for e in self.session.printer_events() {
@@ -629,6 +665,10 @@ impl SliceCraftApp {
         match self.session.execute(command) {
             Ok(o) => {
                 match &o {
+                    Outcome::Network { message } => self.info(message.clone()),
+                    Outcome::ProfileCompared { diffs, .. } => {
+                        self.info(format!("{} setting(s) differ.", diffs.len()));
+                    }
                     Outcome::Imported { index, triangles, skipped_facets, format } => {
                         self.selected = BTreeSet::from([*index]);
                         self.mode = Mode::Prepare;
@@ -706,6 +746,9 @@ impl SliceCraftApp {
                     | Outcome::Changed
                     | Outcome::Unchanged => {}
                 }
+                if let Outcome::Imported { index, .. } = &o {
+                    self.after_import(*index);
+                }
                 Some(o)
             }
             Err(e) => {
@@ -769,6 +812,18 @@ impl SliceCraftApp {
             && self.run(Command::LoadProfile(path)).is_some()
         {
             self.dialogs.settings = None;
+        }
+    }
+
+    pub(crate) fn compare_profile_dialog(&mut self) {
+        if let Some(path) = rfd::FileDialog::new()
+            .set_title("Compare with a profile")
+            .add_filter("Profiles (SliceCraft, Simplify3D)", &["scprofile", "fff", "txt"])
+            .pick_file()
+            && let Some(Outcome::ProfileCompared { name, diffs }) =
+                self.run(Command::CompareProfile(path))
+        {
+            self.dialogs.compare = Some((name, diffs));
         }
     }
 
@@ -897,12 +952,20 @@ impl SliceCraftApp {
             self.error("Nothing to export: import a model first.");
             return;
         }
-        let Some(path) = rfd::FileDialog::new()
-            .set_title("Export G-code")
-            .add_filter("G-code", &["gcode", "gco", "g"])
-            .set_file_name("slicecraft.gcode")
-            .save_file()
-        else {
+        let binary =
+            self.session.document().settings.output_format == slicecraft_doc::OutputFormat::Binary;
+        let name = format!(
+            "{}.{}",
+            self.session.job_name(),
+            self.session.document().settings.output_format.extension()
+        );
+        let dialog = rfd::FileDialog::new().set_title("Export G-code").set_file_name(name);
+        let dialog = if binary {
+            dialog.add_filter("Binary G-code", &["bgcode"])
+        } else {
+            dialog.add_filter("G-code", &["gcode", "gco", "g"])
+        };
+        let Some(path) = dialog.save_file() else {
             return;
         };
         if self.session.slice_result().is_some() {
@@ -922,6 +985,52 @@ impl SliceCraftApp {
 
     pub(crate) fn place(&mut self, index: usize, transform: Transform) {
         self.run(Command::Place { index, transform });
+    }
+
+    /// A model and the models grouped with it.
+    pub(crate) fn with_group(&self, index: usize) -> BTreeSet<usize> {
+        let objects = &self.session.document().objects;
+        match objects.get(index).and_then(|o| o.group) {
+            Some(g) => objects
+                .iter()
+                .enumerate()
+                .filter(|(_, o)| o.group == Some(g))
+                .map(|(i, _)| i)
+                .collect(),
+            None => BTreeSet::from([index]),
+        }
+    }
+
+    /// Select a model (and its group); with `add`, toggle it into the selection.
+    pub(crate) fn click_select(&mut self, index: usize, add: bool) {
+        let members = self.with_group(index);
+        if !add {
+            self.selected = members;
+        } else if self.selected.contains(&index) {
+            self.selected.retain(|i| !members.contains(i));
+        } else {
+            self.selected.extend(members);
+        }
+    }
+
+    /// Move a model to `translate`, carrying its group along: one undo step.
+    pub(crate) fn move_with_group(&mut self, index: usize, translate: slicecraft_geom::Vec3) {
+        let objects = &self.session.document().objects;
+        let Some(from) = objects.get(index).map(|o| o.transform.translate) else { return };
+        let d = translate - from;
+        let moves: Vec<(usize, Transform)> = self
+            .with_group(index)
+            .into_iter()
+            .filter_map(|i| {
+                objects.get(i).map(|o| {
+                    let mut t = o.transform;
+                    t.translate =
+                        slicecraft_geom::Vec3::new(t.translate.x + d.x, t.translate.y + d.y, 0.0);
+                    (i, t)
+                })
+            })
+            .collect();
+        self.run(Command::PlaceMany(moves));
     }
 
     pub(crate) fn remove_selected(&mut self) {
@@ -972,6 +1081,39 @@ impl SliceCraftApp {
     }
 
     /// Multiply the scale of every selected model by `factor` (unit fixes).
+    /// The preferences' automatic actions on a newly imported model.
+    fn after_import(&mut self, index: usize) {
+        let p = &self.prefs;
+        let Some(o) = self.session.document().objects.get(index) else { return };
+        let mut t = o.transform;
+        let mut changed = false;
+        let [rx, ry, rz] = p.import_rotate;
+        if rx != 0.0 || ry != 0.0 || rz != 0.0 {
+            t.rotate =
+                slicecraft_geom::Vec3::new(t.rotate.x + rx, t.rotate.y + ry, t.rotate.z + rz);
+            changed = true;
+        }
+        if p.import_scale.is_finite() && p.import_scale > 0.0 && p.import_scale != 1.0 {
+            t.scale = t.scale.scale(p.import_scale);
+            changed = true;
+        }
+        let size = o.size();
+        let largest = size.x.max(size.y).max(size.z);
+        let inches = p.inch_check && largest > 0.0 && largest < 10.0;
+        if inches {
+            t.scale = t.scale.scale(25.4);
+            changed = true;
+        }
+        if changed && t.is_valid() {
+            self.run(Command::Place { index, transform: t });
+            if inches {
+                self.info(format!(
+                    "The model was {largest:.2} mm across, so it was read as inches and scaled by 25.4. Undo to keep it small."
+                ));
+            }
+        }
+    }
+
     pub(crate) fn scale_selected(&mut self, factor: f64) {
         let indices: Vec<usize> = self.selected.iter().copied().collect();
         for i in indices {
@@ -1138,49 +1280,59 @@ impl SliceCraftApp {
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
-        if self.confirm.is_some() {
+        use crate::keys::Action;
+        if self.confirm.is_some() || self.dialogs.capture.is_some() {
             return;
         }
         let typing = ctx.memory(|m| m.focused().is_some());
+        let blocked = typing || self.dialogs.any_open();
         let (cmd, shift) = ctx.input(|i| (i.modifiers.command, i.modifiers.shift));
         let pressed = |k: Key| ctx.input(|i| i.key_pressed(k));
-        if cmd && !shift && pressed(Key::O) {
-            self.open_import_dialog();
+        for action in Action::ALL {
+            if (blocked && !action.global()) || !self.prefs.keys.get(action).pressed(ctx) {
+                continue;
+            }
+            match action {
+                Action::Import => self.open_import_dialog(),
+                Action::OpenProject => self.request(Pending::OpenProject(None)),
+                Action::SaveProject => {
+                    self.save_project(false);
+                }
+                Action::SaveProjectAs => {
+                    self.save_project(true);
+                }
+                Action::NewProject => self.request(Pending::NewProject),
+                Action::ExportGcode => self.export(ctx),
+                Action::Slice => self.start_slice(ctx),
+                Action::PrintSettings => self.open_settings(),
+                Action::Undo => {
+                    self.run(Command::Undo);
+                }
+                Action::Redo => {
+                    self.run(Command::Redo);
+                }
+                Action::SelectAll => self.select_all(),
+                Action::Duplicate => self.duplicate_selected(),
+                Action::Remove => {
+                    if self.mode == Mode::Prepare {
+                        self.remove_selected();
+                    }
+                }
+                Action::SelectTool => self.tool = Tool::Select,
+                Action::MoveTool => self.tool = Tool::Move,
+                Action::RotateTool => self.tool = Tool::Rotate,
+                Action::ScaleTool => self.tool = Tool::Scale,
+                Action::FitView => self.fit_view(),
+            }
         }
-        if cmd && shift && pressed(Key::O) {
-            self.request(Pending::OpenProject(None));
-        }
-        if cmd && pressed(Key::S) {
-            self.save_project(shift);
-        }
-        if cmd && pressed(Key::N) {
-            self.request(Pending::NewProject);
-        }
-        if cmd && pressed(Key::E) {
-            self.export(ctx);
-        }
-        if cmd && pressed(Key::R) {
-            self.start_slice(ctx);
-        }
-        if cmd && pressed(Key::P) {
-            self.open_settings();
-        }
-        if typing || self.dialogs.any_open() {
+        if blocked {
             return;
         }
-        if cmd && pressed(Key::Z) {
-            self.run(if shift { Command::Redo } else { Command::Undo });
-        }
-        if cmd && pressed(Key::Y) {
+        // fixed extras: Ctrl+Shift+Z redoes, Backspace removes
+        if cmd && shift && pressed(Key::Z) {
             self.run(Command::Redo);
         }
-        if cmd && pressed(Key::A) {
-            self.select_all();
-        }
-        if cmd && pressed(Key::D) {
-            self.duplicate_selected();
-        }
-        if self.mode == Mode::Prepare && (pressed(Key::Delete) || pressed(Key::Backspace)) {
+        if self.mode == Mode::Prepare && !cmd && pressed(Key::Backspace) {
             self.remove_selected();
         }
         if pressed(Key::Escape) {
@@ -1191,16 +1343,6 @@ impl SliceCraftApp {
             }
         }
         if !cmd {
-            for (k, tool) in [
-                (Key::Q, Tool::Select),
-                (Key::W, Tool::Move),
-                (Key::E, Tool::Rotate),
-                (Key::R, Tool::Scale),
-            ] {
-                if pressed(k) {
-                    self.tool = tool;
-                }
-            }
             for (k, v) in [
                 (Key::Num0, ViewPreset::Iso),
                 (Key::Num1, ViewPreset::Front),
@@ -1213,9 +1355,6 @@ impl SliceCraftApp {
                 if pressed(k) {
                     self.view(v);
                 }
-            }
-            if pressed(Key::F) {
-                self.fit_view();
             }
         }
         if self.mode == Mode::Preview {
@@ -1287,6 +1426,7 @@ impl eframe::App for SliceCraftApp {
         self.refresh_caches();
         self.refresh_support_preview(&ctx);
         self.poll_printer(&ctx);
+        crate::network::poll(self, &ctx);
         self.advance_playback(&ctx);
 
         egui::Panel::top("menu").show(ui, |ui| crate::menus::menu_bar(self, ui));

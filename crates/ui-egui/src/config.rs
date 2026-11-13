@@ -118,6 +118,22 @@ pub fn prefs_to_text(p: &Preferences, recent: &[PathBuf]) -> String {
     line("orbit_sensitivity", p.orbit_sensitivity.to_string());
     line("preview_after_slice", p.preview_after_slice.to_string());
     line("fit_on_import", p.fit_on_import.to_string());
+    line("network_kind", p.network.kind.name().to_string());
+    line("network_url", profile::quote(&p.network.url));
+    line("network_key", profile::quote(&p.network.api_key));
+    line("camera_url", profile::quote(&p.camera_url));
+    line("ortho", p.ortho.to_string());
+    line("wireframe", p.wireframe.to_string());
+    line("inch_check", p.inch_check.to_string());
+    line(
+        "import_rotate",
+        format!("{} {} {}", p.import_rotate[0], p.import_rotate[1], p.import_rotate[2]),
+    );
+    line("import_scale", p.import_scale.to_string());
+    line("language", p.language.code().to_string());
+    for l in p.keys.to_lines() {
+        line("shortcut", profile::quote(&l));
+    }
     for r in recent.iter().take(MAX_RECENT) {
         line("recent", profile::quote(&r.to_string_lossy()));
     }
@@ -153,6 +169,43 @@ pub fn prefs_from_text(text: &str) -> (Preferences, Vec<PathBuf>, Vec<String>) {
             "invert_zoom" => flag(&mut p.invert_zoom),
             "preview_after_slice" => flag(&mut p.preview_after_slice),
             "fit_on_import" => flag(&mut p.fit_on_import),
+            "network_kind" => {
+                if let Some(k) = slicecraft_io::network::HostKind::from_name(v) {
+                    p.network.kind = k;
+                }
+            }
+            "network_url" => p.network.url = profile::unquote(v).unwrap_or_default(),
+            "network_key" => p.network.api_key = profile::unquote(v).unwrap_or_default(),
+            "camera_url" => p.camera_url = profile::unquote(v).unwrap_or_default(),
+            "ortho" => flag(&mut p.ortho),
+            "language" => {
+                if let Some(l) = crate::i18n::Language::from_code(v) {
+                    p.language = l;
+                }
+            }
+            "wireframe" => flag(&mut p.wireframe),
+            "inch_check" => flag(&mut p.inch_check),
+            "import_rotate" => {
+                let n: Vec<f64> = v.split_whitespace().filter_map(|x| x.parse().ok()).collect();
+                if let [x, y, z] = n.as_slice()
+                    && [x, y, z].iter().all(|a| a.is_finite() && a.abs() <= 360.0)
+                {
+                    p.import_rotate = [*x, *y, *z];
+                }
+            }
+            "import_scale" => {
+                if let Ok(k) = v.parse::<f64>()
+                    && k.is_finite()
+                    && (0.001..=1000.0).contains(&k)
+                {
+                    p.import_scale = k;
+                }
+            }
+            "shortcut" => {
+                if !profile::unquote(v).is_some_and(|l| p.keys.read_line(&l)) {
+                    notes.push(format!("preferences line {}: shortcut not understood", i + 2));
+                }
+            }
             "orbit_sensitivity" => {
                 if let Ok(s) = v.parse::<f32>()
                     && (0.2..=3.0).contains(&s)

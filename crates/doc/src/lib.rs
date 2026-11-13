@@ -15,15 +15,16 @@
 
 pub mod profile;
 pub mod settings;
+pub mod setup;
 
 use slicecraft_geom::{Bounds3, GeomError, Mesh, Triangle, Vec3};
 use std::fmt;
 use std::sync::Arc;
 
 pub use settings::{
-    BeadShape, BedShape, Flavor, InfillPattern, IslandOrder, PerimeterOrder, PrintSettings,
-    SeamMode, SettingKind, SettingSpec, SettingValue, SolidPattern, SupportPattern,
-    SupportPlacement, SupportStyle, Tab, ThinWalls,
+    BeadShape, BedShape, FillRule, Flavor, HomeCorner, InfillPattern, IslandOrder, OpenOutlines,
+    OutputFormat, PerimeterOrder, PrintSettings, SeamMode, SettingKind, SettingSpec, SettingValue,
+    SolidPattern, SupportPattern, SupportPlacement, SupportStyle, Tab, ThinWalls, WipeFeatures,
 };
 
 /// Largest scale factor a placement may apply on any axis.
@@ -95,6 +96,10 @@ pub struct SceneObject {
     pub mesh: Arc<Mesh>,
     pub transform: Transform,
     pub visible: bool,
+    /// Printed as part, as support, or used to cut the other parts.
+    pub role: ModelRole,
+    /// Models with the same group select and move together.
+    pub group: Option<u32>,
     /// Local reference point: the centre of the mesh's bounding box.
     anchor: Vec3,
 }
@@ -106,7 +111,15 @@ impl SceneObject {
 
     pub fn shared(name: impl Into<String>, mesh: Arc<Mesh>) -> Self {
         let anchor = mesh.bounds().center();
-        Self { name: name.into(), mesh, transform: Transform::default(), visible: true, anchor }
+        Self {
+            name: name.into(),
+            mesh,
+            transform: Transform::default(),
+            visible: true,
+            role: ModelRole::Print,
+            group: None,
+            anchor,
+        }
     }
 
     /// Model-to-bed mapping before the drop: centre, scale, rotate, place.
@@ -227,6 +240,34 @@ impl Bed {
 
     pub fn center(&self) -> Vec3 {
         Vec3::new(self.width / 2.0, self.depth / 2.0, 0.0)
+    }
+}
+
+/// What a model is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ModelRole {
+    /// An ordinary part.
+    #[default]
+    Print,
+    /// Printed as support material where it stands.
+    Support,
+    /// Not printed: removed from the parts it overlaps.
+    Cutter,
+}
+
+impl ModelRole {
+    pub fn name(self) -> &'static str {
+        match self {
+            ModelRole::Print => "print",
+            ModelRole::Support => "support",
+            ModelRole::Cutter => "cutter",
+        }
+    }
+
+    pub fn from_name(s: &str) -> Option<Self> {
+        [ModelRole::Print, ModelRole::Support, ModelRole::Cutter]
+            .into_iter()
+            .find(|r| r.name() == s)
     }
 }
 
@@ -523,7 +564,7 @@ impl Document {
 
     /// A model that cannot be sliced, and why.
     pub fn sliceable(&self) -> Result<(), DocError> {
-        if !self.objects.iter().any(|o| o.visible) {
+        if !self.objects.iter().any(|o| o.visible && o.role == ModelRole::Print) {
             return Err(DocError::Empty);
         }
         if !self.bed.is_valid() {

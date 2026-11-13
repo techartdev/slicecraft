@@ -17,11 +17,15 @@ pub mod app;
 pub mod camera;
 pub mod config;
 pub mod dialogs;
+pub mod i18n;
 pub mod icons;
+pub mod keys;
 pub mod menus;
+pub mod network;
 pub mod panels;
 pub mod scene;
 pub mod viewport;
+pub mod wizard;
 
 use slicecraft_engine::{COMMANDS, CommandState, Session};
 use slicecraft_render::{Layer, Point2};
@@ -136,13 +140,19 @@ mod tests {
             }],
             triangles_considered: 1,
             dropped_chains: 0,
+            open: Vec::new(),
         }
     }
 
     #[test]
     fn palette_marks_planned_commands_disabled() {
         let rows = ViewState::palette();
-        assert!(rows.iter().any(|r| r.id == "camera-monitor" && !r.enabled));
+        for r in &rows {
+            let ready = slicecraft_engine::COMMANDS
+                .iter()
+                .any(|c| c.id == r.id && c.state == slicecraft_engine::CommandState::Ready);
+            assert!(ready || !r.enabled, "{} is planned but enabled", r.id);
+        }
         assert!(rows.iter().any(|r| r.id == "undo" && r.enabled));
         assert!(rows.iter().any(|r| r.id == "slice" && r.enabled));
     }

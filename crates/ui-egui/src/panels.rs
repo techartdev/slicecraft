@@ -1,10 +1,11 @@
 //! The side panels, the preview controls and the status bar.
 
 use crate::app::{Mode, STAGES, SliceCraftApp};
+use crate::i18n::tr;
 use crate::scene::{self, Coloring, SegKind};
 use eframe::egui::{self, Color32, RichText, Sense, Ui};
 use slicecraft_doc::profile::presets;
-use slicecraft_doc::{Axis, Transform};
+use slicecraft_doc::{Axis, ModelRole, Transform};
 use slicecraft_engine::{Command, Stage};
 use slicecraft_geom::Vec3;
 use slicecraft_io::format_duration;
@@ -16,7 +17,7 @@ const WARN: Color32 = Color32::from_rgb(0xff, 0x7a, 0x70);
 
 fn heading(ui: &mut Ui, text: &str) {
     ui.add_space(4.0);
-    ui.label(RichText::new(text).heading().size(17.0));
+    ui.label(RichText::new(tr(text)).heading().size(17.0));
     ui.add_space(2.0);
 }
 
@@ -29,19 +30,30 @@ pub fn models_panel(app: &mut SliceCraftApp, ui: &mut Ui) {
     let rows: Vec<(String, bool, bool)> = doc
         .objects
         .iter()
-        .map(|o| (o.name.clone(), o.visible, outside.contains(&o.name)))
+        .map(|o| {
+            let mut name = o.name.clone();
+            match o.role {
+                ModelRole::Print => {}
+                ModelRole::Support => name.push_str("  · support"),
+                ModelRole::Cutter => name.push_str("  · cutter"),
+            }
+            if let Some(g) = o.group {
+                name.push_str(&format!("  · group {g}"));
+            }
+            (name, o.visible, outside.contains(&o.name))
+        })
         .collect();
     egui::Frame::group(ui.style()).show(ui, |ui| {
         ui.set_min_height(140.0);
         ui.set_width(ui.available_width());
         if rows.is_empty() {
-            ui.weak("No models. Import or drop STL/OBJ files.");
+            ui.weak(tr("No models. Import or drop STL/OBJ files."));
         }
         egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
             for (i, (name, visible, off)) in rows.iter().enumerate() {
                 ui.horizontal(|ui| {
                     let mut v = *visible;
-                    if ui.checkbox(&mut v, "").on_hover_text("Include when slicing").changed() {
+                    if ui.checkbox(&mut v, "").on_hover_text(tr("Include when slicing")).changed() {
                         app.run(Command::SetVisible { index: i, visible: v });
                     }
                     let mut text = RichText::new(name);
@@ -54,17 +66,11 @@ pub fn models_panel(app: &mut SliceCraftApp, ui: &mut Ui) {
                     let resp = ui.selectable_label(app.selected.contains(&i), text);
                     if resp.clicked() {
                         let multi = ui.input(|inp| inp.modifiers.command || inp.modifiers.shift);
-                        if multi {
-                            if !app.selected.remove(&i) {
-                                app.selected.insert(i);
-                            }
-                        } else {
-                            app.selected = std::iter::once(i).collect();
-                        }
+                        app.click_select(i, multi);
                     }
                     resp.context_menu(|ui| {
                         app.selected = std::iter::once(i).collect();
-                        if ui.button("Duplicate").clicked() {
+                        if ui.button(tr("Duplicate")).clicked() {
                             app.duplicate_selected();
                         }
                         for (axis, label) in
@@ -74,14 +80,14 @@ pub fn models_panel(app: &mut SliceCraftApp, ui: &mut Ui) {
                                 app.mirror_selected(axis);
                             }
                         }
-                        if ui.button("Centre on the bed").clicked() {
+                        if ui.button(tr("Centre on the bed")).clicked() {
                             app.center_selected();
                         }
-                        if ui.button("Reset rotation and scale").clicked() {
+                        if ui.button(tr("Reset rotation and scale")).clicked() {
                             app.reset_selected();
                         }
                         ui.separator();
-                        if ui.button("Remove").clicked() {
+                        if ui.button(tr("Remove")).clicked() {
                             app.remove_selected();
                         }
                     });
@@ -90,13 +96,13 @@ pub fn models_panel(app: &mut SliceCraftApp, ui: &mut Ui) {
         });
     });
     ui.horizontal(|ui| {
-        if ui.button("Import…").clicked() {
+        if ui.button(tr("Import…")).clicked() {
             app.open_import_dialog();
         }
-        if ui.add_enabled(!app.selected.is_empty(), egui::Button::new("Remove")).clicked() {
+        if ui.add_enabled(!app.selected.is_empty(), egui::Button::new(tr("Remove"))).clicked() {
             app.remove_selected();
         }
-        if ui.add_enabled(!rows.is_empty(), egui::Button::new("Arrange")).clicked() {
+        if ui.add_enabled(!rows.is_empty(), egui::Button::new(tr("Arrange"))).clicked() {
             app.run(Command::Arrange);
         }
     });
@@ -122,13 +128,13 @@ pub fn models_panel(app: &mut SliceCraftApp, ui: &mut Ui) {
         }
         quick_settings(app, ui);
         ui.horizontal(|ui| {
-            if ui.button("All settings…").on_hover_text("Ctrl+P").clicked() {
+            if ui.button(tr("All settings…")).on_hover_text(tr("Ctrl+P")).clicked() {
                 app.open_settings();
             }
-            if ui.button("Load…").clicked() {
+            if ui.button(tr("Load…")).clicked() {
                 app.load_profile_dialog();
             }
-            if ui.button("Save…").clicked() {
+            if ui.button(tr("Save…")).clicked() {
                 app.save_profile_dialog();
             }
         });
@@ -157,14 +163,16 @@ pub fn models_panel(app: &mut SliceCraftApp, ui: &mut Ui) {
     let has_models = !rows.is_empty();
     ui.vertical_centered_justified(|ui| {
         if app.job.is_some() {
-            if ui.add(egui::Button::new("Cancel slicing").min_size(egui::vec2(0.0, 34.0))).clicked()
+            if ui
+                .add(egui::Button::new(tr("Cancel slicing")).min_size(egui::vec2(0.0, 34.0)))
+                .clicked()
             {
                 app.cancel_slice();
             }
         } else {
-            let b = egui::Button::new(RichText::new("Slice and preview").strong().size(16.0))
+            let b = egui::Button::new(RichText::new(tr("Slice and preview")).strong().size(16.0))
                 .min_size(egui::vec2(0.0, 36.0));
-            if ui.add_enabled(has_models, b).on_hover_text("Ctrl+R").clicked() {
+            if ui.add_enabled(has_models, b).on_hover_text(tr("Ctrl+R")).clicked() {
                 app.start_slice(&ctx);
             }
         }
@@ -180,13 +188,13 @@ fn support_section(app: &mut SliceCraftApp, ui: &mut Ui) {
     egui::Frame::group(ui.style()).show(ui, |ui| {
         ui.set_width(ui.available_width());
         let mut show = app.show_support;
-        if ui.checkbox(&mut show, "Show before slicing").changed() {
+        if ui.checkbox(&mut show, tr("Show before slicing")).changed() {
             app.set_show_support(show);
         }
         if app.show_support {
             let busy = app.support_job.is_some();
             match (&app.support_note, busy) {
-                (_, true) => ui.weak("Working out support…"),
+                (_, true) => ui.weak(tr("Working out support…")),
                 (Some(n), false) => ui.weak(n.as_str()),
                 (None, false) => ui.weak(""),
             };
@@ -194,7 +202,7 @@ fn support_section(app: &mut SliceCraftApp, ui: &mut Ui) {
         ui.horizontal(|ui| {
             let add = app.tool == Tool::SupportAdd;
             if ui
-                .selectable_label(add, "+ Add area")
+                .selectable_label(add, tr("+ Add area"))
                 .on_hover_text(
                     "Drag a box on the bed: every surface facing down inside it gets support",
                 )
@@ -205,8 +213,8 @@ fn support_section(app: &mut SliceCraftApp, ui: &mut Ui) {
             }
             let block = app.tool == Tool::SupportBlock;
             if ui
-                .selectable_label(block, "− Block area")
-                .on_hover_text("Drag a box on the bed: no support inside it")
+                .selectable_label(block, tr("− Block area"))
+                .on_hover_text(tr("Drag a box on the bed: no support inside it"))
                 .clicked()
             {
                 app.tool = if block { Tool::Select } else { Tool::SupportBlock };
@@ -229,7 +237,7 @@ fn support_section(app: &mut SliceCraftApp, ui: &mut Ui) {
                     e.x0,
                     e.y0
                 ));
-                if ui.small_button("×").on_hover_text("Remove this box").clicked() {
+                if ui.small_button(tr("×")).on_hover_text(tr("Remove this box")).clicked() {
                     remove = Some(i);
                 }
             });
@@ -237,7 +245,7 @@ fn support_section(app: &mut SliceCraftApp, ui: &mut Ui) {
         if let Some(index) = remove {
             app.run(Command::RemoveSupportEdit { index });
         }
-        if !edits.is_empty() && ui.small_button("Clear all boxes").clicked() {
+        if !edits.is_empty() && ui.small_button(tr("Clear all boxes")).clicked() {
             app.run(Command::ClearSupportEdits);
         }
     });
@@ -248,36 +256,36 @@ fn quick_settings(app: &mut SliceCraftApp, ui: &mut Ui) {
     let mut s = app.session.document().settings.clone();
     let before = s.clone();
     egui::Grid::new("quick").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
-        ui.label("Layer height");
+        ui.label(tr("Layer height"));
         ui.add(
             egui::DragValue::new(&mut s.layer_height).speed(0.01).range(0.05..=1.0).suffix(" mm"),
         );
         ui.end_row();
-        ui.label("Infill");
+        ui.label(tr("Infill"));
         ui.add(egui::Slider::new(&mut s.infill_percentage, 0.0..=100.0).suffix(" %"));
         ui.end_row();
-        ui.label("Perimeters");
+        ui.label(tr("Perimeters"));
         ui.add(egui::DragValue::new(&mut s.perimeter_count).range(0..=20));
         ui.end_row();
-        ui.label("Nozzle / bed");
+        ui.label(tr("Nozzle / bed"));
         ui.horizontal(|ui| {
             ui.add(egui::DragValue::new(&mut s.nozzle_temperature).range(0.0..=350.0).suffix("°"));
             ui.add(egui::DragValue::new(&mut s.bed_temperature).range(0.0..=130.0).suffix("°"));
         });
         ui.end_row();
-        ui.label("Adhesion");
+        ui.label(tr("Adhesion"));
         ui.horizontal(|ui| {
-            ui.checkbox(&mut s.skirt_enabled, "skirt");
-            ui.checkbox(&mut s.brim_enabled, "brim");
-            ui.checkbox(&mut s.raft_enabled, "raft");
+            ui.checkbox(&mut s.skirt_enabled, tr("skirt"));
+            ui.checkbox(&mut s.brim_enabled, tr("brim"));
+            ui.checkbox(&mut s.raft_enabled, tr("raft"));
         });
         ui.end_row();
-        ui.label("Support");
+        ui.label(tr("Support"));
         ui.horizontal(|ui| {
-            ui.checkbox(&mut s.support_enabled, "generate");
+            ui.checkbox(&mut s.support_enabled, tr("generate"));
             ui.add_enabled_ui(s.support_enabled, |ui| {
                 let mut bed_only = s.support_placement == slicecraft_doc::SupportPlacement::BedOnly;
-                if ui.checkbox(&mut bed_only, "from bed only").changed() {
+                if ui.checkbox(&mut bed_only, tr("from bed only")).changed() {
                     s.support_placement = if bed_only {
                         slicecraft_doc::SupportPlacement::BedOnly
                     } else {
@@ -309,9 +317,9 @@ pub fn transform_panel(app: &mut SliceCraftApp, ui: &mut Ui) {
     heading(ui, "Model placement");
     let count = app.selected.len();
     if count == 0 {
-        ui.weak("Select a model in the list or the 3D view.");
+        ui.weak(tr("Select a model in the list or the 3D view."));
         ui.add_space(6.0);
-        ui.weak("Q select · W move · E rotate · R scale");
+        ui.weak(tr("Q select · W move · E rotate · R scale"));
         return;
     }
     if count > 1 {
@@ -343,9 +351,9 @@ pub fn transform_panel(app: &mut SliceCraftApp, ui: &mut Ui) {
     });
 
     ui.add_space(4.0);
-    ui.label(RichText::new("Position").strong());
+    ui.label(RichText::new(tr("Position")).strong());
     egui::Grid::new("pos").num_columns(3).show(ui, |ui| {
-        ui.label("X");
+        ui.label(tr("X"));
         ui.add(
             egui::DragValue::new(&mut t.translate.x)
                 .speed(0.5)
@@ -353,7 +361,7 @@ pub fn transform_panel(app: &mut SliceCraftApp, ui: &mut Ui) {
                 .suffix(" mm"),
         );
         ui.end_row();
-        ui.label("Y");
+        ui.label(tr("Y"));
         ui.add(
             egui::DragValue::new(&mut t.translate.y)
                 .speed(0.5)
@@ -361,15 +369,15 @@ pub fn transform_panel(app: &mut SliceCraftApp, ui: &mut Ui) {
                 .suffix(" mm"),
         );
         ui.end_row();
-        ui.label("Reference");
-        ui.weak("model centre, on the bed");
+        ui.label(tr("Reference"));
+        ui.weak(tr("model centre, on the bed"));
         ui.end_row();
     });
 
     ui.add_space(4.0);
     ui.horizontal(|ui| {
-        ui.label(RichText::new("Size").strong());
-        ui.checkbox(&mut app.uniform_scale, "uniform");
+        ui.label(RichText::new(tr("Size")).strong());
+        ui.checkbox(&mut app.uniform_scale, tr("uniform"));
     });
     let mut size =
         Vec3::new(original.x * t.scale.x, original.y * t.scale.y, original.z * t.scale.z);
@@ -377,8 +385,8 @@ pub fn transform_panel(app: &mut SliceCraftApp, ui: &mut Ui) {
     let mut changed_axis: Option<(usize, f64)> = None;
     egui::Grid::new("scale").num_columns(3).show(ui, |ui| {
         ui.label("");
-        ui.weak("mm");
-        ui.weak("%");
+        ui.weak(tr("mm"));
+        ui.weak(tr("%"));
         ui.end_row();
         for (k, axis) in ["X", "Y", "Z"].iter().enumerate() {
             ui.label(*axis);
@@ -420,7 +428,7 @@ pub fn transform_panel(app: &mut SliceCraftApp, ui: &mut Ui) {
     }
 
     ui.add_space(4.0);
-    ui.label(RichText::new("Rotation").strong());
+    ui.label(RichText::new(tr("Rotation")).strong());
     egui::Grid::new("rot").num_columns(3).show(ui, |ui| {
         for (k, axis) in ["X", "Y", "Z"].iter().enumerate() {
             ui.label(*axis);
@@ -431,10 +439,10 @@ pub fn transform_panel(app: &mut SliceCraftApp, ui: &mut Ui) {
             };
             ui.add(egui::DragValue::new(r).speed(1.0).range(-360.0..=360.0).suffix("°"));
             ui.horizontal(|ui| {
-                if ui.small_button("−90").clicked() {
+                if ui.small_button(tr("−90")).clicked() {
                     *r = (*r - 90.0) % 360.0;
                 }
-                if ui.small_button("+90").clicked() {
+                if ui.small_button(tr("+90")).clicked() {
                     *r = (*r + 90.0) % 360.0;
                 }
             });
@@ -452,7 +460,7 @@ pub fn transform_panel(app: &mut SliceCraftApp, ui: &mut Ui) {
         && let Some(g) = geo.objects.get(i)
     {
         ui.add_space(6.0);
-        ui.label(RichText::new("Mesh check").strong());
+        ui.label(RichText::new(tr("Mesh check")).strong());
         let r = g.report;
         if r.is_watertight() {
             ui.label(format!("Closed and manifold · {:.1} cm³", r.volume / 1000.0));
@@ -461,38 +469,46 @@ pub fn transform_panel(app: &mut SliceCraftApp, ui: &mut Ui) {
                 WARN,
                 format!("{} open edges, {} non-manifold edges", r.open_edges, r.non_manifold_edges),
             );
-            ui.weak("Slicing closes small gaps; repair tools are planned.");
+            if ui
+                .small_button(tr("Repair"))
+                .on_hover_text(tr("Weld, fix normals and close holes"))
+                .clicked()
+            {
+                app.run(Command::RepairMesh { index: i, fill: true });
+            }
         }
     }
 }
 
 fn multi_actions(app: &mut SliceCraftApp, ui: &mut Ui) {
     ui.horizontal_wrapped(|ui| {
-        if ui.button("Centre").clicked() {
+        if ui.button(tr("Centre")).clicked() {
             app.center_selected();
         }
-        if ui.button("Duplicate").clicked() {
+        if ui.button(tr("Duplicate")).clicked() {
             app.duplicate_selected();
         }
-        if ui.button("Reset").on_hover_text("Reset rotation and scale").clicked() {
+        if ui.button(tr("Reset")).on_hover_text(tr("Reset rotation and scale")).clicked() {
             app.reset_selected();
         }
-        if ui.button("Remove").clicked() {
+        if ui.button(tr("Remove")).clicked() {
             app.remove_selected();
         }
     });
     ui.horizontal_wrapped(|ui| {
-        ui.label("Mirror");
+        ui.label(tr("Mirror"));
         for (axis, l) in [(Axis::X, "X"), (Axis::Y, "Y"), (Axis::Z, "Z")] {
             if ui.small_button(l).clicked() {
                 app.mirror_selected(axis);
             }
         }
-        ui.add_enabled_ui(false, |ui| {
-            let _ = ui
-                .small_button("Lay flat")
-                .on_disabled_hover_text("planned: click a face to put it on the bed");
-        });
+        if ui
+            .small_button(tr("Lay flat"))
+            .on_hover_text(tr("Put the largest flat face on the bed"))
+            .clicked()
+        {
+            app.for_selected(|index| Command::LayFlat { index });
+        }
     });
     let _ = Transform::default();
 }
@@ -502,7 +518,7 @@ pub fn summary_panel(app: &mut SliceCraftApp, ui: &mut Ui) {
     let ctx = ui.ctx().clone();
     heading(ui, "Build summary");
     let Some(out) = app.session.slice_result() else {
-        ui.weak("Slice to see the summary.");
+        ui.weak(tr("Slice to see the summary."));
         return;
     };
     let s = &app.session.document().settings;
@@ -548,7 +564,7 @@ pub fn summary_panel(app: &mut SliceCraftApp, ui: &mut Ui) {
             row("Retractions", g.retractions.to_string());
             row("Travel", format!("{:.1} m", g.travel_mm / 1000.0));
         });
-        ui.weak("Time ignores acceleration; weight uses the profile's density.");
+        ui.weak(tr("Weight uses the profile's filament density."));
     });
     egui::CollapsingHeader::new("Extruded length by feature").default_open(false).show(ui, |ui| {
         egui::Grid::new("byfeature").num_columns(2).show(ui, |ui| {
@@ -560,36 +576,30 @@ pub fn summary_panel(app: &mut SliceCraftApp, ui: &mut Ui) {
         });
     });
     if !out.stats.warnings.is_empty() {
-        egui::CollapsingHeader::new(RichText::new("Notes").color(WARN)).default_open(true).show(
-            ui,
-            |ui| {
+        egui::CollapsingHeader::new(RichText::new(tr("Notes")).color(WARN))
+            .default_open(true)
+            .show(ui, |ui| {
                 for w in &out.stats.warnings {
                     ui.label(w);
                 }
-            },
-        );
+            });
     }
 
     ui.add_space(6.0);
     heading(ui, "Show");
     let p = &mut app.preview;
-    ui.checkbox(&mut p.show_travel, "Travel moves");
-    ui.checkbox(&mut p.show_retractions, "Retractions");
-    ui.checkbox(&mut p.show_toolhead, "Nozzle");
-    ui.checkbox(&mut p.ghost_model, "Model outline");
+    ui.checkbox(&mut p.show_travel, tr("Travel moves"));
+    ui.checkbox(&mut p.show_retractions, tr("Retractions"));
+    ui.checkbox(&mut p.show_toolhead, tr("Nozzle"));
+    ui.checkbox(&mut p.ghost_model, tr("Model outline"));
     ui.horizontal(|ui| {
-        ui.label("Colour by");
-        egui::ComboBox::from_id_salt("coloring").selected_text(p.coloring.label()).show_ui(
+        ui.label(tr("Colour by"));
+        egui::ComboBox::from_id_salt("coloring").selected_text(tr(p.coloring.label())).show_ui(
             ui,
             |ui| {
                 for c in Coloring::ALL {
-                    ui.selectable_value(&mut p.coloring, c, c.label());
+                    ui.selectable_value(&mut p.coloring, c, tr(c.label()));
                 }
-                ui.add_enabled_ui(false, |ui| {
-                    let _ = ui.selectable_label(false, "Tool (planned)");
-                    let _ = ui.selectable_label(false, "Flow rate (planned)");
-                    let _ = ui.selectable_label(false, "Profile (planned)");
-                });
             },
         );
     });
@@ -598,19 +608,24 @@ pub fn summary_panel(app: &mut SliceCraftApp, ui: &mut Ui) {
     ui.vertical_centered_justified(|ui| {
         if ui
             .add(
-                egui::Button::new(RichText::new("Export G-code…").strong())
+                egui::Button::new(RichText::new(tr("Export G-code…")).strong())
                     .min_size(egui::vec2(0.0, 32.0)),
             )
             .clicked()
         {
             app.export(&ctx);
         }
-        ui.add_enabled_ui(false, |ui| {
-            let _ = ui
-                .add(egui::Button::new("Print on a printer…").min_size(egui::vec2(0.0, 28.0)))
-                .on_disabled_hover_text("planned: USB and network printing");
+        ui.menu_button(tr("Print on a printer…"), |ui| {
+            if ui.button(tr("Over USB…")).clicked() {
+                app.dialogs.machine = true;
+                ui.close();
+            }
+            if ui.button(tr("To a network printer…")).clicked() {
+                app.net.open = true;
+                ui.close();
+            }
         });
-        if ui.button("Back to models").on_hover_text("Esc").clicked() {
+        if ui.button(tr("Back to models")).on_hover_text(tr("Esc")).clicked() {
             app.mode = Mode::Prepare;
         }
     });
@@ -624,42 +639,45 @@ pub fn preview_controls(app: &mut SliceCraftApp, ui: &mut Ui) {
     let p = &mut app.preview;
     ui.add_space(3.0);
     ui.horizontal(|ui| {
-        if ui.button(if p.playing { "⏸ Pause" } else { "▶ Play" }).on_hover_text("Space").clicked()
+        if ui
+            .button(if p.playing { "⏸ Pause" } else { "▶ Play" })
+            .on_hover_text(tr("Space"))
+            .clicked()
         {
             p.playing = !p.playing;
             if p.playing && p.last_layer >= max && !p.by_line {
                 p.last_layer = p.first_layer;
             }
         }
-        if ui.button("⏮").on_hover_text("Previous layer").clicked() {
+        if ui.button(tr("⏮")).on_hover_text(tr("Previous layer")).clicked() {
             p.last_layer = p.last_layer.saturating_sub(1);
             p.line_cursor = 0;
         }
-        if ui.button("⏭").on_hover_text("Next layer").clicked() {
+        if ui.button(tr("⏭")).on_hover_text(tr("Next layer")).clicked() {
             p.last_layer = (p.last_layer + 1).min(max);
             p.line_cursor = 0;
         }
         ui.add(egui::Slider::new(&mut p.speed, 1.0..=200.0).logarithmic(true).text("speed"));
         ui.separator();
-        ui.label("Step by");
+        ui.label(tr("Step by"));
         ui.selectable_value(&mut p.by_line, false, "layer");
         if ui.selectable_value(&mut p.by_line, true, "move").clicked() {
             p.line_cursor = 0;
         }
         ui.separator();
         let mut only = p.only_n.is_some();
-        if ui.checkbox(&mut only, "Only the last").changed() {
+        if ui.checkbox(&mut only, tr("Only the last")).changed() {
             p.only_n = if only { Some(1) } else { None };
         }
         if let Some(n) = &mut p.only_n {
             ui.add(egui::DragValue::new(n).range(1..=10_000));
-            ui.label("layers");
+            ui.label(tr("layers"));
         }
     });
     ui.horizontal(|ui| {
         let w = (ui.available_width() - 160.0).max(120.0);
         ui.spacing_mut().slider_width = w;
-        ui.label("From ");
+        ui.label(tr("From "));
         ui.add(
             egui::Slider::new(&mut p.first_layer, 0..=max)
                 .custom_formatter(|v, _| format!("{}", v as usize + 1)),
@@ -668,7 +686,7 @@ pub fn preview_controls(app: &mut SliceCraftApp, ui: &mut Ui) {
     ui.horizontal(|ui| {
         let w = (ui.available_width() - 160.0).max(120.0);
         ui.spacing_mut().slider_width = w;
-        ui.label("To     ");
+        ui.label(tr("To     "));
         if ui
             .add(
                 egui::Slider::new(&mut p.last_layer, 0..=max)
@@ -683,7 +701,7 @@ pub fn preview_controls(app: &mut SliceCraftApp, ui: &mut Ui) {
         ui.horizontal(|ui| {
             let w = (ui.available_width() - 160.0).max(120.0);
             ui.spacing_mut().slider_width = w;
-            ui.label("Move  ");
+            ui.label(tr("Move  "));
             ui.add(egui::Slider::new(&mut p.line_cursor, 0..=moves));
         });
     }
@@ -758,6 +776,24 @@ pub fn legend(app: &SliceCraftApp) -> Vec<(Color32, String)> {
                 .map(|k| {
                     let t = f64::from(k) / 4.0;
                     (scene::ramp(t), format!("{:.1} mm", t * top))
+                })
+                .collect()
+        }
+        Coloring::Tool => app
+            .preview_cache
+            .as_ref()
+            .map(|(_, l)| scene::tools_used(l))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|t| (scene::tool_color(t), format!("tool {t}")))
+            .collect(),
+        Coloring::Flow => {
+            let (lo, hi) =
+                app.preview_cache.as_ref().map_or((0.0, 1.0), |(_, l)| scene::flow_range(l));
+            (0..5)
+                .map(|k| {
+                    let t = f64::from(k) / 4.0;
+                    (scene::ramp(t), format!("{:.1} mm³/s", f64::from(lo) + t * f64::from(hi - lo)))
                 })
                 .collect()
         }

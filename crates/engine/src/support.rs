@@ -397,8 +397,11 @@ pub fn support_paths(
         }
     }
     if !layer.dense.is_empty() {
+        // the base on the bed joins the pillars into one footprint at the
+        // body's density (as the reference does: a wider, not a denser, base);
+        // interfaces on the model are dense
         let density = if index < s.support_base_layers as usize {
-            100.0
+            s.support_infill.max(1.0)
         } else {
             s.support_interface_infill.max(1.0)
         };
@@ -621,6 +624,35 @@ mod tests {
             cell = pillars(&t, 4.0, 0.45).unwrap_or_default();
         }
         assert_eq!(cell.polygons.len(), 1);
+    }
+
+    #[test]
+    fn a_block_box_on_one_pillar_removes_only_that_pillar() {
+        let (n, w) = (20, 0.45);
+        let regions = table(n, 10);
+        let s = PrintSettings { support_style: slicecraft_doc::SupportStyle::Pillars, ..on() };
+        let layer3 = |edits: &[SupportEdit]| {
+            support_layers(&regions, &slots(n, 0.2), &s, w, edits, &mut crate::pipeline::Quiet)
+                .ok()
+                .and_then(|l| l.get(3).and_then(|x| x.area().ok()))
+                .unwrap_or_default()
+        };
+        let before = layer3(&[]);
+        assert!(before.polygons.len() > 4, "{} pillars", before.polygons.len());
+        // the footprint of one pillar, as the window takes it from the preview
+        let Some(one) = before.polygons.get(before.polygons.len() / 2) else { return };
+        let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+        for p in &one.outer {
+            (x0, y0, x1, y1) = (x0.min(p.x), y0.min(p.y), x1.max(p.x), y1.max(p.y));
+        }
+        let block = SupportEdit::columns(
+            SupportEditKind::Block,
+            (x0 - 0.05, y0 - 0.05),
+            (x1 + 0.05, y1 + 0.05),
+        );
+        let after = layer3(&[block]);
+        assert_eq!(after.polygons.len() + 1, before.polygons.len());
+        assert!((before.area() - after.area() - one.area()).abs() < 0.05 * one.area().max(1.0));
     }
 
     #[test]

@@ -9,6 +9,9 @@ repository.workspace = true
 
 [dependencies]
 slicecraft-engine.workspace = true
+slicecraft-doc.workspace = true
+slicecraft-io.workspace = true
+slicecraft-geom.workspace = true
 
 [dev-dependencies]
 slicecraft-render.workspace = true

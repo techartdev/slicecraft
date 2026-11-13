@@ -37,10 +37,14 @@ pub enum PathKind {
     TopSolid,
     /// A light pass over top surfaces.
     Ironing,
+    /// The tower each tool primes on after a tool change.
+    PrimeTower,
+    /// The thin wall around the part that wipes idle tools' ooze.
+    OozeShield,
 }
 
 impl PathKind {
-    pub const ALL: [PathKind; 13] = [
+    pub const ALL: [PathKind; 15] = [
         PathKind::Skirt,
         PathKind::Brim,
         PathKind::OuterPerimeter,
@@ -54,6 +58,8 @@ impl PathKind {
         PathKind::Bridge,
         PathKind::TopSolid,
         PathKind::Ironing,
+        PathKind::PrimeTower,
+        PathKind::OozeShield,
     ];
 
     pub fn label(self) -> &'static str {
@@ -71,6 +77,8 @@ impl PathKind {
             PathKind::Bridge => "bridge",
             PathKind::TopSolid => "top surface",
             PathKind::Ironing => "ironing",
+            PathKind::PrimeTower => "prime tower",
+            PathKind::OozeShield => "ooze shield",
         }
     }
 }
@@ -81,6 +89,8 @@ pub struct ToolPath {
     pub kind: PathKind,
     pub points: Vec<Point2>,
     pub closed: bool,
+    /// The extruder that prints it (0 for single-extruder printers).
+    pub tool: u8,
 }
 
 impl ToolPath {
@@ -138,7 +148,7 @@ pub fn perimeters(
         let kind = if k == 0 { PathKind::OuterPerimeter } else { PathKind::InnerPerimeter };
         for ring in shell.contours() {
             if ring.len() >= 3 {
-                paths.push(ToolPath { kind, points: ring.clone(), closed: true });
+                paths.push(ToolPath { kind, points: ring.clone(), closed: true, tool: 0 });
             }
         }
     }
@@ -236,6 +246,7 @@ pub fn line_infill(
                 kind,
                 points: vec![Point2::new(x0, y).rotated(angle), Point2::new(x1, y).rotated(angle)],
                 closed: false,
+                tool: 0,
             });
         }
     }
@@ -300,7 +311,7 @@ pub fn zigzag(lines: Vec<ToolPath>, region: &Region, max_link: f64) -> Vec<ToolP
                 chain.extend(next.points.iter().copied());
             }
         }
-        out.push(ToolPath { kind, points: chain, closed: false });
+        out.push(ToolPath { kind, points: chain, closed: false, tool: 0 });
     }
     out
 }
@@ -402,7 +413,7 @@ pub fn concentric_infill(
         }
         for c in ring.contours() {
             if c.len() >= 3 {
-                out.push(ToolPath { kind, points: c.clone(), closed: true });
+                out.push(ToolPath { kind, points: c.clone(), closed: true, tool: 0 });
             }
         }
         ring = ring.offset(-spacing)?;
@@ -453,6 +464,61 @@ pub fn order_paths(mut paths: Vec<ToolPath>, from: Point2) -> (Vec<ToolPath>, Po
         }
         let mut p = paths.swap_remove(best.1);
         match best.2 {
+            Choice::Forward => {}
+            Choice::Reverse => p.points.reverse(),
+            Choice::RotateTo(k) => p.points.rotate_left(k),
+        }
+        if let Some(e) = p.end() {
+            at = e;
+        }
+        out.push(p);
+    }
+    (out, at)
+}
+
+/// Like [`order_paths`], but a move that `crosses` says leaves the part
+/// (and so needs a retraction) costs `penalty` mm more: among the nearest few
+/// next paths, one reachable without leaving the part wins.
+pub fn order_paths_avoiding(
+    mut paths: Vec<ToolPath>,
+    from: Point2,
+    crosses: &dyn Fn(Point2, Point2) -> bool,
+    penalty: f64,
+) -> (Vec<ToolPath>, Point2) {
+    const CANDIDATES: usize = 6;
+    if paths.len() > MAX_PATHS_TO_ORDER / 2 {
+        return order_paths(paths, from);
+    }
+    let mut at = from;
+    let mut out = Vec::with_capacity(paths.len());
+    while !paths.is_empty() {
+        let mut near: Vec<(f64, usize, Choice)> = paths
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let (d, c) = nearest_entry(p, at);
+                (d, i, c)
+            })
+            .collect();
+        near.sort_by(|a, b| a.0.total_cmp(&b.0));
+        near.truncate(CANDIDATES);
+        let mut best: Option<(f64, usize, Choice)> = None;
+        for (d, i, c) in near {
+            let Some(p) = paths.get(i) else { continue };
+            let entry = match c {
+                Choice::Forward => p.points.first(),
+                Choice::Reverse => p.points.last(),
+                Choice::RotateTo(k) => p.points.get(k),
+            };
+            let cost =
+                d.sqrt() + entry.map_or(0.0, |e| if crosses(at, *e) { penalty } else { 0.0 });
+            if best.is_none_or(|(b, _, _)| cost < b) {
+                best = Some((cost, i, c));
+            }
+        }
+        let Some((_, i, c)) = best else { break };
+        let mut p = paths.swap_remove(i);
+        match c {
             Choice::Forward => {}
             Choice::Reverse => p.points.reverse(),
             Choice::RotateTo(k) => p.points.rotate_left(k),
@@ -660,6 +726,7 @@ mod tests {
             kind: PathKind::OuterPerimeter,
             points: vec![Point2::new(0.0, 0.0), Point2::new(1.0, 0.0), Point2::new(1.0, 1.0)],
             closed: true,
+            tool: 0,
         };
         start_near(&mut ring, Point2::new(2.0, 2.0));
         assert_eq!(ring.start(), Some(Point2::new(1.0, 1.0)));
@@ -675,11 +742,13 @@ mod tests {
             kind: PathKind::SolidInfill,
             points: vec![Point2::new(10.0, 0.0), Point2::new(20.0, 0.0)],
             closed: false,
+            tool: 0,
         };
         let b = ToolPath {
             kind: PathKind::SolidInfill,
             points: vec![Point2::new(5.0, 1.0), Point2::new(0.0, 1.0)],
             closed: false,
+            tool: 0,
         };
         let (ordered, end) = order_paths(vec![a, b], Point2::new(0.0, 0.0));
         assert_eq!(ordered.first().and_then(|p| p.start()), Some(Point2::new(0.0, 1.0)));
@@ -698,6 +767,7 @@ mod tests {
                 Point2::new(0.0, 1.0),
             ],
             closed: true,
+            tool: 0,
         };
         let (ordered, end) = order_paths(vec![ring], Point2::new(5.0, 5.0));
         assert_eq!(ordered.first().and_then(|p| p.start()), Some(Point2::new(1.0, 1.0)));

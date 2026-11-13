@@ -20,7 +20,7 @@ describes code that exists. The rules that keep the shape are in
 | L3 | `io` | STL (binary + ASCII, detected by content), OBJ; `GcodeWriter` and `write_gcode` with the extrusion model, retraction, fan and estimates; `project` (`.scproj`); `fff` (Simplify3D profile import) |
 | L4 | `engine` | `Session`, `Command`/`Outcome`, `COMMANDS`, `SliceJob`; `pipeline`: the parallel slicing pipeline; `support`: support areas and paths |
 | L5 | `ui-egui` | eframe window: `app` (panels, commands, slicing thread), `camera` (orbit camera math), `scene` (bed, models, toolpaths as egui meshes) |
-| L5 | `mcp` | `ToolSpec` table bound to engine command ids, `dispatch` with arguments |
+| L5 | `mcp` | `ToolSpec` table bound to engine command ids, `dispatch` with arguments, the stdio MCP server |
 | app | `slicecraft` | Opens the window, with model files from the command line pre-loaded |
 | app | `slicecraft-cli` | `commands`, `info <model>`, `slice <model>... -o out.gcode [options] [--json]` |
 | tool | `xtask` | `ci`, `layers`, `stats` |
@@ -192,10 +192,13 @@ measurements behind each conversion are in [research/09-fff-profiles.md](researc
 
 ## Agent control
 
-`mcp::TOOLS` binds each tool to an engine command and `dispatch` runs it with string
-arguments (`path`, `index`); a programmatic call never opens a dialog. Transport
-(JSON-RPC over stdio) and the JSON control channel are phase P5. Until then,
-`slicecraft-cli` (with `--json`) is the automation surface.
+`mcp::TOOLS` binds each tool to an engine command, declares its arguments (which
+become each tool's JSON schema) and `dispatch` runs it with text arguments; a
+programmatic call never opens a dialog. `mcp::server` speaks MCP over standard input
+and output (`slicecraft-cli mcp`): `initialize`, `ping`, `tools/list`, `tools/call`,
+JSON-RPC 2.0 one message per line, through its own small JSON reader (`mcp::json`,
+depth and size capped). An agent starts with `slicecraft.describe`, which lists the
+models by index, the profile and the slice state.
 
 ## Safety
 

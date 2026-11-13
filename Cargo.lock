@@ -2707,6 +2707,7 @@ dependencies = [
  "slicecraft-doc",
  "slicecraft-engine",
  "slicecraft-io",
+ "slicecraft-mcp",
 ]
 
 [[package]]
@@ -2749,7 +2750,10 @@ dependencies = [
 name = "slicecraft-mcp"
 version = "0.0.1"
 dependencies = [
+ "slicecraft-doc",
  "slicecraft-engine",
+ "slicecraft-geom",
+ "slicecraft-io",
  "slicecraft-render",
 ]
 
@@ -2771,6 +2775,7 @@ dependencies = [
  "slicecraft-geom",
  "slicecraft-io",
  "slicecraft-render",
+ "zune-jpeg",
 ]
 
 [[package]]

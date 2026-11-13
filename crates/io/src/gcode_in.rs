@@ -43,7 +43,9 @@ pub fn feature_from_comment(comment: &str) -> Option<PathKind> {
         }
         "skirt" | "skirt/brim" => PathKind::Skirt,
         "brim" => PathKind::Brim,
-        "raft" | "prime pillar" => PathKind::Raft,
+        "raft" => PathKind::Raft,
+        "prime tower" | "prime pillar" | "wipe tower" => PathKind::PrimeTower,
+        "ooze shield" => PathKind::OozeShield,
         _ => return None,
     };
     Some(kind)
@@ -72,6 +74,7 @@ impl Reader {
                 kind: self.kind,
                 points: std::mem::take(&mut self.path),
                 closed: false,
+                tool: 0,
             });
         }
         self.path.clear();
@@ -221,6 +224,7 @@ mod tests {
             kind,
             points: vec![Point2::new(a.0, a.1), Point2::new(b.0, b.1)],
             closed: false,
+            tool: 0,
         };
         let layers: Vec<LayerPaths> = (0..3)
             .map(|i| LayerPaths {

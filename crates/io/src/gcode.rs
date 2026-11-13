@@ -132,6 +132,7 @@ pub fn path_speed(s: &PrintSettings, kind: PathKind, layer_index: usize) -> f64 
         PathKind::Support | PathKind::SupportInterface => {
             s.print_speed * s.support_speed_percent / 100.0
         }
+        PathKind::PrimeTower | PathKind::OozeShield => s.perimeter_speed,
     }
 }
 
@@ -156,6 +157,7 @@ pub struct GcodeStats {
     pub extruded_mm: f64,
     pub travel_mm: f64,
     pub retractions: usize,
+    pub tool_changes: usize,
 }
 
 /// Writes G-code for one tool, in absolute millimetres and absolute E.
@@ -183,13 +185,41 @@ pub struct GcodeWriter<'a> {
     spiral_from: Option<f64>,
     /// Direction of the last move, for the acceleration estimate.
     last_dir: Option<(f64, f64)>,
+    /// The active tool.
+    tool: u8,
+    /// Every tool the job uses, ascending.
+    tools: Vec<u8>,
+    /// Layers from this index on are the print's last solid layers.
+    top_from: usize,
+    /// Idle tools: (tool, estimated time it went idle, cooled to standby yet).
+    idle: Vec<(u8, f64, bool)>,
+    /// The highest layer printed so far (one model at a time), mm.
+    printed_top: f64,
+}
+
+/// The temperature schedule's "layer temperature" pairs (layers counted from
+/// 1); lines that do not read as two sensible numbers are skipped.
+pub fn temperature_schedule(text: &str) -> Vec<(usize, f64)> {
+    text.lines()
+        .take(1000)
+        .filter_map(|l| {
+            let mut it = l.split([' ', '\t', ',', ':', '=']).filter(|w| !w.is_empty());
+            let layer = it.next()?.parse::<usize>().ok()?;
+            let temp = it.next()?.parse::<f64>().ok()?;
+            (layer >= 1 && temp.is_finite() && (0.0..=450.0).contains(&temp))
+                .then_some((layer, temp))
+        })
+        .collect()
 }
 
 /// Flow multiplier for a feature, on top of the profile's.
 pub fn kind_flow(s: &PrintSettings, kind: PathKind) -> f64 {
     match kind {
         // combined infill is as thick as the layers it stands for
-        PathKind::SparseInfill => f64::from(s.infill_every_layers.max(1)),
+        PathKind::SparseInfill => {
+            f64::from(s.infill_every_layers.max(1)) * s.infill_width_percent / 100.0
+        }
+        PathKind::Support => f64::from(s.support_every_layers.max(1)),
         PathKind::Bridge => s.bridge_flow_percent / 100.0,
         PathKind::TopSolid => s.top_flow_percent / 100.0,
         PathKind::Ironing => s.ironing_flow / 100.0,
@@ -253,7 +283,76 @@ impl<'a> GcodeWriter<'a> {
             layer_fan: 0,
             spiral_from: None,
             last_dir: None,
+            tool: 0,
+            tools: Vec::new(),
+            top_from: usize::MAX,
+            idle: Vec::new(),
+            printed_top: 0.0,
         }
+    }
+
+    /// Drop tools idle for longer than the profile allows to their standby
+    /// temperature.
+    fn cool_idle_tools(&mut self) {
+        let s = self.settings;
+        if s.standby_temperature <= 0.0 || self.idle.is_empty() {
+            return;
+        }
+        let now = self.stats.estimated_seconds;
+        for k in 0..self.idle.len() {
+            let Some(&(t, since, cooled)) = self.idle.get(k) else { continue };
+            if !cooled && now - since >= s.idle_after_seconds {
+                let _ = writeln!(self.out, "M104 T{t} S{:.0} ; idle tool", s.standby_temperature);
+                if let Some(e) = self.idle.get_mut(k) {
+                    e.2 = true;
+                }
+            }
+        }
+    }
+
+    /// Change to tool `new`: pull the filament back further than a normal
+    /// retraction, let the old tool cool to its idle temperature, switch,
+    /// run the tool change script and wait for the new tool to be hot.
+    fn tool_change(&mut self, new: u8) {
+        let s = self.settings;
+        let old = self.tool;
+        if new == old {
+            return;
+        }
+        let want = s.tool_change_retract;
+        if want > self.retracted && self.stats.filament_mm > 0.0 {
+            let d = want - self.retracted;
+            self.retracted = want;
+            let e = self.e_word(-d);
+            let f = self.feed_word(s.tool_change_speed);
+            let _ = writeln!(self.out, "G1 {e}{f} ; tool change retraction");
+            self.stats.retractions += 1;
+            self.stats.estimated_seconds += d / s.tool_change_speed.max(1.0);
+        }
+        // the old tool waits hot for a while; the delay decides when it cools
+        self.idle.retain(|(t, _, _)| *t != old);
+        self.idle.push((old, self.stats.estimated_seconds, false));
+        self.cool_idle_tools();
+        let _ = writeln!(self.out, "T{new} ; tool change");
+        if !s.tool_change_script.trim().is_empty() {
+            let text = s
+                .tool_change_script
+                .replace("{old}", &old.to_string())
+                .replace("{new}", &new.to_string());
+            self.script(&text, None);
+        }
+        // a tool that cooled down heats up again before it prints
+        let cooled = self.idle.iter().any(|(t, _, c)| *t == new && *c);
+        self.idle.retain(|(t, _, _)| *t != new);
+        if cooled {
+            let _ =
+                writeln!(self.out, "M109 T{new} S{:.0} ; wait for the tool", s.nozzle_temperature);
+        }
+        // the firmware moves to the new tool's offset: the next move is a travel
+        self.pos = None;
+        self.feed = None;
+        self.tool = new;
+        self.stats.tool_changes += 1;
     }
 
     fn line(&mut self, text: &str) {
@@ -302,6 +401,9 @@ impl<'a> GcodeWriter<'a> {
         let script = s.start_script.trim();
         // heat first, unless the script sets temperatures itself; a script
         // without heating would otherwise prime a cold nozzle
+        if s.chamber_temperature > 0.0 {
+            let _ = writeln!(self.out, "M141 S{:.0} ; chamber heating", s.chamber_temperature);
+        }
         if script.is_empty() || !script_sets_temperatures(script) {
             if bed > 0.0 {
                 let _ = writeln!(self.out, "M140 S{bed:.0} ; bed heating");
@@ -333,6 +435,27 @@ impl<'a> GcodeWriter<'a> {
         self.line("M107 ; fan off");
         self.e = 0.0;
         self.retracted = 0.0;
+        // several tools: the others heat to their idle temperature now, and
+        // the job starts on the lowest-numbered tool
+        if self.tools.len() > 1 {
+            let first = self.tools.first().copied().unwrap_or(0);
+            let idle = if s.standby_temperature > 0.0 {
+                s.standby_temperature
+            } else {
+                s.nozzle_temperature
+            };
+            for t in self.tools.clone() {
+                if t != first {
+                    let _ = writeln!(self.out, "M104 T{t} S{idle:.0} ; tool {t} heating");
+                    self.idle.push((t, 0.0, s.standby_temperature > 0.0));
+                }
+            }
+            let _ = writeln!(self.out, "T{first} ; first tool");
+            self.tool = first;
+        } else if let Some(&only) = self.tools.first().filter(|&&t| t != 0) {
+            let _ = writeln!(self.out, "T{only} ; tool");
+            self.tool = only;
+        }
     }
 
     /// What every X and Y written is shifted by: the user's offsets, and the
@@ -410,6 +533,10 @@ impl<'a> GcodeWriter<'a> {
         }
         self.stats.retractions += 1;
         self.stats.estimated_seconds += r / s.retract_speed;
+        if !s.retract_script.trim().is_empty() {
+            let text = s.retract_script.clone();
+            self.script(&text, None);
+        }
     }
 
     fn unretract(&mut self) {
@@ -494,6 +621,46 @@ impl<'a> GcodeWriter<'a> {
         if self.settings.retract_on_layer_change && !spiral {
             self.retract();
         }
+        // a layer lower than the last one starts the next model (one model at a
+        // time): rise above everything printed, cross over, then come down
+        if let Some(z) = self.z
+            && layer.z < z - 1e-6
+        {
+            self.retract();
+            self.printed_top = self.printed_top.max(z);
+            let s = self.settings;
+            let safe = (self.printed_top + 5.0).min(s.bed_height.max(self.printed_top));
+            let f = self.feed_word(s.z_speed.min(s.travel_speed));
+            let _ = writeln!(
+                self.out,
+                "G0 Z{:.3}{f} ; clear the printed models",
+                safe + s.gcode_offset_z
+            );
+            self.stats.estimated_seconds += (safe - z).abs() / s.z_speed.max(1.0);
+            if let Some(p) = layer.paths.first().and_then(ToolPath::start) {
+                let (ox, oy) = self.xy_offset();
+                let f = self.feed_word(s.travel_speed);
+                let _ = writeln!(
+                    self.out,
+                    "G0 X{:.3} Y{:.3}{f} ; to the next model",
+                    p.x + ox,
+                    p.y + oy
+                );
+                if let Some(q) = self.pos {
+                    self.stats.travel_mm += q.distance(p);
+                    self.stats.estimated_seconds += q.distance(p) / s.travel_speed.max(1.0);
+                }
+                self.pos = Some(p);
+            }
+            // first-layer temperatures again for the new model's first layer
+            if layer.index == 0 && s.first_layer_nozzle_temperature != s.nozzle_temperature {
+                let _ = writeln!(
+                    self.out,
+                    "M104 S{:.0} ; first layer of the next model",
+                    s.first_layer_nozzle_temperature
+                );
+            }
+        }
         // a spiral layer rises along its wall: no separate Z move
         if !spiral {
             let z_speed = self.settings.z_speed.min(self.settings.travel_speed);
@@ -545,7 +712,19 @@ impl<'a> GcodeWriter<'a> {
         {
             duty = 255.0;
         }
+        if s.fan_ramp_layers > 0 && fan_layer >= from && duty > 0.0 {
+            let step = (fan_layer - from + 1) as f64 / f64::from(s.fan_ramp_layers);
+            duty = (duty * step.min(1.0)).round();
+        }
         self.layer_fan = duty.clamp(0.0, 255.0) as u8;
+        if let Some(t) = temperature_schedule(&s.temperature_schedule)
+            .into_iter()
+            .rev()
+            .find(|(l, _)| *l == fan_layer)
+            .map(|(_, t)| t)
+        {
+            let _ = writeln!(self.out, "M104 S{t:.0} ; scheduled temperature");
+        }
         self.set_fan(self.layer_fan);
         self.kind = None;
     }
@@ -685,6 +864,10 @@ impl<'a> GcodeWriter<'a> {
 
     fn path_full(&mut self, path: &ToolPath, layer: &LayerPaths, inside: bool, finish: Finish) {
         let Some(start) = path.start() else { return };
+        if path.tool != self.tool {
+            self.tool_change(path.tool);
+        }
+        self.cool_idle_tools();
         if self.kind != Some(path.kind) {
             if self.settings.verbose_comments {
                 let _ = writeln!(self.out, ";TYPE:{}", path.kind.label());
@@ -695,6 +878,9 @@ impl<'a> GcodeWriter<'a> {
         let width = layer_line_width(s, layer.index);
         let e_per_mm = filament_per_mm(width, layer.height, s) * kind_flow(s, path.kind);
         let mut full = path_speed(s, path.kind, layer.index);
+        if layer.index >= self.top_from && layer.index > 0 {
+            full *= s.top_layer_speed_percent / 100.0;
+        }
         // short walls print slower so they can cool
         if s.short_wall_length > 0.0
             && matches!(path.kind, PathKind::OuterPerimeter | PathKind::InnerPerimeter)
@@ -837,9 +1023,16 @@ impl<'a> GcodeWriter<'a> {
                 !next_inside && gap >= s.retract_min_travel
             };
             let finish = if retracts_next && s.retraction() > 0.0 {
+                let wipes = match s.wipe_features {
+                    slicecraft_doc::WipeFeatures::OuterWalls => p.kind == PathKind::OuterPerimeter,
+                    slicecraft_doc::WipeFeatures::AllWalls => {
+                        matches!(p.kind, PathKind::OuterPerimeter | PathKind::InnerPerimeter)
+                    }
+                    slicecraft_doc::WipeFeatures::Everything => true,
+                };
                 Finish {
                     coast: if s.coast_enabled { s.coast_distance } else { 0.0 },
-                    wipe: if s.wipe_enabled { s.wipe_distance } else { 0.0 },
+                    wipe: if s.wipe_enabled && wipes { s.wipe_distance } else { 0.0 },
                 }
             } else {
                 Finish::default()
@@ -860,6 +1053,9 @@ impl<'a> GcodeWriter<'a> {
         self.line("M107 ; fan off");
         self.line("M104 S0 ; nozzle off");
         self.line("M140 S0 ; bed off");
+        if self.settings.chamber_temperature > 0.0 {
+            self.line("M141 S0 ; chamber off");
+        }
         let lift = self.z.map_or(END_LIFT, |z| (z + END_LIFT).min(bed.height));
         let f = self.feed_word(self.settings.z_speed);
         let _ = writeln!(self.out, "G0 Z{lift:.3}{f} ; clear the part");
@@ -882,6 +1078,11 @@ pub fn write_gcode_layers<'a>(
     bed: &Bed,
 ) -> GcodeOutput {
     let mut w = GcodeWriter::new(settings);
+    let mut tools: Vec<u8> = layers.iter().flat_map(|l| l.paths.iter().map(|p| p.tool)).collect();
+    tools.sort_unstable();
+    tools.dedup();
+    w.tools = tools;
+    w.top_from = layers.len().saturating_sub(settings.solid_layers_top as usize);
     w.start();
     let mut previous = settings;
     for (k, layer) in layers.iter().enumerate() {
@@ -895,6 +1096,11 @@ pub fn write_gcode_layers<'a>(
             if here.bed_temperature != previous.bed_temperature {
                 let _ = writeln!(w.out, "M140 S{:.0} ; zone bed temperature", here.bed_temperature);
             }
+        }
+        if k > 0 && here != previous && !here.profile_change_script.trim().is_empty() {
+            let text = here.profile_change_script.clone();
+            w.settings = here;
+            w.script(&text, Some(layer));
         }
         previous = here;
         w.layer(layer);
@@ -968,7 +1174,12 @@ mod tests {
     use super::*;
 
     fn line(a: (f64, f64), b: (f64, f64), kind: PathKind) -> ToolPath {
-        ToolPath { kind, points: vec![Point2::new(a.0, a.1), Point2::new(b.0, b.1)], closed: false }
+        ToolPath {
+            kind,
+            points: vec![Point2::new(a.0, a.1), Point2::new(b.0, b.1)],
+            closed: false,
+            tool: 0,
+        }
     }
 
     fn one_layer(paths: Vec<ToolPath>) -> Vec<LayerPaths> {
@@ -1039,6 +1250,7 @@ mod tests {
             kind: PathKind::OuterPerimeter,
             points: vec![Point2::new(0.0, 0.0), Point2::new(10.0, 0.0), Point2::new(10.0, 10.0)],
             closed: true,
+            tool: 0,
         };
         let out = write_gcode(&one_layer(vec![ring]), &s, &Bed::default());
         assert!((out.stats.extruded_mm - (20.0 + 200f64.sqrt())).abs() < 1e-9);
@@ -1248,14 +1460,91 @@ mod tests {
     }
 
     #[test]
+    fn idle_tools_cool_only_after_the_delay() {
+        // ten layers, each printing with tool 0 then tool 1
+        let mut layers = Vec::new();
+        for k in 0..10 {
+            let mut a = line((0.0, 0.0), (100.0, 0.0), PathKind::OuterPerimeter);
+            let mut b = line((0.0, 10.0), (100.0, 10.0), PathKind::OuterPerimeter);
+            a.tool = 0;
+            b.tool = 1;
+            let mut l = one_layer(vec![a, b]);
+            if let Some(x) = l.first_mut() {
+                x.index = k;
+                x.z = 0.3 + 0.2 * k as f64;
+            }
+            layers.extend(l);
+        }
+        let quick = PrintSettings { idle_after_seconds: 1.0, ..PrintSettings::default() };
+        let patient = PrintSettings { idle_after_seconds: 3600.0, ..PrintSettings::default() };
+        let q = write_gcode(&layers, &quick, &Bed::default());
+        let p = write_gcode(&layers, &patient, &Bed::default());
+        assert_eq!(q.stats.tool_changes, 19);
+        assert!(
+            q.text.matches("; idle tool").count() >= 10,
+            "quick changes still cool after a second"
+        );
+        assert_eq!(
+            p.text.matches("; idle tool").count(),
+            0,
+            "a tool back within the hour stays hot"
+        );
+        // tool 1 started at standby, so it is heated once before its first use
+        assert_eq!(p.text.matches("M109 T1").count(), 1);
+    }
+
+    #[test]
+    fn schedules_ramps_chamber_and_scripts() {
+        assert_eq!(
+            temperature_schedule(
+                "2 205
+bad
+3, 210
+0 200
+4 999"
+            ),
+            vec![(2, 205.0), (3, 210.0)]
+        );
+        let s = PrintSettings {
+            temperature_schedule: "2 205".into(),
+            fan_ramp_layers: 2,
+            fan_from_layer: 1,
+            chamber_temperature: 45.0,
+            retract_script: "; pulled back".into(),
+            ..PrintSettings::default()
+        };
+        let mut layers = two_far_lines();
+        let mut second = layers.clone();
+        if let Some(l) = second.first_mut() {
+            l.index = 1;
+            l.z = 0.5;
+        }
+        layers.extend(second);
+        let out = write_gcode(&layers, &s, &Bed::default());
+        let t = &out.text;
+        assert!(t.contains("M141 S45") && t.contains("M141 S0"));
+        assert!(t.contains("M104 S205 ; scheduled temperature"));
+        assert!(t.contains("M106 S128") && t.contains("M106 S255"), "the fan ramps up");
+        assert!(t.contains("; pulled back"));
+    }
+
+    #[test]
     fn coasting_and_wiping_end_paths_without_extruding() {
         let s = PrintSettings {
             coast_enabled: true,
             coast_distance: 0.5,
             wipe_enabled: true,
             wipe_distance: 2.0,
+            wipe_features: slicecraft_doc::WipeFeatures::Everything,
             ..PrintSettings::default()
         };
+        let walls_only =
+            PrintSettings { wipe_features: slicecraft_doc::WipeFeatures::OuterWalls, ..s.clone() };
+        let no_wipe = write_gcode(&two_far_lines(), &walls_only, &Bed::default());
+        assert!(
+            !no_wipe.text.contains("G1 X18.000 Y0.000"),
+            "infill does not wipe when only walls do"
+        );
         let plain = write_gcode(&two_far_lines(), &PrintSettings::default(), &Bed::default());
         let out = write_gcode(&two_far_lines(), &s, &Bed::default());
         // the first line coasts its last 0.5 mm, then wipes 2 mm back
@@ -1336,6 +1625,7 @@ mod tests {
                     Point2::new(0.0, len),
                 ],
                 closed: true,
+                tool: 0,
             }])
         };
         let base = PrintSettings::default();
@@ -1354,7 +1644,7 @@ mod tests {
                 Point2::new(100.0 + r * a.cos(), 100.0 + r * a.sin())
             })
             .collect();
-        one_layer(vec![ToolPath { kind: PathKind::OuterPerimeter, points, closed: true }])
+        one_layer(vec![ToolPath { kind: PathKind::OuterPerimeter, points, closed: true, tool: 0 }])
     }
 
     #[test]
@@ -1377,6 +1667,7 @@ mod tests {
                     Point2::new(0.0, 10.0),
                 ],
                 closed: true,
+                tool: 0,
             }]),
             &arcs,
             &Bed::default(),

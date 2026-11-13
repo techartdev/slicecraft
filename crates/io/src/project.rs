@@ -75,6 +75,12 @@ pub fn write_project(
         out.push_str("[object]\n");
         out.push_str(&format!("name = {}\n", profile::quote(&o.name)));
         out.push_str(&format!("visible = {}\n", o.visible));
+        if o.role != slicecraft_doc::ModelRole::Print {
+            out.push_str(&format!("role = {}\n", o.role.name()));
+        }
+        if let Some(g) = o.group {
+            out.push_str(&format!("group = {g}\n"));
+        }
         out.push_str(&format!("translate = {}\n", vec3(t.translate)));
         out.push_str(&format!("rotate = {}\n", vec3(t.rotate)));
         out.push_str(&format!("scale = {}\n", vec3(t.scale)));
@@ -129,6 +135,8 @@ struct ObjectBlock {
     line: usize,
     name: String,
     visible: bool,
+    role: slicecraft_doc::ModelRole,
+    group: Option<u32>,
     transform: Transform,
     triangles: Option<usize>,
     mesh: Option<Mesh>,
@@ -140,6 +148,8 @@ impl ObjectBlock {
             line,
             name: "model".into(),
             visible: true,
+            role: slicecraft_doc::ModelRole::Print,
+            group: None,
             transform: Transform::default(),
             triangles: None,
             mesh: None,
@@ -159,6 +169,8 @@ impl ObjectBlock {
         let mut o = SceneObject::new(self.name, mesh);
         o.transform = transform;
         o.visible = self.visible;
+        o.role = self.role;
+        o.group = self.group;
         Ok(o)
     }
 }
@@ -350,6 +362,13 @@ fn object_line(
     let (key, value) = (key.trim(), value.trim());
     match key {
         "name" => block.name = profile::unquote(value).ok_or(bad(n, "a name is not quoted"))?,
+        "role" => {
+            block.role = slicecraft_doc::ModelRole::from_name(value)
+                .ok_or(bad(n, "an unknown model role"))?;
+        }
+        "group" => {
+            block.group = Some(value.parse().map_err(|_| bad(n, "a group is not a number"))?)
+        }
         "visible" => {
             block.visible = match value {
                 "true" => true,
@@ -519,6 +538,9 @@ mod tests {
         let mut b = SceneObject::new("odd name = [x]", octahedron(10.0).unwrap_or_default());
         b.visible = false;
         b.mirror(slicecraft_doc::Axis::X).ok();
+        b.role = slicecraft_doc::ModelRole::Cutter;
+        a.group = Some(3);
+        b.group = Some(3);
         (profile, vec![a, b])
     }
 
@@ -557,6 +579,9 @@ mod tests {
         let b = &p.objects[1];
         assert_eq!(b.name, "odd name = [x]");
         assert!(!b.visible);
+        assert_eq!(b.role, slicecraft_doc::ModelRole::Cutter);
+        assert_eq!(p.objects[0].role, slicecraft_doc::ModelRole::Print);
+        assert!(p.objects.iter().all(|o| o.group == Some(3)));
         assert_eq!(p.objects[0].transform, objects[0].transform);
         assert_eq!(p.objects[0].mesh.triangles(), objects[0].mesh.triangles());
     }
