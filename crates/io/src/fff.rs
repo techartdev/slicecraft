@@ -1288,7 +1288,7 @@ mod tests {
         assert_eq!(s.get("min_layer_time"), Some(SettingValue::Float(12.0)));
         assert_eq!(s.get("min_layer_speed"), Some(SettingValue::Float(30.0)));
         assert!(report.applied.contains(&"layer_height"));
-        assert!(report.placeholders.contains(&"min_layer_time"));
+        assert!(report.applied.contains(&"min_layer_time"));
         assert!(report.ignored.contains(&"celebration".to_string()));
         assert!(report.ignored.contains(&"extruder/somethingNew".to_string()));
         assert!(report.notes.iter().any(|n| n.contains("brim")));

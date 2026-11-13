@@ -118,6 +118,50 @@ pub struct GcodeWriter<'a> {
     feed: Option<f64>,
     kind: Option<PathKind>,
     stats: GcodeStats,
+    /// Path length extruded since the last retraction, mm.
+    since_retract: f64,
+    /// Feed multiplier for the current layer (minimum layer time).
+    speed_factor: f64,
+    /// Current fan duty, 0–255.
+    fan: u8,
+}
+
+/// What happens at the end of a path that a retraction follows.
+#[derive(Debug, Clone, Copy, Default)]
+struct Finish {
+    coast: f64,
+    wipe: f64,
+}
+
+/// The first `length` mm of a polyline, as points after `points[0]`.
+fn along(points: &[Point2], length: f64) -> Vec<Point2> {
+    let mut out = Vec::new();
+    let mut left = length;
+    for w in points.windows(2) {
+        let [a, b] = w else { continue };
+        let d = a.distance(*b);
+        if d <= 0.0 {
+            continue;
+        }
+        if d >= left {
+            let t = left / d;
+            out.push(Point2::new(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t));
+            return out;
+        }
+        out.push(*b);
+        left -= d;
+    }
+    out
+}
+
+fn polyline_length(points: &[Point2]) -> f64 {
+    points
+        .windows(2)
+        .map(|w| match w {
+            [a, b] => a.distance(*b),
+            _ => 0.0,
+        })
+        .sum()
 }
 
 impl<'a> GcodeWriter<'a> {
@@ -132,6 +176,9 @@ impl<'a> GcodeWriter<'a> {
             feed: None,
             kind: None,
             stats: GcodeStats::default(),
+            since_retract: 0.0,
+            speed_factor: 1.0,
+            fan: 0,
         }
     }
 
@@ -203,37 +250,104 @@ impl<'a> GcodeWriter<'a> {
         }
         // the writer's own assumptions hold whatever the script did
         self.line("G90 ; absolute coordinates");
-        self.line("M82 ; absolute extrusion");
+        if s.relative_extrusion {
+            self.line("M83 ; relative extrusion");
+        } else {
+            self.line("M82 ; absolute extrusion");
+        }
         self.line("G92 E0");
         self.line("M107 ; fan off");
         self.e = 0.0;
         self.retracted = 0.0;
     }
 
+    /// The E word for a move of `de` mm of filament, absolute or relative.
+    fn e_word(&mut self, de: f64) -> String {
+        self.e += de;
+        if self.settings.relative_extrusion {
+            format!("E{de:.5}")
+        } else {
+            format!("E{:.5}", self.e)
+        }
+    }
+
     fn retract(&mut self) {
-        let r = self.settings.retraction();
+        let s = self.settings;
+        let r = s.retraction();
         // nothing extruded yet: there is no pressure to relieve
         if r <= 0.0 || self.retracted > 0.0 || self.stats.filament_mm <= 0.0 {
             return;
         }
-        self.e -= r;
+        if s.retract_min_extrusion > 0.0 && self.since_retract < s.retract_min_extrusion {
+            return;
+        }
         self.retracted = r;
-        let f = self.feed_word(self.settings.retract_speed);
-        let _ = writeln!(self.out, "G1 E{:.5}{f}", self.e);
+        self.since_retract = 0.0;
+        if s.firmware_retraction {
+            self.line("G10 ; retract");
+        } else {
+            let e = self.e_word(-r);
+            let f = self.feed_word(s.retract_speed);
+            let _ = writeln!(self.out, "G1 {e}{f}");
+        }
         self.stats.retractions += 1;
-        self.stats.estimated_seconds += r / self.settings.retract_speed;
+        self.stats.estimated_seconds += r / s.retract_speed;
     }
 
     fn unretract(&mut self) {
         if self.retracted <= 0.0 {
             return;
         }
-        self.e += self.retracted;
-        let r = self.retracted;
+        let s = self.settings;
+        // the extra restart length makes up for ooze (or holds some back)
+        let r = (self.retracted + s.retract_extra_restart).max(0.0);
         self.retracted = 0.0;
-        let f = self.feed_word(self.settings.retract_speed);
-        let _ = writeln!(self.out, "G1 E{:.5}{f}", self.e);
-        self.stats.estimated_seconds += r / self.settings.retract_speed;
+        if s.firmware_retraction {
+            self.line("G11 ; unretract");
+        } else {
+            let e = self.e_word(r);
+            let f = self.feed_word(s.retract_speed);
+            let _ = writeln!(self.out, "G1 {e}{f}");
+        }
+        self.stats.estimated_seconds += r / s.retract_speed;
+    }
+
+    fn set_fan(&mut self, duty: u8) {
+        if duty == self.fan {
+            return;
+        }
+        if duty == 0 {
+            self.line("M107 ; fan off");
+        } else {
+            if self.fan == 0 && duty < 255 && self.settings.fan_kickstart {
+                self.line("M106 S255 ; kick-start the fan");
+                self.line("G4 P200");
+            }
+            let _ = writeln!(self.out, "M106 S{duty}");
+        }
+        self.fan = duty;
+    }
+
+    /// The layer's printing time at full speed, s: extrusion plus travel.
+    fn layer_time(&self, layer: &LayerPaths) -> f64 {
+        let s = self.settings;
+        let mut t = 0.0;
+        let mut at: Option<Point2> = None;
+        for p in &layer.paths {
+            let speed = path_speed(s, p.kind, layer.index).max(1e-6);
+            let mut len = polyline_length(&p.points);
+            if p.closed
+                && let (Some(a), Some(b)) = (p.points.first(), p.points.last())
+            {
+                len += a.distance(*b);
+            }
+            t += len / speed;
+            if let (Some(a), Some(b)) = (at, p.start()) {
+                t += a.distance(b) / s.travel_speed.max(1e-6);
+            }
+            at = p.end();
+        }
+        t
     }
 
     /// Move to `z` for a new layer: retract, lift, reset E.
@@ -278,12 +392,22 @@ impl<'a> GcodeWriter<'a> {
         // unretraction then moves to +retracted.
         self.line("G92 E0");
         self.e = 0.0;
+        // cooling: slow a quick layer down, boost the fan on a quick layer
+        let time = self.layer_time(layer);
+        self.speed_factor = if s.min_layer_time > 0.0 && time > 0.0 && time < s.min_layer_time {
+            time / s.min_layer_time
+        } else {
+            1.0
+        };
         let fan_layer = layer.index + 1;
-        let from = self.settings.fan_from_layer.max(1) as usize;
-        if fan_layer == from && self.settings.fan_percent > 0.0 {
-            let duty = (self.settings.fan_percent / 100.0 * 255.0).round();
-            let _ = writeln!(self.out, "M106 S{duty:.0} ; fan on");
+        let from = s.fan_from_layer.max(1) as usize;
+        let mut duty =
+            if fan_layer >= from { (s.fan_percent / 100.0 * 255.0).round() } else { 0.0 };
+        if fan_layer >= from && s.fan_boost_below_seconds > 0.0 && time < s.fan_boost_below_seconds
+        {
+            duty = 255.0;
         }
+        self.set_fan(duty.clamp(0.0, 255.0) as u8);
         self.kind = None;
     }
 
@@ -334,12 +458,27 @@ impl<'a> GcodeWriter<'a> {
         }
         self.unretract();
         let de = d * e_per_mm;
-        self.e += de;
+        let e = self.e_word(de);
         let f = self.feed_word(speed);
         let (ox, oy) = (self.settings.gcode_offset_x, self.settings.gcode_offset_y);
-        let _ = writeln!(self.out, "G1 X{:.3} Y{:.3} E{:.5}{f}", p.x + ox, p.y + oy, self.e);
+        let _ = writeln!(self.out, "G1 X{:.3} Y{:.3} {e}{f}", p.x + ox, p.y + oy);
         self.stats.extruded_mm += d;
         self.stats.filament_mm += de;
+        self.stats.estimated_seconds += d / speed;
+        self.since_retract += d;
+        self.pos = Some(p);
+    }
+
+    /// A move at printing speed without extruding (coasting, wiping).
+    fn glide_to(&mut self, p: Point2, speed: f64) {
+        let Some(from) = self.pos else { return };
+        let d = from.distance(p);
+        if d < 1e-6 {
+            return;
+        }
+        let f = self.feed_word(speed);
+        let (ox, oy) = (self.settings.gcode_offset_x, self.settings.gcode_offset_y);
+        let _ = writeln!(self.out, "G1 X{:.3} Y{:.3}{f}", p.x + ox, p.y + oy);
         self.stats.estimated_seconds += d / speed;
         self.pos = Some(p);
     }
@@ -352,25 +491,73 @@ impl<'a> GcodeWriter<'a> {
     /// Like `path`; `inside` says the travel to it stays inside the printed
     /// area and needs no retraction.
     pub fn path_after(&mut self, path: &ToolPath, layer: &LayerPaths, inside: bool) {
+        self.path_full(path, layer, inside, Finish::default());
+    }
+
+    fn path_full(&mut self, path: &ToolPath, layer: &LayerPaths, inside: bool, finish: Finish) {
         let Some(start) = path.start() else { return };
         if self.kind != Some(path.kind) {
             let _ = writeln!(self.out, ";TYPE:{}", path.kind.label());
             self.kind = Some(path.kind);
         }
-        let speed = path_speed(self.settings, path.kind, layer.index);
-        let width = layer_line_width(self.settings, layer.index);
-        let e_per_mm = filament_per_mm(width, layer.height, self.settings);
+        let s = self.settings;
+        let full = path_speed(s, path.kind, layer.index);
+        let speed = (full * self.speed_factor).max(s.min_layer_speed.min(full));
+        let width = layer_line_width(s, layer.index);
+        let e_per_mm = filament_per_mm(width, layer.height, s);
         self.travel_to(start, inside);
-        for p in path.points.iter().skip(1) {
-            self.extrude_to(*p, speed, e_per_mm);
+        let mut pts: Vec<Point2> = path.points.clone();
+        if path.closed && pts.len() > 2 {
+            pts.push(start);
         }
-        if path.closed && path.points.len() > 2 {
-            self.extrude_to(start, speed, e_per_mm);
+        let total = polyline_length(&pts);
+        // coast: the last stretch without extruding, if the path is long enough
+        let coast =
+            if finish.coast > 0.0 && total > 2.0 * finish.coast { finish.coast } else { 0.0 };
+        let mut done = 0.0;
+        for w in pts.windows(2) {
+            let [a, b] = w else { continue };
+            let d = a.distance(*b);
+            let stop = total - coast;
+            if done + d <= stop {
+                self.extrude_to(*b, speed, e_per_mm);
+            } else if done >= stop {
+                self.glide_to(*b, speed);
+            } else {
+                let t = (stop - done) / d;
+                let mid = Point2::new(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t);
+                self.extrude_to(mid, speed, e_per_mm);
+                self.glide_to(*b, speed);
+            }
+            done += d;
+        }
+        // wipe: along the loop again, or back along an open path
+        if finish.wipe > 0.0 {
+            let route: Vec<Point2> = if path.closed {
+                let mut r = pts.clone();
+                r.extend(pts.iter().skip(1).copied());
+                r
+            } else {
+                pts.iter().rev().copied().collect()
+            };
+            let skip = if path.closed { total } else { 0.0 };
+            let ahead = along(&route, skip + finish.wipe);
+            let mut walked = 0.0;
+            let mut at = route.first().copied().unwrap_or(start);
+            for q in ahead {
+                walked += at.distance(q);
+                at = q;
+                if walked > skip {
+                    self.glide_to(q, speed);
+                }
+            }
         }
     }
 
     pub fn layer(&mut self, layer: &LayerPaths) {
         self.layer_change(layer);
+        let s = self.settings;
+        let n = layer.paths.len();
         for (k, p) in layer.paths.iter().enumerate() {
             let inside = layer.inside_travel.get(k).copied().unwrap_or(false);
             // a combed travel follows its waypoints, inside the part
@@ -379,7 +566,26 @@ impl<'a> GcodeWriter<'a> {
                     self.travel_to(*w, true);
                 }
             }
-            self.path_after(p, layer, inside);
+            // will the travel after this path retract? then coast and wipe
+            let retracts_next = if k + 1 == n {
+                s.retract_on_layer_change
+            } else {
+                let next_inside = layer.inside_travel.get(k + 1).copied().unwrap_or(false);
+                let gap = match (p.end(), layer.paths.get(k + 1).and_then(ToolPath::start)) {
+                    (Some(a), Some(b)) => a.distance(b),
+                    _ => 0.0,
+                };
+                !next_inside && gap >= s.retract_min_travel
+            };
+            let finish = if retracts_next && s.retraction() > 0.0 {
+                Finish {
+                    coast: if s.coast_enabled { s.coast_distance } else { 0.0 },
+                    wipe: if s.wipe_enabled { s.wipe_distance } else { 0.0 },
+                }
+            } else {
+                Finish::default()
+            };
+            self.path_full(p, layer, inside, finish);
         }
         self.stats.layers += 1;
     }
@@ -742,5 +948,89 @@ mod tests {
 {}",
             inside.text
         );
+    }
+
+    fn two_far_lines() -> Vec<LayerPaths> {
+        one_layer(vec![
+            line((0.0, 0.0), (20.0, 0.0), PathKind::SparseInfill),
+            line((0.0, 30.0), (20.0, 30.0), PathKind::SparseInfill),
+        ])
+    }
+
+    #[test]
+    fn coasting_and_wiping_end_paths_without_extruding() {
+        let s = PrintSettings {
+            coast_enabled: true,
+            coast_distance: 0.5,
+            wipe_enabled: true,
+            wipe_distance: 2.0,
+            ..PrintSettings::default()
+        };
+        let plain = write_gcode(&two_far_lines(), &PrintSettings::default(), &Bed::default());
+        let out = write_gcode(&two_far_lines(), &s, &Bed::default());
+        // the first line coasts its last 0.5 mm, then wipes 2 mm back
+        assert!(out.text.contains("G1 X19.500 Y0.000 E"), "{}", out.text);
+        assert!(
+            out.text.contains(
+                "G1 X20.000 Y0.000
+"
+            ),
+            "coast without E"
+        );
+        assert!(out.text.contains("G1 X18.000 Y0.000"), "wipe back");
+        assert!(out.stats.filament_mm < plain.stats.filament_mm);
+    }
+
+    #[test]
+    fn relative_extrusion_firmware_retraction_and_extra_restart() {
+        let rel = PrintSettings { relative_extrusion: true, ..PrintSettings::default() };
+        let out = write_gcode(&two_far_lines(), &rel, &Bed::default());
+        assert!(out.text.contains("M83"));
+        let r = rel.retraction();
+        assert!(out.text.contains(&format!("G1 E{:.5}", -r)), "{}", out.text);
+        let fw = PrintSettings { firmware_retraction: true, ..PrintSettings::default() };
+        let out = write_gcode(&two_far_lines(), &fw, &Bed::default());
+        assert!(out.text.contains("G10") && out.text.contains("G11"));
+        // absolute: after a retraction of r and an extra restart of 0.3, E is 0.3 ahead
+        let extra = PrintSettings { retract_extra_restart: 0.3, ..PrintSettings::default() };
+        let a = write_gcode(&two_far_lines(), &extra, &Bed::default());
+        let b = write_gcode(&two_far_lines(), &PrintSettings::default(), &Bed::default());
+        let last_e = |t: &str| {
+            t.lines()
+                .rfind(|l| l.starts_with("G1 X") && l.contains(" E"))
+                .and_then(|l| l.split_whitespace().find(|w| w.starts_with('E')))
+                .and_then(|w| w.get(1..)?.parse::<f64>().ok())
+                .unwrap_or(0.0)
+        };
+        assert!((last_e(&a.text) - last_e(&b.text) - 0.3).abs() < 1e-4);
+    }
+
+    #[test]
+    fn quick_layers_slow_down_and_boost_the_fan() {
+        let s = PrintSettings {
+            min_layer_time: 60.0,
+            min_layer_speed: 5.0,
+            fan_boost_below_seconds: 30.0,
+            fan_from_layer: 1,
+            fan_percent: 50.0,
+            fan_kickstart: true,
+            ..PrintSettings::default()
+        };
+        let fast = write_gcode(&two_far_lines(), &PrintSettings::default(), &Bed::default());
+        let slow = write_gcode(&two_far_lines(), &s, &Bed::default());
+        assert!(slow.stats.estimated_seconds > fast.stats.estimated_seconds * 2.0);
+        assert!(slow.text.contains("M106 S255"), "boosted");
+        // a slow layer gets the profile fan, kick-started
+        let calm = PrintSettings { fan_boost_below_seconds: 0.0, ..s.clone() };
+        let out = write_gcode(&two_far_lines(), &calm, &Bed::default());
+        assert!(out.text.contains("M106 S255 ; kick-start") && out.text.contains("M106 S128"));
+    }
+
+    #[test]
+    fn short_extrusions_do_not_retract_when_asked() {
+        let s = PrintSettings { retract_min_extrusion: 50.0, ..PrintSettings::default() };
+        let out = write_gcode(&two_far_lines(), &s, &Bed::default());
+        // 20 mm extruded before the travel: below 50, so only the end retracts... or not at all
+        assert!(out.stats.retractions <= 1, "{}", out.stats.retractions);
     }
 }

@@ -242,6 +242,28 @@ pub struct PrintSettings {
     /// Travel moves shorter than this do not retract, mm.
     pub retract_min_travel: f64,
     pub retract_on_layer_change: bool,
+    /// Extra filament pushed (or held back) after a retraction, mm.
+    pub retract_extra_restart: f64,
+    /// Stop extruding a little before a path ends that is followed by a retraction.
+    pub coast_enabled: bool,
+    pub coast_distance: f64,
+    /// Move back along a finished path before retracting.
+    pub wipe_enabled: bool,
+    pub wipe_distance: f64,
+    /// Write E as increments (M83).
+    pub relative_extrusion: bool,
+    /// Retract with G10/G11, leaving length and speed to the firmware.
+    pub firmware_retraction: bool,
+    /// Slow a layer down so it takes at least this long, s (0 = off).
+    pub min_layer_time: f64,
+    /// The slowest that slowdown may go, mm/s.
+    pub min_layer_speed: f64,
+    /// Run the fan at full speed on layers quicker than this, s (0 = off).
+    pub fan_boost_below_seconds: f64,
+    /// Start the fan at full power for a moment before a lower speed.
+    pub fan_kickstart: bool,
+    /// Skip a retraction when less than this was extruded since the last, mm.
+    pub retract_min_extrusion: f64,
     /// Retract only on travel that crosses the model's outline.
     pub retract_only_outside: bool,
     /// Route travel around holes inside the part instead of across them.
@@ -379,6 +401,18 @@ impl Default for PrintSettings {
             retract_lift: 0.0,
             retract_min_travel: 2.0,
             retract_on_layer_change: true,
+            retract_extra_restart: 0.0,
+            coast_enabled: false,
+            coast_distance: 0.2,
+            wipe_enabled: false,
+            wipe_distance: 4.0,
+            relative_extrusion: false,
+            firmware_retraction: false,
+            min_layer_time: 0.0,
+            min_layer_speed: 10.0,
+            fan_boost_below_seconds: 0.0,
+            fan_kickstart: false,
+            retract_min_extrusion: 0.0,
             retract_only_outside: true,
             avoid_crossing_walls: true,
             travel_detour_limit: 3.0,
@@ -947,7 +981,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(-5.0, 5.0, 0.05, MM),
         Df(0.0),
         "Push more (or less) than was retracted when resuming.",
-        None,
+        bind_f!(retract_extra_restart),
     ),
     row(
         "retract_lift",
@@ -987,7 +1021,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         B,
         Db(false),
         "Stop extruding a little before the end of each path.",
-        None,
+        bind_b!(coast_enabled),
     ),
     row(
         "coast_distance",
@@ -997,7 +1031,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(0.0, 5.0, 0.05, MM),
         Df(0.2),
         "Length of path printed without extrusion.",
-        None,
+        bind_f!(coast_distance),
     ),
     row(
         "wipe_enabled",
@@ -1007,7 +1041,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         B,
         Db(false),
         "Move along the finished path after retracting.",
-        None,
+        bind_b!(wipe_enabled),
     ),
     row(
         "wipe_distance",
@@ -1017,7 +1051,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(0.0, 20.0, 0.1, MM),
         Df(4.0),
         "Length of the wipe move.",
-        None,
+        bind_f!(wipe_distance),
     ),
     // ----------------------------------------------------------- Layer
     row(
@@ -1753,7 +1787,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(0.0, 120.0, 1.0, "s"),
         Df(0.0),
         "Slow down so each layer takes at least this long.",
-        None,
+        bind_f!(min_layer_time),
     ),
     row(
         "min_layer_speed",
@@ -1763,7 +1797,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(1.0, 100.0, 1.0, MMS),
         Df(10.0),
         "Never slow below this.",
-        None,
+        bind_f!(min_layer_speed),
     ),
     // ----------------------------------------------------------- Speeds
     row(
@@ -1875,7 +1909,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         B,
         Db(false),
         "Write E as increments (M83) instead of positions.",
-        None,
+        bind_b!(relative_extrusion),
     ),
     row(
         "firmware_retraction",
@@ -1885,7 +1919,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         B,
         Db(false),
         "Let the firmware retract (G10/G11).",
-        None,
+        bind_b!(firmware_retraction),
     ),
     row(
         "arc_fitting",
@@ -2345,7 +2379,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(0.0, 300.0, 1.0, "s"),
         Df(0.0),
         "Run the fan harder on layers faster than this (0 = off).",
-        None,
+        bind_f!(fan_boost_below_seconds),
     ),
     row(
         "fan_kickstart",
@@ -2355,7 +2389,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         B,
         Db(false),
         "Spin the fan at full power briefly before a low speed.",
-        None,
+        bind_b!(fan_kickstart),
     ),
     row(
         "top_layer_speed_percent",
@@ -2519,7 +2553,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(0.0, 50.0, 0.1, MM),
         Df(0.0),
         "Skip a retraction when little was printed since the last one.",
-        None,
+        bind_f!(retract_min_extrusion),
     ),
     row(
         "travel_detour_limit",

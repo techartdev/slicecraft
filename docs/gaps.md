@@ -52,11 +52,11 @@ the architecture document, not to a quieter line here.
 - **Travel** — nearest-neighbour ordering per feature group; combing walks around holes
   inside the part.
 - **Multi-tool** — absent.
-- **Cooling** — fan on from a chosen layer; no schedules, minimum layer time,
-  bridge or top-surface fan.
-- **Retraction** — distance, speed, minimum travel, Z lift, layer-change retraction and
-  "only when crossing outlines" (on by default); no wipe, coasting or extra restart.
-  Travel inside the part walks around holes (combing, on by default, detour limit 3×).
+- **Cooling** — fan from a chosen layer, minimum layer time with a slowest speed, full fan
+  on quick layers, fan kick-start; no bridge or top-surface fan yet.
+- **Retraction** — distance, speed, minimum travel, minimum extrusion, Z lift,
+  layer-change retraction, extra restart, "only when crossing outlines", coasting,
+  wipe and firmware retraction (G10/G11). Travel inside the part walks around holes.
 - **Adaptive layer heights, size compensation, layer ranges, per-object settings** —
   absent.
 - **First-layer width** — set by percentage; no separate first-layer line width for the part on a raft.
@@ -65,7 +65,7 @@ the architecture document, not to a quieter line here.
 
 - **G-code flavours** — Marlin, RepRap and Klipper share one command set today; only
   the header names the flavour. No binary or printer-specific formats.
-- **No relative extrusion**, no arc moves, no pressure advance, no thumbnails.
+- **Relative extrusion** (M83) works; no arc moves, no pressure advance, no thumbnails.
 - **Scripts** — start, end and layer-change scripts with placeholders; no retraction,
   tool-change or profile-change scripts, no conditionals. Coordinate offsets work.
 - **Estimates** ignore acceleration and are optimistic; weight and cost use the
