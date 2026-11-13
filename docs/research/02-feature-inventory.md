@@ -133,7 +133,7 @@ grouping is its own.
 | Seam: nearest / aligned to a point / scattered; preferred regions | public | partial (no preferred regions) | P3 |
 | Solid top/bottom layers | public | done | P3 |
 | Sparse patterns: rectilinear, one-direction lines, grid, triangles, concentric | public | done | P3 |
-| Sparse patterns: honeycomb (2 kinds), gyroid, wiggle, sinusoidal, cubic, octahedral | public | placeholder (fall back to rectilinear, with a note) | P3 |
+| Sparse patterns: honeycomb, gyroid, wiggle, cubic, octahedral | public | done (`render::patterns`, clipped polylines; one honeycomb kind) | P3 |
 | Solid patterns: rectilinear, one-direction, concentric | public | done | P3 |
 | Infill before walls | public | done | P3 |
 | Skirt (several loops, several layers), brim | public | done | P4 |

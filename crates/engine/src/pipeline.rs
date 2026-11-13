@@ -214,7 +214,10 @@ fn pattern_infill(
     spacing: f64,
     angle: f64,
     kind: PathKind,
+    z: f64,
+    layer: usize,
 ) -> Result<Vec<ToolPath>, EngineError> {
+    use slicecraft_render::patterns;
     use std::f64::consts::{FRAC_PI_2, FRAC_PI_3};
     let mut out = Vec::new();
     match pattern {
@@ -240,14 +243,12 @@ fn pattern_infill(
             }
         }
         InfillPattern::Concentric => out.extend(concentric_infill(region, spacing, kind)?),
-        // not drawn yet: rectilinear stands in, and slicing says so
-        InfillPattern::Rectilinear
-        | InfillPattern::Lines
-        | InfillPattern::Honeycomb
-        | InfillPattern::Gyroid
-        | InfillPattern::Wiggle
-        | InfillPattern::Cubic
-        | InfillPattern::Octahedral => {
+        InfillPattern::Gyroid => out.extend(patterns::gyroid(region, spacing, z, kind)?),
+        InfillPattern::Honeycomb => out.extend(patterns::honeycomb(region, spacing, kind)?),
+        InfillPattern::Wiggle => out.extend(patterns::wiggle(region, spacing, layer, kind)?),
+        InfillPattern::Cubic => out.extend(patterns::cubic(region, spacing, z, kind)?),
+        InfillPattern::Octahedral => out.extend(patterns::octahedral(region, spacing, z, kind)?),
+        InfillPattern::Rectilinear | InfillPattern::Lines => {
             out.extend(line_infill(region, spacing, angle, kind)?);
         }
     }
@@ -555,6 +556,8 @@ pub fn slice_document(
                 spacing,
                 a,
                 PathKind::SparseInfill,
+                slots.get(i).map_or(0.0, LayerSlot::cut_z),
+                i,
             )?);
         }
         Ok(paths)

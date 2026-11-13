@@ -84,14 +84,9 @@ impl InfillPattern {
 
     /// Patterns the slicer draws today; the others fall back to rectilinear.
     pub fn is_implemented(self) -> bool {
-        matches!(
-            self,
-            InfillPattern::Rectilinear
-                | InfillPattern::Lines
-                | InfillPattern::Grid
-                | InfillPattern::Triangles
-                | InfillPattern::Concentric
-        )
+        // every pattern is drawn; kept so callers can still ask
+        let _ = self;
+        true
     }
 }
 
@@ -1291,7 +1286,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         "Sparse infill",
         SettingKind::Choice(InfillPattern::NAMES),
         Dc(0),
-        "Shape of the sparse infill. Honeycomb and gyroid fall back to rectilinear for now.",
+        "Shape of the sparse infill. Gyroid, cubic and octahedral are strong in every direction; honeycomb and wiggle are classic looks.",
         bind_e!(infill_pattern, InfillPattern),
     ),
     row(

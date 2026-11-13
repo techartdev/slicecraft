@@ -12,6 +12,7 @@
 //! something a front end can draw.
 
 pub mod paths;
+pub mod patterns;
 pub mod section;
 
 use slicecraft_geom::region::{contour_area, contour_length};

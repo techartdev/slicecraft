@@ -42,9 +42,9 @@ the architecture document, not to a quieter line here.
   model moves.
 - **Bridges** — absent.
 - **Adhesion** — skirt (loops, layers) and brim; no raft, prime tower or ooze shield.
-- **Infill patterns** — rectilinear, one-direction lines, grid, triangles and
-  concentric work; honeycomb, gyroid, wiggle, cubic and octahedral fall back to
-  rectilinear with a note. No dense layers, ironing, ordered (monotonic) tops.
+- **Infill patterns** — rectilinear, one-direction lines, grid, triangles, concentric, gyroid,
+  honeycomb, wiggle, cubic and octahedral all work. No dense layers, ironing or ordered
+  (monotonic) tops yet.
 - **Thin walls / gap fill** — absent.
 - **Seams** — nearest, aligned to a point, or scattered; no preferred-region hiding.
 - **Travel** — nearest-neighbour ordering per feature group; combing walks around holes
