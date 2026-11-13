@@ -17,7 +17,9 @@ pub mod pipeline;
 pub mod support;
 
 use slicecraft_doc::profile::{MAX_PROFILE_BYTES, Profile};
-use slicecraft_doc::{Axis, DocError, Document, PrintSettings, SceneObject, Transform};
+use slicecraft_doc::{
+    Axis, DocError, Document, PrintSettings, SceneObject, SupportEdit, SupportEditKind, Transform,
+};
 use slicecraft_geom::{GeomError, Vec3};
 use slicecraft_io::fff::MAX_FFF_BYTES;
 use slicecraft_io::{
@@ -30,7 +32,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub use pipeline::{
-    MAX_LAYERS, Quiet, SliceObserver, SliceOutput, SliceStats, Stage, slice_document,
+    MAX_LAYERS, Quiet, SliceObserver, SliceOutput, SliceStats, Stage, SupportPreviewLayer,
+    slice_document, support_preview,
 };
 
 /// Largest model file SliceCraft reads, in bytes.
@@ -104,9 +107,10 @@ pub const COMMANDS: &[CommandSpec] = &[
     planned("cut-plane", "Cut with a Plane"),
     // support
     ready("supports", "Generate Supports"),
-    planned("support-edit", "Add or Remove Support by Hand"),
-    planned("support-clear", "Clear Supports"),
-    planned("support-blockers", "Support Blockers"),
+    ready("support-edit", "Add or Remove Support by Hand"),
+    ready("support-clear", "Clear Support Edits"),
+    ready("support-blockers", "Support Blockers"),
+    ready("support-preview", "Show Support Before Slicing"),
     // slicing and output
     ready("preview", "Layer Preview"),
     ready("slice", "Slice"),
@@ -176,6 +180,16 @@ pub enum Command {
     SaveProject(PathBuf),
     /// Turn automatic support on or off in the current profile.
     Supports(bool),
+    /// Add a box where support is added or blocked.
+    AddSupportEdit(SupportEdit),
+    /// Remove one support edit.
+    RemoveSupportEdit {
+        index: usize,
+    },
+    /// Remove every support edit.
+    ClearSupportEdits,
+    /// Work out the support a slice would print, without slicing.
+    PreviewSupport,
     /// Slice now, on the calling thread.
     Slice,
     /// Write G-code to a file, slicing first if the slice is stale.
@@ -201,6 +215,13 @@ impl Command {
             Command::OpenProject(_) => "open-project",
             Command::SaveProject(_) => "save-project",
             Command::Supports(_) => "supports",
+            Command::AddSupportEdit(e) => match e.kind {
+                SupportEditKind::Add => "support-edit",
+                SupportEditKind::Block => "support-blockers",
+            },
+            Command::RemoveSupportEdit { .. } => "support-edit",
+            Command::ClearSupportEdits => "support-clear",
+            Command::PreviewSupport => "support-preview",
             Command::Slice => "slice",
             Command::ExportGcode(_) => "export-gcode",
         }
@@ -236,6 +257,12 @@ pub enum Outcome {
         objects: usize,
         warnings: Vec<String>,
     },
+    /// The support a slice would print.
+    SupportPreviewed {
+        layers: usize,
+        /// Support volume, mm³ (area × layer height).
+        volume: f64,
+    },
     Sliced {
         layers: usize,
         stats: SliceStats,
@@ -260,6 +287,26 @@ impl SliceJob {
 
     pub fn run(&self, observer: &mut dyn SliceObserver) -> Result<SliceOutput, EngineError> {
         slice_document(&self.doc, observer)
+    }
+}
+
+/// A self-contained support preview, so it can run off the UI thread.
+#[derive(Debug, Clone)]
+pub struct SupportJob {
+    doc: Document,
+    revision: u64,
+}
+
+impl SupportJob {
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub fn run(
+        &self,
+        observer: &mut dyn SliceObserver,
+    ) -> Result<Vec<SupportPreviewLayer>, EngineError> {
+        support_preview(&self.doc, observer)
     }
 }
 
@@ -360,6 +407,11 @@ impl Session {
             Some((rev, out)) if *rev == self.revision => Some(Arc::clone(out)),
             _ => None,
         }
+    }
+
+    /// A job that previews the support of the document as it is now.
+    pub fn support_job(&self) -> SupportJob {
+        SupportJob { doc: self.doc.clone(), revision: self.revision }
     }
 
     /// A job that slices the document as it is now.
@@ -564,13 +616,17 @@ impl Session {
                 for o in project.objects {
                     doc.add(o)?;
                 }
+                for e in project.support_edits {
+                    doc.add_support_edit(e)?;
+                }
                 self.doc = doc;
                 self.profile_name = project.profile.name;
                 self.reset_history(Some(path.clone()));
                 Ok(Outcome::ProjectOpened { path, objects, warnings: project.warnings })
             }
             Command::SaveProject(path) => {
-                let text = write_project(&self.profile(), &self.doc.objects);
+                let text =
+                    write_project(&self.profile(), &self.doc.objects, &self.doc.support_edits);
                 std::fs::write(&path, text).map_err(|e| {
                     EngineError::File(format!("cannot write {}: {e}", path.display()))
                 })?;
@@ -587,6 +643,39 @@ impl Session {
                 settings.support_enabled = on;
                 self.doc.set_settings(settings);
                 Ok(self.changed())
+            }
+            Command::AddSupportEdit(e) => {
+                if !e.is_valid() {
+                    return Err(EngineError::Doc(DocError::Setting(
+                        "a support box must be finite and at least 0.1 mm wide",
+                    )));
+                }
+                self.checkpoint(None);
+                self.doc.add_support_edit(e)?;
+                Ok(self.changed())
+            }
+            Command::RemoveSupportEdit { index } => {
+                if index >= self.doc.support_edits.len() {
+                    return Err(EngineError::Doc(DocError::Setting(
+                        "there is no such support edit",
+                    )));
+                }
+                self.checkpoint(None);
+                self.doc.support_edits.remove(index);
+                Ok(self.changed())
+            }
+            Command::ClearSupportEdits => {
+                if self.doc.support_edits.is_empty() {
+                    return Ok(Outcome::Unchanged);
+                }
+                self.checkpoint(None);
+                self.doc.support_edits.clear();
+                Ok(self.changed())
+            }
+            Command::PreviewSupport => {
+                let layers = support_preview(&self.doc, &mut Quiet)?;
+                let volume = layers.iter().map(|l| l.area.area() * l.slot.height).sum();
+                Ok(Outcome::SupportPreviewed { layers: layers.len(), volume })
             }
             Command::Slice => {
                 let out = self.slice_now()?;
@@ -771,11 +860,24 @@ mod tests {
             Command::Slice,
             Command::ExportGcode(PathBuf::new()),
             Command::Supports(true),
+            Command::AddSupportEdit(SupportEdit::columns(
+                SupportEditKind::Block,
+                (0.0, 0.0),
+                (1.0, 1.0),
+            )),
+            Command::AddSupportEdit(SupportEdit::columns(
+                SupportEditKind::Add,
+                (0.0, 0.0),
+                (1.0, 1.0),
+            )),
+            Command::RemoveSupportEdit { index: 0 },
+            Command::ClearSupportEdits,
+            Command::PreviewSupport,
         ];
         for c in samples {
             assert_eq!(s.command(c.id()).map(|spec| spec.state), Some(CommandState::Ready));
         }
-        assert_eq!(s.command("support-edit").map(|c| c.state), Some(CommandState::Planned));
+        assert_eq!(s.command("print-usb").map(|c| c.state), Some(CommandState::Planned));
         assert!(s.command("nope").is_none());
     }
 
@@ -1162,6 +1264,62 @@ mesh = AAAA
         assert!(only_outside < always, "{only_outside} vs {always}");
         // the two cubes stand apart: every layer still retracts between them
         assert!(only_outside >= 99, "{only_outside}");
+    }
+
+    #[test]
+    fn support_edits_are_commands_that_undo_save_and_shape_the_slice() {
+        let Some(mut s) = session_with(table_mesh()) else { return };
+        // nothing yet: no automatic support, no edits
+        assert!(matches!(
+            s.execute(Command::PreviewSupport),
+            Ok(Outcome::SupportPreviewed { layers: 0, .. })
+        ));
+        // the table sits centred on the bed; add support under the whole slab
+        let b = s.document().bounds();
+        let add = SupportEdit::columns(
+            SupportEditKind::Add,
+            (b.min().x, b.min().y),
+            (b.max().x, b.max().y),
+        );
+        assert!(s.execute(Command::AddSupportEdit(add)).is_ok());
+        let with_add = match s.execute(Command::PreviewSupport) {
+            Ok(Outcome::SupportPreviewed { layers, volume }) => (layers, volume),
+            other => panic_free_fail(&format!("{other:?}")),
+        };
+        assert!(with_add.0 > 0 && with_add.1 > 0.0, "{with_add:?}");
+        // blocking the same box removes it again
+        let block = SupportEdit { kind: SupportEditKind::Block, ..add };
+        assert!(s.execute(Command::AddSupportEdit(block)).is_ok());
+        assert!(matches!(
+            s.execute(Command::PreviewSupport),
+            Ok(Outcome::SupportPreviewed { layers: 0, .. })
+        ));
+        // undo the block, then the slice prints support
+        assert!(s.execute(Command::Undo).is_ok());
+        assert_eq!(s.document().support_edits.len(), 1);
+        let sliced = s.execute(Command::Slice);
+        assert!(matches!(sliced, Ok(Outcome::Sliced { .. })));
+        assert!(s.slice_result().is_some_and(|o| o.gcode.contains(";TYPE:support")));
+        // edits survive a project round trip
+        let path =
+            std::env::temp_dir().join(format!("slicecraft-edits-{}.scproj", std::process::id()));
+        assert!(s.execute(Command::SaveProject(path.clone())).is_ok());
+        let mut t = Session::new();
+        assert!(t.execute(Command::OpenProject(path.clone())).is_ok());
+        assert_eq!(t.document().support_edits, s.document().support_edits);
+        let _ = std::fs::remove_file(&path);
+        // bad boxes and indices are refused
+        let bad = SupportEdit::columns(SupportEditKind::Add, (0.0, 0.0), (0.0, 5.0));
+        assert!(s.execute(Command::AddSupportEdit(bad)).is_err());
+        assert!(s.execute(Command::RemoveSupportEdit { index: 9 }).is_err());
+        assert!(s.execute(Command::ClearSupportEdits).is_ok());
+        assert!(s.document().support_edits.is_empty());
+    }
+
+    /// A failed expectation without `panic!` (denied in this crate).
+    fn panic_free_fail(what: &str) -> (usize, f64) {
+        assert!(what.is_empty(), "unexpected: {what}");
+        (0, 0.0)
     }
 
     #[test]

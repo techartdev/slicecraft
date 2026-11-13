@@ -21,6 +21,8 @@
 //! scale = 1 1 1
 //! triangles = 1284
 //! mesh = AAAAAAAA…
+//! [support]
+//! block = 100 90 120 110 0 100000
 //! ```
 //!
 //! Everything read is hostile: the header must match, sizes are checked before
@@ -31,7 +33,9 @@
 use crate::IoError;
 use crate::mesh_in::MAX_TRIANGLES;
 use slicecraft_doc::profile::{self, Profile};
-use slicecraft_doc::{MAX_OBJECTS, SceneObject, Transform};
+use slicecraft_doc::{
+    MAX_OBJECTS, MAX_SUPPORT_EDITS, SceneObject, SupportEdit, SupportEditKind, Transform,
+};
 use slicecraft_geom::{Mesh, Triangle, Vec3};
 
 /// First line of every project file.
@@ -44,12 +48,14 @@ const TRIANGLE_BYTES: usize = 72;
 pub struct Project {
     pub profile: Profile,
     pub objects: Vec<SceneObject>,
+    /// Boxes where support is added or blocked.
+    pub support_edits: Vec<SupportEdit>,
     /// One note per line that was skipped.
     pub warnings: Vec<String>,
 }
 
 /// The project as text.
-pub fn write_project(profile: &Profile, objects: &[SceneObject]) -> String {
+pub fn write_project(profile: &Profile, objects: &[SceneObject], edits: &[SupportEdit]) -> String {
     let mut out = String::new();
     out.push_str(PROJECT_HEADER);
     out.push('\n');
@@ -67,6 +73,21 @@ pub fn write_project(profile: &Profile, objects: &[SceneObject]) -> String {
         out.push_str("mesh = ");
         out.push_str(&encode_mesh(&o.mesh));
         out.push('\n');
+    }
+    if !edits.is_empty() {
+        out.push_str("[support]\n");
+        for e in edits {
+            out.push_str(&format!(
+                "{} = {} {} {} {} {} {}\n",
+                e.kind.name(),
+                e.x0,
+                e.y0,
+                e.x1,
+                e.y1,
+                e.z0,
+                e.z1
+            ));
+        }
     }
     out
 }
@@ -121,6 +142,7 @@ impl ObjectBlock {
 
 enum Section {
     Top,
+    Support,
     Profile,
     Object(ObjectBlock),
     Unknown,
@@ -137,6 +159,7 @@ pub fn read_project(text: &str) -> Result<Project, IoError> {
     let mut profile_text = String::new();
     let mut profile_line = 0;
     let mut objects: Vec<SceneObject> = Vec::new();
+    let mut support_edits: Vec<SupportEdit> = Vec::new();
     let mut warnings = Vec::new();
     let mut section = Section::Top;
 
@@ -154,6 +177,7 @@ pub fn read_project(text: &str) -> Result<Project, IoError> {
                 }
                 "[profile]" => return Err(bad(n, "a second [profile] section")),
                 "[object]" => Section::Object(ObjectBlock::new(n)),
+                "[support]" => Section::Support,
                 _ => {
                     warnings.push(format!("line {n}: unknown section {line} skipped"));
                     Section::Unknown
@@ -167,6 +191,38 @@ pub fn read_project(text: &str) -> Result<Project, IoError> {
                 profile_text.push('\n');
             }
             Section::Object(block) => object_line(block, line, n, &mut warnings)?,
+            Section::Support => {
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                let Some((key, value)) = line.split_once('=') else {
+                    warnings.push(format!("line {n}: no '='"));
+                    continue;
+                };
+                let kind = match key.trim() {
+                    "add" => SupportEditKind::Add,
+                    "block" => SupportEditKind::Block,
+                    other => {
+                        warnings.push(format!("line {n}: unknown support edit {other} skipped"));
+                        continue;
+                    }
+                };
+                let v: Vec<f64> = value.split_whitespace().filter_map(|t| t.parse().ok()).collect();
+                let &[x0, y0, x1, y1, z0, z1] = v.as_slice() else {
+                    return Err(bad(n, "a support edit needs six numbers"));
+                };
+                let e = SupportEdit { kind, x0, y0, x1, y1, z0, z1 };
+                if !e.is_valid() {
+                    return Err(bad(n, "a support edit is out of range"));
+                }
+                if support_edits.len() >= MAX_SUPPORT_EDITS {
+                    return Err(bad(
+                        n,
+                        "the project has more support edits than SliceCraft accepts",
+                    ));
+                }
+                support_edits.push(e);
+            }
             Section::Top => {
                 if !line.is_empty() && !line.starts_with('#') {
                     warnings.push(format!("line {n}: text before the first section skipped"));
@@ -184,7 +240,7 @@ pub fn read_project(text: &str) -> Result<Project, IoError> {
     let (profile, profile_warnings) = Profile::from_text(&profile_text)
         .map_err(|_| bad(profile_line, "the [profile] section is not a SliceCraft profile"))?;
     warnings.extend(profile_warnings.into_iter().map(|w| format!("profile {w}")));
-    Ok(Project { profile, objects, warnings })
+    Ok(Project { profile, objects, support_edits, warnings })
 }
 
 fn push_object(objects: &mut Vec<SceneObject>, block: ObjectBlock) -> Result<(), IoError> {
@@ -402,16 +458,17 @@ mod tests {
     #[test]
     fn project_round_trip_is_byte_identical() {
         let (profile, objects) = sample();
-        let text = write_project(&profile, &objects);
+        let text = write_project(&profile, &objects, &[]);
         let p = read_project(&text).ok().unwrap_or_else(|| Project {
             profile: profile.clone(),
             objects: Vec::new(),
+            support_edits: Vec::new(),
             warnings: vec!["read failed".into()],
         });
         assert!(p.warnings.is_empty(), "{:?}", p.warnings);
         assert_eq!(p.profile, profile);
         assert_eq!(p.objects.len(), 2);
-        let again = write_project(&p.profile, &p.objects);
+        let again = write_project(&p.profile, &p.objects, &p.support_edits);
         assert_eq!(again, text);
         let b = &p.objects[1];
         assert_eq!(b.name, "odd name = [x]");
@@ -423,7 +480,7 @@ mod tests {
     #[test]
     fn hostile_projects_are_refused_not_crashed() {
         let (profile, objects) = sample();
-        let text = write_project(&profile, &objects);
+        let text = write_project(&profile, &objects, &[]);
         // every prefix either reads or is refused
         let mut cut = 0;
         while cut < text.len() {
@@ -452,7 +509,7 @@ mod tests {
     fn a_mesh_with_a_huge_coordinate_is_refused() {
         let (profile, mut objects) = sample();
         objects.truncate(1);
-        let text = write_project(&profile, &objects);
+        let text = write_project(&profile, &objects, &[]);
         // replace the mesh with one triangle whose first coordinate is 1e300
         let mut bytes = Vec::new();
         for c in [1e300f64, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0] {
@@ -470,11 +527,34 @@ mod tests {
     #[test]
     fn unknown_keys_and_sections_are_skipped_with_warnings() {
         let (profile, objects) = sample();
-        let text = write_project(&profile, &objects).replace(
+        let text = write_project(&profile, &objects, &[]).replace(
             "[object]\nname = \"cube\"",
             "[future]\nwhatever = 1\n[object]\ncolour = red\nname = \"cube\"",
         );
         let p = read_project(&text);
         assert!(p.as_ref().is_ok_and(|p| p.objects.len() == 2 && p.warnings.len() == 2), "{p:?}");
+    }
+
+    #[test]
+    fn support_edits_round_trip_and_bad_ones_are_refused() {
+        let (profile, objects) = sample();
+        let edits = vec![
+            SupportEdit::columns(SupportEditKind::Block, (10.0, 20.5), (30.25, 40.0)),
+            SupportEdit {
+                z0: 2.0,
+                z1: 7.5,
+                ..SupportEdit::columns(SupportEditKind::Add, (1.0, 1.0), (3.0, 4.0))
+            },
+        ];
+        let text = write_project(&profile, &objects, &edits);
+        let p = read_project(&text);
+        assert!(p.as_ref().is_ok_and(|p| p.support_edits == edits), "{p:?}");
+        if let Ok(p) = p {
+            assert_eq!(write_project(&p.profile, &p.objects, &p.support_edits), text);
+        }
+        for bad in ["block = 1 2 3", "block = 5 5 1 1 0 9", "add = 0 0 NaN 1 0 1"] {
+            let t = format!("{}[support]\n{bad}\n", write_project(&profile, &objects, &[]));
+            assert!(read_project(&t).is_err(), "accepted {bad}");
+        }
     }
 }

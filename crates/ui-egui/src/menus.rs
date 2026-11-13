@@ -223,6 +223,11 @@ pub fn menu_bar(app: &mut SliceCraftApp, ui: &mut Ui) {
             item(app, ui, "fill-holes", "", true);
         });
         ui.menu_button("Supports", |ui| {
+            let mut show = app.show_support;
+            if ui.checkbox(&mut show, "Show Support Before Slicing").changed() {
+                app.set_show_support(show);
+            }
+            ui.separator();
             let mut on = app.session.document().settings.support_enabled;
             if ui
                 .checkbox(&mut on, "Generate Supports")
@@ -231,9 +236,18 @@ pub fn menu_bar(app: &mut SliceCraftApp, ui: &mut Ui) {
             {
                 app.run(Command::Supports(on));
             }
-            item(app, ui, "support-edit", "", true);
-            item(app, ui, "support-clear", "", true);
-            item(app, ui, "support-blockers", "", true);
+            if item(app, ui, "support-edit", "", true) {
+                app.tool = Tool::SupportAdd;
+                app.set_show_support(true);
+            }
+            if item(app, ui, "support-blockers", "", true) {
+                app.tool = Tool::SupportBlock;
+                app.set_show_support(true);
+            }
+            let edits = app.session.document().support_edits.len();
+            if item(app, ui, "support-clear", "", edits > 0) {
+                app.run(Command::ClearSupportEdits);
+            }
         });
         ui.menu_button("Slice", |ui| {
             if app.job.is_some() {
@@ -368,21 +382,31 @@ pub fn toolbar(app: &mut SliceCraftApp, ui: &mut Ui) {
             if icons::button(ui, Icon::Supports, tip, ready("supports"), on).clicked() {
                 app.run(Command::Supports(!on));
             }
-            if icons::button(ui, Icon::SupportAdd, "Add support", ready("support-edit"), false)
-                .clicked()
+            let adding = app.tool == Tool::SupportAdd;
+            if icons::button(
+                ui,
+                Icon::SupportAdd,
+                "Add support: drag a box on the bed",
+                true,
+                adding,
+            )
+            .clicked()
             {
-                app.planned("support-edit");
+                app.tool = if adding { Tool::Select } else { Tool::SupportAdd };
+                app.set_show_support(true);
             }
             if icons::button(
                 ui,
                 Icon::SupportRemove,
-                "Remove support",
-                ready("support-edit"),
-                false,
+                "Block support: drag a box on the bed",
+                true,
+                app.tool == Tool::SupportBlock,
             )
             .clicked()
             {
-                app.planned("support-edit");
+                let blocking = app.tool == Tool::SupportBlock;
+                app.tool = if blocking { Tool::Select } else { Tool::SupportBlock };
+                app.set_show_support(true);
             }
         }
         ui.separator();

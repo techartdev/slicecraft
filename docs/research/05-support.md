@@ -94,7 +94,9 @@ The best size depends on the model.
    (so not inside the part, and not between pillars) brought the crown from 9660 to
    4927 retractions, against the reference's 4384. The remaining difference is
    likely combing: routing travel around holes instead of across them.
-2. Pillar or grid quantisation as an option, and manual support editing and
-   blockers. Those need a support preview before slicing.
+2. Manual editing: done as boxes. "Add" supports every surface facing down inside the
+   box, at any angle, even with automatic support off. "Block" cuts the columns like
+   the model does. The reference instead toggles single pillars; per-pillar clicking
+   could be added on the same grid.
 3. Measure the reference's dense support layers on a job that uses them.
 4. A real print of the crown to judge how easily each design breaks away.

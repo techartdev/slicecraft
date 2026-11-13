@@ -65,6 +65,11 @@ pub const TOOLS: &[ToolSpec] = &[
         description: "Turn automatic support on (`enabled` = true) or off",
     },
     ToolSpec {
+        name: "slicecraft.support_preview",
+        command: "support-preview",
+        description: "Report the support a slice would print (layers, volume) without slicing",
+    },
+    ToolSpec {
         name: "slicecraft.slice",
         command: "slice",
         description: "Slice the document and report layers, filament and time",
@@ -125,6 +130,9 @@ fn run(session: &mut Session, command: Command) -> Reply {
             report.ignored.len(),
             report.notes.join("; ")
         )),
+        Ok(Outcome::SupportPreviewed { layers, volume }) => {
+            Reply::Text(format!("support on {layers} layers, {volume:.0} mm³"))
+        }
         Ok(Outcome::Saved { path }) => Reply::Text(format!("saved {}", path.display())),
         Ok(Outcome::ProjectOpened { path, objects, warnings }) => Reply::Text(format!(
             "opened {} with {objects} model(s) ({} warnings)",
@@ -179,6 +187,7 @@ pub fn dispatch(session: &mut Session, call: &Call) -> Reply {
             Some("false") => run(session, Command::Supports(false)),
             _ => Reply::Error("supports needs `enabled` = true or false".into()),
         },
+        "support-preview" => run(session, Command::PreviewSupport),
         "slice" => run(session, Command::Slice),
         "export-gcode" => match path {
             Some(p) => run(session, Command::ExportGcode(p)),

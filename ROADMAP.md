@@ -3,8 +3,8 @@
 **Stage: MVP + full UI + projects + support** · next: placeholders in order of use · membership
 of the ArtCraft suite: **pending approval**
 
-> **Last reviewed:** 2026-11-13 · **Change:** automatic support (region-based, own
-> design, research note R5) ·
+> **Last reviewed:** 2026-11-13 · **Change:** support pillars, retraction only when
+> crossing outlines, support preview and add/block boxes ·
 > **Target:** Simplify3D 5.1.2 behaviour, clean room
 
 SliceCraft is a slicer: import a model, put it on a bed, choose a profile, slice it
@@ -25,9 +25,9 @@ and printer control are not there yet, and nothing has been printed — see
 |---|---|---|
 | Phases complete | **P0**; P1, P3 most of the way; slices of P4–P6 | measured against the phase table |
 | Crates | 7 libraries, 2 apps, 1 tool | measured |
-| Lines of Rust | ≈ 15,900 | measured (`cargo xtask stats`) |
-| Tests | 154 in 17 test binaries, all green | measured (`cargo test --workspace`) |
-| Commands | 47 (21 ready, 26 planned) | measured (`engine::COMMANDS`) |
+| Lines of Rust | ≈ 17,300 | measured (`cargo xtask stats`) |
+| Tests | 158 in 17 test binaries, all green | measured (`cargo test --workspace`) |
+| Commands | 48 (25 ready, 23 planned) | measured (`engine::COMMANDS`) |
 | Profile settings | 170 (77 used by the slicer, 93 placeholders) | measured (`doc::settings::SETTINGS`) |
 | Crown with support (350 layers, release) | sliced in ≈ 1.5 s; support filament 676 mm vs the reference's 682 mm; 4927 retractions vs 4384 | measured on one Windows machine |
 | Direct external dependencies | 4 (`i_overlay`, `roxmltree`; `eframe`, `rfd` in the window only) | measured |
@@ -51,20 +51,18 @@ damaged meshes dominate the uncertainty.
 | **P1** Import & sections | binary STL ✓, OBJ ✓, 3MF ✗; transforms ✓; arrange ✓ (rows); loop stitching ✓; nesting ✓; adaptive heights ✗; CLI `--json` ✓ | **mostly done** | cube, hollow box and octahedron-through-vertices slice into closed oriented loops with exact areas; every prefix of a binary STL is read or refused without a panic |
 | **P2** Profiles & project | settings table ✓ (no inheritance); profile files ✓; Simplify3D profile import ✓; project container ✓; printer/material libraries ✗; mesh repair ✗ | **started** | `io::project::tests::project_round_trip_is_byte_identical`, `engine::tests::projects_save_open_and_track_unsaved_changes` |
 | **P3** Shells & infill | shells ✓, inside-out order ✓, nearest seams (partial), thin walls ✗, gap fill ✗, rectilinear infill ✓ (other patterns ✗), solid top/bottom ✓, extrusion model ✓ | **mostly done** | shell lengths exact on a square; cube filament within ±10% of an area estimate |
-| **P4** Support & control | automatic support ✓ pillars and areas (manual editing, blockers ✗); skirt ✓ brim ✓ (raft/pillar/shield ✗); bridges ✗; fan from a layer ✓; retraction ✓ (wipe/coast/z-hop ✗) | started | — |
+| **P4** Support & control | automatic support ✓ pillars and areas, preview ✓, add/block boxes ✓; skirt ✓ brim ✓ (raft/pillar/shield ✗); bridges ✗; fan from a layer ✓; retraction ✓ (wipe/coast/z-hop ✗) | started | — |
 | **P5** Output & agents | flavours named (one command set); toolpath preview ✓; estimates (uncalibrated) ✓; MCP dispatch ✓ (no transport); multi-tool ✗ | started | — |
 | **P6** UI & packaging | egui window ✓, 3D bed view ✓, panels ✓, file dialogs ✓; packaging ✗; printer I/O ✗; wasm ✗ | started | window driven and screenshotted on Windows 11 |
 
 ## What is next (concrete)
 
-1. **Support editing:** a support preview before slicing, manual add/remove and
-   blockers on the pillar grid.
-2. **Turn placeholders into features in order of use** (combing is the next travel improvement) (from R2 §3): adaptive layers,
+1. **Turn placeholders into features in order of use** (combing is the next travel improvement) (from R2 §3): adaptive layers,
    gyroid infill, raft, thin walls/gap fill, combing, coast/wipe, schedules.
-3. **Several profiles per job and height zones.**
-4. **3MF import and model export.**
-5. **Real-print check** of the 20 mm cube and a torus; record results as measured.
-6. **Upstream the licence exceptions** recorded in [ATTRIBUTION.md](ATTRIBUTION.md).
+2. **Several profiles per job and height zones.**
+3. **3MF import and model export.**
+4. **Real-print check** of the 20 mm cube and a torus; record results as measured.
+5. **Upstream the licence exceptions** recorded in [ATTRIBUTION.md](ATTRIBUTION.md).
 
 ## By dimension
 
@@ -74,7 +72,7 @@ damaged meshes dominate the uncertainty.
 | Geometry | stitched loops, regions with holes, offsets and booleans on a 1 µm grid | [architecture.md](docs/architecture.md) |
 | Output | Marlin-style G-code with area-based extrusion, retraction, fan, estimates | [gaps.md](docs/gaps.md) |
 | Estimates | constant-feed time, filament length and PLA weight; uncalibrated | [gaps.md](docs/gaps.md) |
-| Stability | 154 tests, no fuzzing; worker failures become errors; hostile project files refused | [gaps.md](docs/gaps.md) |
+| Stability | 158 tests, no fuzzing; worker failures become errors; hostile project files refused | [gaps.md](docs/gaps.md) |
 | Platforms | Windows 11 only (built and run) | [gaps.md](docs/gaps.md) |
 | Ecosystem | CLI with `--json`; MCP dispatch without transport | [gaps.md](docs/gaps.md) |
 | Suite integration | house rules and layout present; licence exceptions to propose; CI, packaging, corpus, `craft-libs` deferred | [PLAN.md](docs/PLAN.md) §1.1, §7 |

@@ -5,15 +5,33 @@ use crate::app::{Mode, SliceCraftApp, Tool};
 use crate::camera::{Frame, Viewport};
 use crate::scene::{self, Builder, Coloring, ModelStyle, PreviewStyle};
 use eframe::egui::{self, Align2, Color32, FontId, PointerButton, Pos2, Rect, Sense, Ui};
-use slicecraft_doc::Transform;
+use slicecraft_doc::{SupportEdit, SupportEditKind, Transform};
+use slicecraft_engine::Command;
 use slicecraft_geom::Vec3;
 
 /// A model drag in progress.
 #[derive(Debug, Clone, Copy)]
 pub enum Drag {
-    Move { index: usize, grab: Vec3 },
-    Rotate { index: usize, start: Transform, x0: f32 },
-    Scale { index: usize, start: Transform, y0: f32 },
+    Move {
+        index: usize,
+        grab: Vec3,
+    },
+    Rotate {
+        index: usize,
+        start: Transform,
+        x0: f32,
+    },
+    Scale {
+        index: usize,
+        start: Transform,
+        y0: f32,
+    },
+    /// A support box being drawn on the bed, corner to corner.
+    SupportBox {
+        kind: SupportEditKind,
+        from: (f64, f64),
+        to: (f64, f64),
+    },
 }
 
 fn pick(app: &SliceCraftApp, f: &Frame, p: Pos2) -> Option<usize> {
@@ -41,8 +59,41 @@ pub fn viewport(app: &mut SliceCraftApp, ui: &mut Ui) {
     let (shift, command) = ui.input(|i| (i.modifiers.shift, i.modifiers.command));
     let frame0 = app.camera.frame(vp);
 
+    // support boxes: drag on the bed, the box is added on release
+    let support_tool = match app.tool {
+        Tool::SupportAdd => Some(SupportEditKind::Add),
+        Tool::SupportBlock => Some(SupportEditKind::Block),
+        _ => None,
+    };
+    if let (Mode::Prepare, Some(kind)) = (app.mode, support_tool)
+        && resp.drag_started_by(PointerButton::Primary)
+        && let Some(p) = resp.interact_pointer_pos()
+        && let Some(at) = frame0.bed_point(f64::from(p.x), f64::from(p.y))
+    {
+        app.drag = Some(Drag::SupportBox { kind, from: (at.x, at.y), to: (at.x, at.y) });
+    }
+    if let Some(Drag::SupportBox { kind, from, .. }) = app.drag
+        && resp.dragged_by(PointerButton::Primary)
+        && let Some(p) = resp.interact_pointer_pos()
+        && let Some(at) = frame0.bed_point(f64::from(p.x), f64::from(p.y))
+    {
+        app.drag = Some(Drag::SupportBox { kind, from, to: (at.x, at.y) });
+    }
+    if let Some(Drag::SupportBox { kind, from, to }) = app.drag
+        && resp.drag_stopped()
+    {
+        app.drag = None;
+        let e = SupportEdit::columns(kind, from, to);
+        if e.is_valid() {
+            app.run(Command::AddSupportEdit(e));
+        }
+    }
+
     // start of a left drag: a model tool, or the camera
-    if app.mode == Mode::Prepare && resp.drag_started_by(PointerButton::Primary) {
+    if app.mode == Mode::Prepare
+        && support_tool.is_none()
+        && resp.drag_started_by(PointerButton::Primary)
+    {
         app.drag = None;
         let p = resp.interact_pointer_pos();
         let hit = p.and_then(|p| pick(app, &frame0, p));
@@ -63,12 +114,14 @@ pub fn viewport(app: &mut SliceCraftApp, ui: &mut Ui) {
                     }
                     Tool::Rotate => app.drag = Some(Drag::Rotate { index, start: t, x0: p.x }),
                     Tool::Scale => app.drag = Some(Drag::Scale { index, start: t, y0: p.y }),
-                    Tool::Select => {}
+                    Tool::Select | Tool::SupportAdd | Tool::SupportBlock => {}
                 }
             }
         }
     }
-    let dragging_model = app.drag.is_some() && resp.dragged_by(PointerButton::Primary);
+    let drawing_box = matches!(app.drag, Some(Drag::SupportBox { .. }));
+    let dragging_model =
+        app.drag.is_some() && !drawing_box && resp.dragged_by(PointerButton::Primary);
     if let (Some(drag), true) = (app.drag, dragging_model) {
         if let Some(p) = resp.interact_pointer_pos() {
             match drag {
@@ -88,6 +141,7 @@ pub fn viewport(app: &mut SliceCraftApp, ui: &mut Ui) {
                     t.rotate.z = (start.rotate.z + snapped) % 360.0;
                     app.place(index, t);
                 }
+                Drag::SupportBox { .. } => {}
                 Drag::Scale { index, start, y0 } => {
                     let mut t = start;
                     let k = (-f64::from(p.y - y0) * 0.005).exp();
@@ -98,7 +152,7 @@ pub fn viewport(app: &mut SliceCraftApp, ui: &mut Ui) {
                 }
             }
         }
-    } else if resp.dragged_by(PointerButton::Primary) {
+    } else if resp.dragged_by(PointerButton::Primary) && !drawing_box {
         let d = resp.drag_delta();
         let k = f64::from(app.prefs.orbit_sensitivity) * 0.008;
         app.camera.orbit(-f64::from(d.x) * k, f64::from(d.y) * k);
@@ -158,7 +212,7 @@ pub fn viewport(app: &mut SliceCraftApp, ui: &mut Ui) {
                         &mut b,
                         &frame,
                         geo,
-                        ModelStyle { selected: &none, alpha: 0.15, cut_z: None },
+                        ModelStyle { selected: &none, support: &[], alpha: 0.15, cut_z: None },
                     );
                 }
                 let p = &app.preview;
@@ -187,9 +241,23 @@ pub fn viewport(app: &mut SliceCraftApp, ui: &mut Ui) {
             }
         }
         Mode::Prepare => {
+            let no_support = Vec::new();
+            let support = match (&app.support_view, app.show_support) {
+                (Some((_, prisms)), true) => prisms,
+                _ => &no_support,
+            };
             if let Some((_, geo)) = &app.geometry {
-                let style = ModelStyle { selected: &app.selected, alpha: 1.0, cut_z: app.section };
+                let style =
+                    ModelStyle { selected: &app.selected, support, alpha: 1.0, cut_z: app.section };
                 scene::models(&mut b, &frame, geo, style);
+            }
+            let doc = app.session.document();
+            let top = doc.bounds();
+            let height = if top.is_empty() { 20.0 } else { top.max().z.max(1.0) };
+            scene::support_edits(&mut b, &frame, &doc.support_edits, height);
+            if let Some(Drag::SupportBox { kind, from, to }) = app.drag {
+                let e = SupportEdit::columns(kind, from, to);
+                scene::support_edits(&mut b, &frame, &[e], height);
             }
         }
     }
@@ -222,6 +290,12 @@ fn overlays(app: &mut SliceCraftApp, ui: &mut Ui, rect: Rect, head: Option<Vec3>
             "drag left/right to turn the selection about Z · shift snaps to 15°"
         }
         (Mode::Prepare, Tool::Scale) => "drag up/down to scale the selection",
+        (Mode::Prepare, Tool::SupportAdd) => {
+            "drag a box on the bed: every surface facing down inside it gets support · Q: back to select"
+        }
+        (Mode::Prepare, Tool::SupportBlock) => {
+            "drag a box on the bed: no support inside it · Q: back to select"
+        }
         (Mode::Preview, _) => {
             "drag: orbit · right-drag: pan · wheel: zoom · Up/Down: layer · Space: play"
         }

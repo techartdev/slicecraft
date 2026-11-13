@@ -287,11 +287,12 @@ struct Shelled {
     inner: Region,
 }
 
-/// Slice a document into toolpaths and G-code.
-pub fn slice_document(
+/// The layer schedule and each layer's model region, plus the open loops
+/// dropped while stitching.
+fn layer_regions(
     doc: &Document,
     observer: &mut dyn SliceObserver,
-) -> Result<SliceOutput, EngineError> {
+) -> Result<(Vec<LayerSlot>, Vec<Region>, usize), EngineError> {
     doc.sliceable()?;
     let s = &doc.settings;
     let meshes = bed_meshes(doc)?;
@@ -300,9 +301,6 @@ pub fn slice_document(
     if slots.is_empty() {
         return Err(EngineError::NothingToSlice);
     }
-    let w = s.line_width();
-
-    // 1. regions
     let sections = par_map(&slots, Stage::Sections, observer, |_, slot| {
         let mut loops = Vec::new();
         let mut dropped = 0usize;
@@ -315,9 +313,55 @@ pub fn slice_document(
     })?;
     let dropped_chains: usize = sections.iter().map(|(_, d)| d).sum();
     let regions: Vec<Region> = sections.into_iter().map(|(r, _)| r).collect();
+    Ok((slots, regions, dropped_chains))
+}
+
+/// One layer of a support preview.
+#[derive(Debug, Clone)]
+pub struct SupportPreviewLayer {
+    pub slot: LayerSlot,
+    /// Everything the layer's support covers.
+    pub area: Region,
+}
+
+/// The support a slice would print, without slicing the rest: what the
+/// prepare view shows before slicing.
+pub fn support_preview(
+    doc: &Document,
+    observer: &mut dyn SliceObserver,
+) -> Result<Vec<SupportPreviewLayer>, EngineError> {
+    let (slots, regions, _) = layer_regions(doc, observer)?;
+    let s = &doc.settings;
+    let layers = crate::support::support_layers(
+        &regions,
+        &slots,
+        s,
+        s.line_width(),
+        &doc.support_edits,
+        observer,
+    )?;
+    let mut out = Vec::new();
+    for (slot, l) in slots.into_iter().zip(layers) {
+        if !l.is_empty() {
+            out.push(SupportPreviewLayer { slot, area: l.area()? });
+        }
+    }
+    Ok(out)
+}
+
+/// Slice a document into toolpaths and G-code.
+pub fn slice_document(
+    doc: &Document,
+    observer: &mut dyn SliceObserver,
+) -> Result<SliceOutput, EngineError> {
+    let s = &doc.settings;
+    let w = s.line_width();
+    // 1. regions
+    let (slots, regions, dropped_chains) = layer_regions(doc, observer)?;
 
     // 2. support, from the model's layers
-    let support_areas = crate::support::support_layers(&regions, &slots, s, w, observer)?;
+    let support_areas =
+        crate::support::support_layers(&regions, &slots, s, w, &doc.support_edits, observer)?;
     let support_first = match support_areas.first() {
         Some(l) if !l.is_empty() => l.area()?,
         _ => Region::new(),
@@ -515,7 +559,7 @@ pub fn slice_document(
             "the chosen infill pattern is not drawn yet; rectilinear was used instead".to_string(),
         );
     }
-    if s.support_enabled && supported_layers == 0 {
+    if s.support_enabled && supported_layers == 0 && doc.support_edits.is_empty() {
         warnings.push(format!(
             "support is on, but nothing overhangs more than {:.0}° from vertical",
             s.support_angle

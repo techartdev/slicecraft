@@ -224,12 +224,79 @@ impl Bed {
     }
 }
 
+/// Most support edits one document holds.
+pub const MAX_SUPPORT_EDITS: usize = 1000;
+
+/// What a support edit does inside its box.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SupportEditKind {
+    /// Support every downward-facing surface in the box, whatever its angle,
+    /// even with automatic support off.
+    Add,
+    /// No support in the box.
+    Block,
+}
+
+impl SupportEditKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            SupportEditKind::Add => "add",
+            SupportEditKind::Block => "block",
+        }
+    }
+}
+
+/// A box on the bed, in bed coordinates (mm), where support is added or blocked.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SupportEdit {
+    pub kind: SupportEditKind,
+    pub x0: f64,
+    pub y0: f64,
+    pub x1: f64,
+    pub y1: f64,
+    /// Heights the edit applies to; `0` to `MAX_COORD` is the full height.
+    pub z0: f64,
+    pub z1: f64,
+}
+
+impl SupportEdit {
+    /// A full-height box over the rectangle spanned by two corners.
+    pub fn columns(kind: SupportEditKind, a: (f64, f64), b: (f64, f64)) -> Self {
+        Self {
+            kind,
+            x0: a.0.min(b.0),
+            y0: a.1.min(b.1),
+            x1: a.0.max(b.0),
+            y1: a.1.max(b.1),
+            z0: 0.0,
+            z1: slicecraft_geom::MAX_COORD,
+        }
+    }
+
+    /// Finite, ordered, inside the coordinate range and not degenerate.
+    pub fn is_valid(&self) -> bool {
+        let m = slicecraft_geom::MAX_COORD;
+        let all = [self.x0, self.y0, self.x1, self.y1, self.z0, self.z1];
+        all.iter().all(|v| v.is_finite() && v.abs() <= m)
+            && self.x1 - self.x0 >= 0.1
+            && self.y1 - self.y0 >= 0.1
+            && self.z1 > self.z0
+    }
+
+    /// True when the edit applies at height `z`.
+    pub fn covers_z(&self, z: f64) -> bool {
+        z >= self.z0 && z <= self.z1
+    }
+}
+
 /// The whole document.
 #[derive(Debug, Clone, Default)]
 pub struct Document {
     pub bed: Bed,
     pub settings: PrintSettings,
     pub objects: Vec<SceneObject>,
+    /// Boxes where support is added or blocked, in bed coordinates.
+    pub support_edits: Vec<SupportEdit>,
 }
 
 impl Document {
@@ -241,6 +308,18 @@ impl Document {
             height: settings.bed_height,
         };
         self.settings = settings;
+    }
+
+    /// Add a support edit, refusing invalid boxes and more than `MAX_SUPPORT_EDITS`.
+    pub fn add_support_edit(&mut self, edit: SupportEdit) -> Result<usize, DocError> {
+        if !edit.is_valid() {
+            return Err(DocError::Setting("a support box must be finite and at least 0.1 mm wide"));
+        }
+        if self.support_edits.len() >= MAX_SUPPORT_EDITS {
+            return Err(DocError::Setting("too many support edits"));
+        }
+        self.support_edits.push(edit);
+        Ok(self.support_edits.len() - 1)
     }
 
     /// Add an object, refusing past `MAX_OBJECTS`. Returns its index.

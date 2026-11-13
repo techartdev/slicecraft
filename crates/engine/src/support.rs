@@ -26,7 +26,9 @@
 
 use crate::EngineError;
 use crate::pipeline::{LayerSlot, SliceObserver, Stage, par_map};
-use slicecraft_doc::{PrintSettings, SupportPattern, SupportPlacement, SupportStyle};
+use slicecraft_doc::{
+    PrintSettings, SupportEdit, SupportEditKind, SupportPattern, SupportPlacement, SupportStyle,
+};
 use slicecraft_geom::{Point2, Region};
 use slicecraft_render::paths::{line_infill, perimeters, zigzag};
 use slicecraft_render::{PathKind, ToolPath};
@@ -124,6 +126,16 @@ fn pillars(area: &Region, cell: f64, gap: f64) -> Result<Region, EngineError> {
     Ok(Region::from_loops(&squares)?)
 }
 
+/// The footprint of a support edit.
+fn edit_box(e: &SupportEdit) -> Result<Region, EngineError> {
+    Ok(Region::from_loops(&[vec![
+        Point2::new(e.x0, e.y0),
+        Point2::new(e.x1, e.y0),
+        Point2::new(e.x1, e.y1),
+        Point2::new(e.x0, e.y1),
+    ]])?)
+}
+
 /// Fill each island of `region` with parallel lines joined into zigzags.
 fn zigzag_fill(
     region: &Region,
@@ -203,13 +215,40 @@ pub fn support_layers(
     slots: &[LayerSlot],
     s: &PrintSettings,
     w: f64,
+    edits: &[SupportEdit],
     observer: &mut dyn SliceObserver,
 ) -> Result<Vec<SupportLayer>, EngineError> {
     let n = regions.len();
-    if !s.support_enabled || n == 0 {
+    let boxes = |kind: SupportEditKind| -> Result<Vec<(Region, SupportEdit)>, EngineError> {
+        edits.iter().filter(|e| e.kind == kind).map(|e| Ok((edit_box(e)?, *e))).collect()
+    };
+    let (adds, blocks) = (boxes(SupportEditKind::Add)?, boxes(SupportEditKind::Block)?);
+    if (!s.support_enabled && adds.is_empty()) || n == 0 {
         return Ok(vec![SupportLayer::default(); n]);
     }
-    let over = overhangs(regions, slots, s, w, observer)?;
+    let cut_z = |j: usize| slots.get(j).map_or(0.0, LayerSlot::cut_z);
+    let mut over = if s.support_enabled {
+        overhangs(regions, slots, s, w, observer)?
+    } else {
+        vec![Region::new(); n]
+    };
+    // "add" boxes: every downward-facing surface inside, whatever its angle
+    if !adds.is_empty() {
+        for k in 1..n {
+            let (Some(here), Some(below)) = (regions.get(k), regions.get(k - 1)) else { continue };
+            for (b, e) in &adds {
+                if !e.covers_z(cut_z(k)) {
+                    continue;
+                }
+                let exposed = here.intersection(b)?.difference(below)?;
+                if !exposed.is_empty()
+                    && let Some(o) = over.get_mut(k)
+                {
+                    *o = o.union(&exposed)?;
+                }
+            }
+        }
+    }
     let gap_top = s.support_top_gap_layers as usize;
     // Strips from a slope are separated by the band each layer may reach out
     // unsupported; closing by half that band (at least half a line) joins
@@ -246,6 +285,12 @@ pub fn support_layers(
         {
             c = c.difference(r)?;
         }
+        // "block" boxes cut the column like the model does
+        for (b, e) in &blocks {
+            if !c.is_empty() && e.covers_z(cut_z(j)) {
+                c = c.difference(b)?;
+            }
+        }
         if let Some(slot) = columns.get_mut(j) {
             *slot = c.clone();
         }
@@ -279,6 +324,12 @@ pub fn support_layers(
         };
         let beside = regions.get(j).map_or(Ok(Region::new()), |r| r.offset(s.support_xy_gap))?;
         let mut area = source.difference(&beside)?;
+        // snapping to pillars must not reach back into a blocked box
+        for (b, e) in &blocks {
+            if e.covers_z(cut_z(j)) {
+                area = area.difference(b)?;
+            }
+        }
         if gap_bottom > 0 {
             let below = union_range(regions, j.saturating_sub(gap_bottom), j)?;
             if !below.is_empty() {
@@ -403,7 +454,7 @@ mod tests {
         let (n, h, w) = (20, 0.2, 0.45);
         let regions = table(n, 10);
         let s = on();
-        let sup = support_layers(&regions, &slots(n, h), &s, w, &mut crate::pipeline::Quiet);
+        let sup = support_layers(&regions, &slots(n, h), &s, w, &[], &mut crate::pipeline::Quiet);
         assert!(sup.is_ok(), "{sup:?}");
         let Ok(sup) = sup else { return };
         // under the table: support on every layer up to the gap
@@ -432,16 +483,18 @@ mod tests {
         let regions: Vec<Region> =
             (0..n).map(|i| square(i as f64 * 0.1, i as f64 * 0.1, 30.0 - i as f64 * 0.2)).collect();
         let sup =
-            support_layers(&regions, &slots(n, 0.2), &on(), 0.45, &mut crate::pipeline::Quiet);
+            support_layers(&regions, &slots(n, 0.2), &on(), 0.45, &[], &mut crate::pipeline::Quiet);
         assert!(sup.is_ok_and(|l| l.iter().all(SupportLayer::is_empty)));
         // one that grows 1 mm per side per layer needs support at 45°, not at 85°
         let grows: Vec<Region> = (0..n)
             .map(|i| square(40.0 - i as f64, 40.0 - i as f64, 2.0 * i as f64 + 1.0))
             .collect();
-        let sup = support_layers(&grows, &slots(n, 0.2), &on(), 0.45, &mut crate::pipeline::Quiet);
+        let sup =
+            support_layers(&grows, &slots(n, 0.2), &on(), 0.45, &[], &mut crate::pipeline::Quiet);
         assert!(sup.is_ok_and(|l| l.iter().any(|x| !x.is_empty())));
         let steep = PrintSettings { support_angle: 85.0, ..on() };
-        let sup = support_layers(&grows, &slots(n, 0.2), &steep, 0.45, &mut crate::pipeline::Quiet);
+        let sup =
+            support_layers(&grows, &slots(n, 0.2), &steep, 0.45, &[], &mut crate::pipeline::Quiet);
         assert!(sup.is_ok_and(|l| l.iter().all(SupportLayer::is_empty)));
     }
 
@@ -464,7 +517,7 @@ mod tests {
             })
             .collect();
         let sup =
-            support_layers(&regions, &slots(n, 0.2), &on(), 0.45, &mut crate::pipeline::Quiet);
+            support_layers(&regions, &slots(n, 0.2), &on(), 0.45, &[], &mut crate::pipeline::Quiet);
         assert!(sup.as_ref().is_ok_and(|l| l.get(20).is_some_and(|x| !x.is_empty())), "{sup:?}");
         // the support under layer 20 is about as wide as the slope has leaned out above it
         let width = sup
@@ -486,15 +539,21 @@ mod tests {
             })
             .collect();
         let everywhere =
-            support_layers(&regions, &slots(n, 0.2), &on(), 0.45, &mut crate::pipeline::Quiet);
+            support_layers(&regions, &slots(n, 0.2), &on(), 0.45, &[], &mut crate::pipeline::Quiet);
         assert!(
             everywhere.as_ref().is_ok_and(|l| l.iter().skip(11).take(5).all(|x| !x.is_empty()))
         );
         // the bottom gap keeps support off the base's top layer
         assert!(everywhere.is_ok_and(|l| l.get(10).is_some_and(SupportLayer::is_empty)));
         let bed_only = PrintSettings { support_placement: SupportPlacement::BedOnly, ..on() };
-        let sup =
-            support_layers(&regions, &slots(n, 0.2), &bed_only, 0.45, &mut crate::pipeline::Quiet);
+        let sup = support_layers(
+            &regions,
+            &slots(n, 0.2),
+            &bed_only,
+            0.45,
+            &[],
+            &mut crate::pipeline::Quiet,
+        );
         assert!(sup.is_ok_and(|l| l.iter().all(SupportLayer::is_empty)));
     }
 
@@ -503,7 +562,7 @@ mod tests {
         let (n, w) = (20, 0.45);
         let regions = table(n, 10);
         let s = PrintSettings { support_base_layers: 2, support_outlines: 1, ..on() };
-        let sup = support_layers(&regions, &slots(n, 0.2), &s, w, &mut crate::pipeline::Quiet);
+        let sup = support_layers(&regions, &slots(n, 0.2), &s, w, &[], &mut crate::pipeline::Quiet);
         assert!(sup.is_ok());
         let Ok(sup) = sup else { return };
         assert!(sup.first().is_some_and(|l| l.body.is_empty() && !l.dense.is_empty()));
@@ -515,7 +574,8 @@ mod tests {
         })));
         // off: nothing at all
         let off = PrintSettings::default();
-        let sup = support_layers(&regions, &slots(n, 0.2), &off, w, &mut crate::pipeline::Quiet);
+        let sup =
+            support_layers(&regions, &slots(n, 0.2), &off, w, &[], &mut crate::pipeline::Quiet);
         assert!(sup.is_ok_and(|l| l.len() == n && l.iter().all(SupportLayer::is_empty)));
     }
 
@@ -524,7 +584,7 @@ mod tests {
         let (n, w) = (20, 0.45);
         let regions = table(n, 10);
         let s = PrintSettings { support_style: SupportStyle::Pillars, ..on() };
-        let sup = support_layers(&regions, &slots(n, 0.2), &s, w, &mut crate::pipeline::Quiet);
+        let sup = support_layers(&regions, &slots(n, 0.2), &s, w, &[], &mut crate::pipeline::Quiet);
         assert!(sup.is_ok());
         let Ok(sup) = sup else { return };
         let (Some(a), Some(b)) = (sup.get(3), sup.get(5)) else { return };
@@ -564,6 +624,43 @@ mod tests {
     }
 
     #[test]
+    fn add_boxes_support_gentle_surfaces_and_block_boxes_remove_support() {
+        let (n, w) = (20, 0.45);
+        let regions = table(n, 10);
+        let off = PrintSettings { support_enabled: false, ..on() };
+        // automatic support off: an add box under one corner of the table
+        let add = SupportEdit::columns(SupportEditKind::Add, (0.0, 0.0), (8.0, 8.0));
+        let sup =
+            support_layers(&regions, &slots(n, 0.2), &off, w, &[add], &mut crate::pipeline::Quiet);
+        let a =
+            sup.ok().and_then(|l| l.get(3).and_then(|x| x.area().ok())).map_or(0.0, |r| r.area());
+        assert!(a > 40.0 && a <= 64.0, "{a}");
+        // automatic on, with a block over half the table
+        let block = SupportEdit::columns(SupportEditKind::Block, (-1.0, -1.0), (15.0, 31.0));
+        let all =
+            support_layers(&regions, &slots(n, 0.2), &on(), w, &[], &mut crate::pipeline::Quiet);
+        let some = support_layers(
+            &regions,
+            &slots(n, 0.2),
+            &on(),
+            w,
+            &[block],
+            &mut crate::pipeline::Quiet,
+        );
+        let area = |r: &Result<Vec<SupportLayer>, EngineError>| {
+            r.as_ref()
+                .ok()
+                .and_then(|l| l.get(3).and_then(|x| x.area().ok()))
+                .map_or(0.0, |r| r.area())
+        };
+        let (a_all, a_some) = (area(&all), area(&some));
+        assert!(a_some > 0.0 && a_some < a_all * 0.7, "{a_some} vs {a_all}");
+        let inside = some.ok().and_then(|l| l.get(3).and_then(|x| x.area().ok()));
+        let into_block = inside.map(|r| r.intersection(&edit_box(&block).unwrap_or_default()));
+        assert!(into_block.is_some_and(|r| r.is_ok_and(|r| r.area() < 1e-6)));
+    }
+
+    #[test]
     fn cancelling_stops_the_column_pass() {
         let regions = table(20, 10);
         struct Stop;
@@ -572,7 +669,7 @@ mod tests {
                 true
             }
         }
-        let r = support_layers(&regions, &slots(20, 0.2), &on(), 0.45, &mut Stop);
+        let r = support_layers(&regions, &slots(20, 0.2), &on(), 0.45, &[], &mut Stop);
         assert!(matches!(r, Err(EngineError::Cancelled)));
     }
 }

@@ -35,6 +35,10 @@ pub enum Tool {
     Move,
     Rotate,
     Scale,
+    /// Drag a box on the bed where support is added.
+    SupportAdd,
+    /// Drag a box on the bed where support is blocked.
+    SupportBlock,
 }
 
 impl Tool {
@@ -46,6 +50,8 @@ impl Tool {
             Tool::Move => "Move on the bed (W)",
             Tool::Rotate => "Rotate about Z (E)",
             Tool::Scale => "Scale (R)",
+            Tool::SupportAdd => "Add support: drag a box on the bed",
+            Tool::SupportBlock => "Block support: drag a box on the bed",
         }
     }
 }
@@ -78,6 +84,20 @@ impl SliceObserver for Observer {
 
     fn cancelled(&self) -> bool {
         self.cancel.load(Ordering::Relaxed)
+    }
+}
+
+/// A support preview running on a worker thread.
+pub struct SupportPreviewJob {
+    pub revision: u64,
+    rx: mpsc::Receiver<Result<Vec<slicecraft_engine::SupportPreviewLayer>, EngineError>>,
+    cancel: Arc<AtomicBool>,
+}
+
+struct CancelOnly(Arc<AtomicBool>);
+impl SliceObserver for CancelOnly {
+    fn cancelled(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
     }
 }
 
@@ -197,6 +217,12 @@ pub struct SliceCraftApp {
     applied_dark: Option<bool>,
     /// Recent project files, newest first.
     pub(crate) recent: Vec<PathBuf>,
+    /// Show the support a slice would print while preparing.
+    pub(crate) show_support: bool,
+    pub(crate) support_job: Option<SupportPreviewJob>,
+    /// The latest support preview: the revision it was made for and its prisms.
+    pub(crate) support_view: Option<(u64, Vec<scene::Prism>)>,
+    pub(crate) support_note: Option<String>,
     /// Where preferences are remembered; `None` keeps them for this session only.
     config_dir: Option<PathBuf>,
     /// An action waiting for "save your changes?".
@@ -237,6 +263,10 @@ impl SliceCraftApp {
             drag: None,
             applied_dark: None,
             recent: Vec::new(),
+            show_support: false,
+            support_job: None,
+            support_view: None,
+            support_note: None,
             config_dir: None,
             confirm: None,
             allow_close: false,
@@ -406,6 +436,75 @@ impl SliceCraftApp {
         }
     }
 
+    /// Keep the support preview in step with the document, one job at a time.
+    fn refresh_support_preview(&mut self, ctx: &egui::Context) {
+        if let Some(job) = &self.support_job {
+            match job.rx.try_recv() {
+                Ok(result) => {
+                    let revision = job.revision;
+                    self.support_job = None;
+                    match result {
+                        Ok(layers) => {
+                            let prisms = scene::support_prisms(&layers);
+                            self.support_note = Some(if layers.is_empty() {
+                                "No support needed.".into()
+                            } else {
+                                let volume: f64 =
+                                    layers.iter().map(|l| l.area.area() * l.slot.height).sum();
+                                format!(
+                                    "Support on {} layers, about {:.1} cm³.",
+                                    layers.len(),
+                                    volume / 1000.0
+                                )
+                            });
+                            self.support_view = Some((revision, prisms));
+                        }
+                        Err(EngineError::Cancelled) => {}
+                        Err(e) => {
+                            self.support_view = None;
+                            self.support_note = Some(format!("Support preview: {e}"));
+                        }
+                    }
+                }
+                Err(mpsc::TryRecvError::Empty) => return,
+                Err(mpsc::TryRecvError::Disconnected) => self.support_job = None,
+            }
+        }
+        let rev = self.session.revision();
+        let stale = self.support_view.as_ref().is_none_or(|(r, _)| *r != rev);
+        if !self.show_support || self.mode != Mode::Prepare || !stale || self.job.is_some() {
+            return;
+        }
+        if self.session.document().sliceable().is_err() {
+            self.support_view = None;
+            return;
+        }
+        let job = self.session.support_job();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = mpsc::channel();
+        let mut observer = CancelOnly(Arc::clone(&cancel));
+        let wake = ctx.clone();
+        let spawned = std::thread::Builder::new().name("support-preview".into()).spawn(move || {
+            let _ = tx.send(job.run(&mut observer));
+            wake.request_repaint();
+        });
+        if spawned.is_ok() {
+            self.support_job = Some(SupportPreviewJob { revision: rev, rx, cancel });
+        }
+    }
+
+    /// Show or hide the support preview.
+    pub(crate) fn set_show_support(&mut self, on: bool) {
+        self.show_support = on;
+        if !on {
+            if let Some(job) = &self.support_job {
+                job.cancel.store(true, Ordering::Relaxed);
+            }
+            self.support_view = None;
+            self.support_note = None;
+        }
+    }
+
     fn update_title(&mut self, ctx: &egui::Context) {
         let dirty = if self.session.is_modified() { " *" } else { "" };
         let title = format!("{}{dirty} - SliceCraft", self.project_name());
@@ -495,6 +594,12 @@ impl SliceCraftApp {
                         self.dialogs.import_report = Some((name.clone(), report.clone()));
                     }
                     Outcome::Saved { path } => self.info(format!("Saved {}.", path.display())),
+                    Outcome::SupportPreviewed { layers, volume } => {
+                        self.info(format!(
+                            "Support on {layers} layers, about {:.1} cm³.",
+                            volume / 1000.0
+                        ));
+                    }
                     Outcome::Sliced { .. }
                     | Outcome::ProjectOpened { .. }
                     | Outcome::Changed
@@ -1048,6 +1153,7 @@ impl eframe::App for SliceCraftApp {
         self.dropped_files(&ctx);
         self.shortcuts(&ctx);
         self.refresh_caches();
+        self.refresh_support_preview(&ctx);
         self.advance_playback(&ctx);
 
         egui::Panel::top("menu").show(ui, |ui| crate::menus::menu_bar(self, ui));
@@ -1078,6 +1184,9 @@ impl eframe::App for SliceCraftApp {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.cancel_slice();
+        if let Some(job) = &self.support_job {
+            job.cancel.store(true, Ordering::Relaxed);
+        }
         self.persist();
     }
 }

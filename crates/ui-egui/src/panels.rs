@@ -144,6 +144,8 @@ pub fn models_panel(app: &mut SliceCraftApp, ui: &mut Ui) {
         });
     });
 
+    support_section(app, ui);
+
     ui.add_space(8.0);
     let has_models = !rows.is_empty();
     ui.vertical_centered_justified(|ui| {
@@ -158,6 +160,78 @@ pub fn models_panel(app: &mut SliceCraftApp, ui: &mut Ui) {
             if ui.add_enabled(has_models, b).on_hover_text("Ctrl+R").clicked() {
                 app.start_slice(&ctx);
             }
+        }
+    });
+}
+
+/// Support preview and the boxes that add or block support.
+fn support_section(app: &mut SliceCraftApp, ui: &mut Ui) {
+    use crate::app::Tool;
+    use slicecraft_doc::SupportEditKind;
+    ui.add_space(6.0);
+    ui.heading("Support");
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        let mut show = app.show_support;
+        if ui.checkbox(&mut show, "Show before slicing").changed() {
+            app.set_show_support(show);
+        }
+        if app.show_support {
+            let busy = app.support_job.is_some();
+            match (&app.support_note, busy) {
+                (_, true) => ui.weak("Working out support…"),
+                (Some(n), false) => ui.weak(n.as_str()),
+                (None, false) => ui.weak(""),
+            };
+        }
+        ui.horizontal(|ui| {
+            let add = app.tool == Tool::SupportAdd;
+            if ui
+                .selectable_label(add, "+ Add area")
+                .on_hover_text(
+                    "Drag a box on the bed: every surface facing down inside it gets support",
+                )
+                .clicked()
+            {
+                app.tool = if add { Tool::Select } else { Tool::SupportAdd };
+                app.set_show_support(true);
+            }
+            let block = app.tool == Tool::SupportBlock;
+            if ui
+                .selectable_label(block, "− Block area")
+                .on_hover_text("Drag a box on the bed: no support inside it")
+                .clicked()
+            {
+                app.tool = if block { Tool::Select } else { Tool::SupportBlock };
+                app.set_show_support(true);
+            }
+        });
+        let edits = app.session.document().support_edits.clone();
+        let mut remove = None;
+        for (i, e) in edits.iter().enumerate() {
+            ui.horizontal(|ui| {
+                let (label, colour) = match e.kind {
+                    SupportEditKind::Add => ("add", egui::Color32::from_rgb(0x4c, 0xc0, 0x6a)),
+                    SupportEditKind::Block => ("block", egui::Color32::from_rgb(0xe0, 0x50, 0x50)),
+                };
+                ui.colored_label(colour, label);
+                ui.weak(format!(
+                    "{:.0}×{:.0} mm at {:.0}, {:.0}",
+                    e.x1 - e.x0,
+                    e.y1 - e.y0,
+                    e.x0,
+                    e.y0
+                ));
+                if ui.small_button("×").on_hover_text("Remove this box").clicked() {
+                    remove = Some(i);
+                }
+            });
+        }
+        if let Some(index) = remove {
+            app.run(Command::RemoveSupportEdit { index });
+        }
+        if !edits.is_empty() && ui.small_button("Clear all boxes").clicked() {
+            app.run(Command::ClearSupportEdits);
         }
     });
 }

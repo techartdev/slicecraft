@@ -9,8 +9,8 @@ describes code that exists. The rules that keep the shape are in
 
 ## Workspace
 
-13 packages: 7 libraries, 2 apps, `xtask`. About 13,700 lines of Rust
-(`cargo xtask stats`, 2026-11-13), 154 tests in 17 test binaries.
+13 packages: 7 libraries, 2 apps, `xtask`. About 17,300 lines of Rust
+(`cargo xtask stats`, 2026-11-13), 158 tests in 17 test binaries.
 
 | Layer | Crate | What it does |
 |---|---|---|
@@ -162,6 +162,18 @@ with) models, and MCP has `open_project` and `save_project`.
    and at the base. Each pillar or area is filled with one zigzag
    (`render::paths::zigzag`).
 
+**Edits.** `Document::support_edits` holds boxes in bed coordinates. An `Add` box
+adds every surface facing down inside it, at any angle, to the overhangs; it works
+even with automatic support off. A `Block` box cuts the columns, and the pillar
+snapping, like the model does. The edits are commands (`support-edit`,
+`support-blockers`, `support-clear`) and are saved in the project's `[support]`
+section.
+
+**Preview.** `pipeline::support_preview` runs the same stages without slicing the
+rest. The window runs it as a `SupportJob` on a worker thread whenever the document
+changes, and stacks repeated outlines into prisms (`scene::support_prisms`). These
+are drawn in the same depth order as the models.
+
 Paths are `PathKind::Support` and `PathKind::SupportInterface`. They are printed
 first on each layer, at `support_speed_percent`. The first layer's support is inside
 the skirt and brim. The design and its comparison with the reference are in
@@ -206,3 +218,4 @@ points panic on out-of-range input.
 | 2026-11-13 | projects | `.scproj` project files, new/open/save/recent, unsaved-changes prompt, preferences and last profile remembered |
 | 2026-11-13 | fff | Simplify3D `.fff` import with a report; heat-up before custom start scripts |
 | 2026-11-13 | support | Region-based automatic support with interface, floor and base layers; `supports` command |
+| 2026-11-13 | support editing | Add/block boxes, support preview in the prepare view, edits in projects |

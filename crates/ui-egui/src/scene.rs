@@ -271,10 +271,64 @@ impl ModelGeometry {
 #[derive(Debug, Clone, Copy)]
 pub struct ModelStyle<'a> {
     pub selected: &'a BTreeSet<usize>,
+    /// Support to draw in the same depth order as the models.
+    pub support: &'a [Prism],
     /// 1 = opaque, lower ghosts the models.
     pub alpha: f32,
     /// Hide everything above this height (a section view).
     pub cut_z: Option<f64>,
+}
+
+/// A vertical prism: an outline extruded from `z0` to `z1`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Prism {
+    pub outline: Vec<slicecraft_geom::Point2>,
+    pub z0: f64,
+    pub z1: f64,
+}
+
+/// Most support prisms drawn; past it the preview is thinned.
+pub const MAX_PRISMS: usize = 40_000;
+
+/// Stack support layers into prisms: an outline that repeats on consecutive
+/// layers (pillars always do) becomes one tall prism.
+pub fn support_prisms(layers: &[slicecraft_engine::SupportPreviewLayer]) -> Vec<Prism> {
+    use std::collections::HashMap;
+    let key = |ring: &[slicecraft_geom::Point2]| -> Vec<(i64, i64)> {
+        ring.iter()
+            .map(|p| ((p.x * 1000.0).round() as i64, (p.y * 1000.0).round() as i64))
+            .collect()
+    };
+    let mut done = Vec::new();
+    // open prisms: outline key -> (prism, top layer index)
+    let mut open: HashMap<Vec<(i64, i64)>, (Prism, usize)> = HashMap::new();
+    for l in layers {
+        let (bottom, top, index) = (l.slot.top - l.slot.height, l.slot.top, l.slot.index);
+        let mut next = HashMap::new();
+        for poly in &l.area.polygons {
+            let k = key(&poly.outer);
+            let prism = match open.remove(&k) {
+                Some((mut p, last)) if last + 1 == index => {
+                    p.z1 = top;
+                    p
+                }
+                Some((p, _)) => {
+                    done.push(p);
+                    Prism { outline: poly.outer.clone(), z0: bottom, z1: top }
+                }
+                None => Prism { outline: poly.outer.clone(), z0: bottom, z1: top },
+            };
+            next.insert(k, (prism, index));
+        }
+        done.extend(open.into_values().map(|(p, _)| p));
+        open = next;
+        if done.len() > MAX_PRISMS {
+            break;
+        }
+    }
+    done.extend(open.into_values().map(|(p, _)| p));
+    done.truncate(MAX_PRISMS);
+    done
 }
 
 /// Shaded, depth-sorted model triangles.
@@ -327,9 +381,125 @@ pub fn models(out: &mut Builder, f: &Frame, geo: &ModelGeometry, style: ModelSty
             drawn.push((depth, [pos(a), pos(b), pos(c)], col));
         }
     }
+    let support_base = kind_color(PathKind::Support);
+    for prism in style.support {
+        if let Some(cut) = style.cut_z
+            && prism.z0 > cut
+        {
+            continue;
+        }
+        let z1 = style.cut_z.map_or(prism.z1, |c| prism.z1.min(c));
+        let n = prism.outline.len();
+        for i in 0..n {
+            let (Some(a), Some(b)) = (prism.outline.get(i), prism.outline.get((i + 1) % n)) else {
+                continue;
+            };
+            // outer rings run counter-clockwise: the outward normal is (dy, -dx)
+            let normal = Vec3::new(b.y - a.y, a.x - b.x, 0.0).normalized();
+            let corners = [
+                Vec3::new(a.x, a.y, prism.z0),
+                Vec3::new(b.x, b.y, prism.z0),
+                Vec3::new(b.x, b.y, z1),
+                Vec3::new(a.x, a.y, z1),
+            ];
+            let centre = (corners[0] + corners[2]).scale(0.5);
+            let k = match normal {
+                Some(nv) if nv.dot(eye - centre) < 0.0 => continue,
+                Some(nv) => 0.35 + 0.65 * nv.dot(light).max(0.0),
+                None => 0.6,
+            };
+            let col = shade(support_base, k).gamma_multiply(0.9);
+            let pr: Vec<_> = corners.iter().filter_map(|c| f.project(*c)).collect();
+            let [p0, p1, p2, p3] = pr.as_slice() else { continue };
+            let depth = (p0.depth + p1.depth + p2.depth + p3.depth) / 4.0;
+            drawn.push((depth, [pos(*p0), pos(*p1), pos(*p2)], col));
+            drawn.push((depth, [pos(*p0), pos(*p2), pos(*p3)], col));
+        }
+        // the top, for convex outlines (every pillar)
+        if n >= 3 && is_convex(&prism.outline) {
+            let top: Vec<_> =
+                prism.outline.iter().filter_map(|p| f.project(Vec3::new(p.x, p.y, z1))).collect();
+            if let Some((first, rest)) = top.split_first() {
+                let col = shade(support_base, 0.95).gamma_multiply(0.9);
+                for w in rest.windows(2) {
+                    if let [b, c] = w {
+                        let depth = (first.depth + b.depth + c.depth) / 3.0;
+                        drawn.push((depth, [pos(*first), pos(*b), pos(*c)], col));
+                    }
+                }
+            }
+        }
+    }
     drawn.sort_by(|x, y| y.0.total_cmp(&x.0));
     for (_, [a, b, c], col) in drawn {
         out.tri(a, b, c, col);
+    }
+}
+
+fn is_convex(ring: &[slicecraft_geom::Point2]) -> bool {
+    let n = ring.len();
+    let mut sign = 0.0f64;
+    for i in 0..n {
+        let (Some(a), Some(b), Some(c)) =
+            (ring.get(i), ring.get((i + 1) % n), ring.get((i + 2) % n))
+        else {
+            return false;
+        };
+        let cross = (b.x - a.x) * (c.y - b.y) - (b.y - a.y) * (c.x - b.x);
+        if cross.abs() < 1e-12 {
+            continue;
+        }
+        if sign == 0.0 {
+            sign = cross.signum();
+        } else if cross.signum() != sign {
+            return false;
+        }
+    }
+    true
+}
+
+/// Support edit boxes: a tinted footprint on the bed and the edges of the box
+/// up to `height`.
+pub fn support_edits(
+    out: &mut Builder,
+    f: &Frame,
+    edits: &[slicecraft_doc::SupportEdit],
+    height: f64,
+) {
+    for e in edits {
+        let col = match e.kind {
+            slicecraft_doc::SupportEditKind::Add => Color32::from_rgb(0x4c, 0xc0, 0x6a),
+            slicecraft_doc::SupportEditKind::Block => Color32::from_rgb(0xe0, 0x50, 0x50),
+        };
+        let (z0, z1) = (e.z0.max(0.0), e.z1.min(height));
+        let c = [(e.x0, e.y0), (e.x1, e.y0), (e.x1, e.y1), (e.x0, e.y1)];
+        let fill: Vec<_> =
+            c.iter().filter_map(|(x, y)| f.project(Vec3::new(*x, *y, z0 + 0.05))).collect();
+        if let [a, b, cc, d] = fill.as_slice() {
+            let tint = col.gamma_multiply(0.25);
+            out.tri(pos(*a), pos(*b), pos(*cc), tint);
+            out.tri(pos(*a), pos(*cc), pos(*d), tint);
+        }
+        for i in 0..4 {
+            let (Some(&(ax, ay)), Some(&(bx, by))) = (c.get(i), c.get((i + 1) % 4)) else {
+                continue;
+            };
+            out.world_line(f, Vec3::new(ax, ay, z0), Vec3::new(bx, by, z0), 2.0, col);
+            out.world_line(
+                f,
+                Vec3::new(ax, ay, z1),
+                Vec3::new(bx, by, z1),
+                1.0,
+                col.gamma_multiply(0.6),
+            );
+            out.world_line(
+                f,
+                Vec3::new(ax, ay, z0),
+                Vec3::new(ax, ay, z1),
+                1.0,
+                col.gamma_multiply(0.6),
+            );
+        }
     }
 }
 
@@ -611,6 +781,37 @@ mod tests {
             ],
             inside_travel: Vec::new(),
         }]
+    }
+
+    #[test]
+    fn repeated_outlines_stack_into_one_prism() {
+        use slicecraft_engine::SupportPreviewLayer;
+        use slicecraft_engine::pipeline::LayerSlot;
+        use slicecraft_geom::{Point2, Region};
+        let sq = |x: f64| {
+            Region::from_loops(&[vec![
+                Point2::new(x, 0.0),
+                Point2::new(x + 2.0, 0.0),
+                Point2::new(x + 2.0, 2.0),
+                Point2::new(x, 2.0),
+            ]])
+            .unwrap_or_default()
+        };
+        let layer = |index: usize, area: Region| SupportPreviewLayer {
+            slot: LayerSlot { index, top: (index + 1) as f64 * 0.2, height: 0.2 },
+            area,
+        };
+        // one pillar on layers 0-2, a second only on layer 1, and a gap at 3
+        let layers = vec![
+            layer(0, sq(0.0)),
+            layer(1, sq(0.0).union(&sq(5.0)).unwrap_or_default()),
+            layer(2, sq(0.0)),
+            layer(4, sq(0.0)),
+        ];
+        let prisms = support_prisms(&layers);
+        assert_eq!(prisms.len(), 3, "{prisms:?}");
+        assert!(prisms.iter().any(|p| (p.z0 - 0.0).abs() < 1e-9 && (p.z1 - 0.6).abs() < 1e-9));
+        assert!(prisms.iter().any(|p| (p.z0 - 0.8).abs() < 1e-9 && (p.z1 - 1.0).abs() < 1e-9));
     }
 
     #[test]

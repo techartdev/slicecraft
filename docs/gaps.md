@@ -36,8 +36,10 @@ the architecture document, not to a quieter line here.
 
 - **Support** — automatic, as pillars (default) or exact areas: overhang angle,
   everywhere or bed-only, lines or grid, gaps, interface/floor/base layers, expansion,
-  walls; each pillar is one zigzag. No support preview before slicing, no manual
-  editing or blockers.
+  walls; each pillar is one zigzag. A preview in the prepare view, and boxes that add
+  or block support (full height; height ranges exist in the data and file format
+  but have no editor yet). Edit boxes are in bed coordinates and stay put when a
+  model moves.
 - **Bridges** — absent.
 - **Adhesion** — skirt (loops, layers) and brim; no raft, prime tower or ooze shield.
 - **Infill patterns** — rectilinear, one-direction lines, grid, triangles and
@@ -91,7 +93,7 @@ the architecture document, not to a quieter line here.
   400k triangles, thinned above that. The preview draws at most 200k moves.
 - **No gizmos** — tools are drag modes (move on the bed, rotate about Z, scale);
   exact values come from the placement panel.
-- **Placeholders in the window**: lay flat, repair, manual supports (add, remove, blockers),
+- **Placeholders in the window**: lay flat, repair,
   several profiles, setting zones, machine control, printing, orthographic camera,
   wireframe, colour by tool/flow/profile, language,
   shortcut editor. Each is shown disabled or opens a "planned" note.
