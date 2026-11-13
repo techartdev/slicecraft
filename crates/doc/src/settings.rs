@@ -301,6 +301,22 @@ pub struct PrintSettings {
     /// How far infill reaches into the innermost perimeter, % of the width.
     pub infill_overlap: f64,
     pub infill_before_perimeters: bool,
+    /// Grow (or shrink) outer contours and holes, mm.
+    pub outer_size_offset: f64,
+    pub hole_size_offset: f64,
+    /// Print sparse infill once per this many layers, that much thicker.
+    pub infill_every_layers: u32,
+    /// One continuous rising outer wall above the bottom layers.
+    pub vase_mode: bool,
+    /// Layer heights that follow the surface slope.
+    pub adaptive_layers: bool,
+    pub adaptive_min_height: f64,
+    pub adaptive_max_height: f64,
+    pub adaptive_quality: u32,
+    /// Walls shorter than this print slower, mm (0 = off).
+    pub short_wall_length: f64,
+    /// Cap on melt rate, mm³/s (0 = off).
+    pub max_volumetric_flow: f64,
     /// Print solid areas over air as bridges: straight across, own flow, speed and fan.
     pub bridging_enabled: bool,
     pub bridge_flow_percent: f64,
@@ -462,6 +478,16 @@ impl Default for PrintSettings {
             infill_alternate: true,
             infill_overlap: 15.0,
             infill_before_perimeters: false,
+            outer_size_offset: 0.0,
+            hole_size_offset: 0.0,
+            infill_every_layers: 1,
+            vase_mode: false,
+            adaptive_layers: false,
+            adaptive_min_height: 0.08,
+            adaptive_max_height: 0.28,
+            adaptive_quality: 5,
+            short_wall_length: 0.0,
+            max_volumetric_flow: 0.0,
             bridging_enabled: true,
             bridge_flow_percent: 100.0,
             bridge_speed_percent: 70.0,
@@ -1129,7 +1155,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         B,
         Db(false),
         "Thinner layers where the surface slopes gently.",
-        None,
+        bind_b!(adaptive_layers),
     ),
     row(
         "perimeter_count",
@@ -1209,7 +1235,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         B,
         Db(false),
         "One continuous rising wall, no top, no infill (vase mode).",
-        None,
+        bind_b!(vase_mode),
     ),
     // ----------------------------------------------------------- Adhesion
     row(
@@ -1481,7 +1507,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         i(1, 10, "layers"),
         Di(1),
         "Print sparse infill once per this many layers, thicker.",
-        None,
+        bind_u!(infill_every_layers),
     ),
     row(
         "infill_min_length",
@@ -2222,7 +2248,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(0.01, 1.0, 0.01, MM),
         Df(0.08),
         "Lower bound for adaptive layer heights.",
-        None,
+        bind_f!(adaptive_min_height),
     ),
     row(
         "adaptive_max_height",
@@ -2232,7 +2258,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(0.01, 2.0, 0.01, MM),
         Df(0.28),
         "Upper bound for adaptive layer heights.",
-        None,
+        bind_f!(adaptive_max_height),
     ),
     row(
         "adaptive_quality",
@@ -2242,7 +2268,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         i(1, 10, ""),
         Di(5),
         "Higher follows curved surfaces more closely.",
-        None,
+        bind_u!(adaptive_quality),
     ),
     row(
         "outer_size_offset",
@@ -2252,7 +2278,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(-2.0, 2.0, 0.01, MM),
         Df(0.0),
         "Grow (or shrink) outer walls to correct the printed size.",
-        None,
+        bind_f!(outer_size_offset),
     ),
     row(
         "hole_size_offset",
@@ -2262,7 +2288,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(-2.0, 2.0, 0.01, MM),
         Df(0.0),
         "Grow (or shrink) holes separately from outer walls.",
-        None,
+        bind_f!(hole_size_offset),
     ),
     row(
         "island_order",
@@ -2446,7 +2472,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(0.0, 500.0, 1.0, MM),
         Df(0.0),
         "Short perimeters print slower so they can cool (0 = off).",
-        None,
+        bind_f!(short_wall_length),
     ),
     row(
         "max_volumetric_flow",
@@ -2456,7 +2482,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(0.0, 100.0, 0.5, "mm³/s"),
         Df(0.0),
         "Slow down where the hot end cannot melt fast enough (0 = off).",
-        None,
+        bind_f!(max_volumetric_flow),
     ),
     row(
         "gcode_offset_x",

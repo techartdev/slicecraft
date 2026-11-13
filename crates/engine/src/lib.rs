@@ -1456,6 +1456,90 @@ mesh = AAAA
     }
 
     #[test]
+    fn adaptive_layers_follow_the_slope() {
+        use slicecraft_render::fixtures::octahedron;
+        let Some(mut s) = session_with(octahedron(10.0)) else { return };
+        let p = PrintSettings { adaptive_layers: true, ..s.document().settings.clone() };
+        assert!(s.execute(Command::Profile(Box::new(p.clone()))).is_ok());
+        assert!(matches!(s.execute(Command::Slice), Ok(Outcome::Sliced { .. })));
+        let Some(out) = s.slice_result() else { return };
+        let heights: Vec<f64> = out.layers.iter().skip(1).map(|l| l.height).collect();
+        assert!(
+            heights
+                .iter()
+                .all(|h| *h >= p.adaptive_min_height - 1e-9 && *h <= p.adaptive_max_height + 1e-9)
+        );
+        // an octahedron's faces are 54.7° from vertical: neither the smallest nor the largest
+        let (lo, hi) =
+            heights.iter().fold((f64::INFINITY, 0.0f64), |(a, b), h| (a.min(*h), b.max(*h)));
+        assert!(lo < p.adaptive_max_height, "{lo} {hi}");
+        // finer quality, thinner layers
+        let fine = PrintSettings { adaptive_quality: 10, ..p };
+        assert!(s.execute(Command::Profile(Box::new(fine))).is_ok());
+        assert!(matches!(s.execute(Command::Slice), Ok(Outcome::Sliced { .. })));
+        let more = s.slice_result().map_or(0, |o| o.layers.len());
+        assert!(more > out.layers.len(), "{more} vs {}", out.layers.len());
+    }
+
+    #[test]
+    fn vase_mode_spirals_one_wall() {
+        let Some(mut s) = session_with(cube(20.0)) else { return };
+        let p = PrintSettings { vase_mode: true, ..s.document().settings.clone() };
+        assert!(s.execute(Command::Profile(Box::new(p.clone()))).is_ok());
+        assert!(matches!(s.execute(Command::Slice), Ok(Outcome::Sliced { .. })));
+        let Some(out) = s.slice_result() else { return };
+        let mid = out.layers.get(50).map(|l| l.paths.iter().map(|p| p.kind).collect::<Vec<_>>());
+        assert_eq!(mid, Some(vec![PathKind::OuterPerimeter]));
+        // the wall's moves carry a rising Z
+        assert!(
+            out.gcode.lines().filter(|l| l.starts_with("G1 X") && l.contains(" Z")).count() > 100
+        );
+    }
+
+    #[test]
+    fn combined_infill_and_size_compensation() {
+        let Some(mut s) = session_with(hollow_box(30.0, 10.0)) else { return };
+        let base = s.document().settings.clone();
+        let sparse_layers = |s: &Session| {
+            s.slice_result().map_or(0, |o| {
+                o.layers
+                    .iter()
+                    .filter(|l| l.paths.iter().any(|p| p.kind == PathKind::SparseInfill))
+                    .count()
+            })
+        };
+        assert!(matches!(s.execute(Command::Slice), Ok(Outcome::Sliced { .. })));
+        let every = sparse_layers(&s);
+        let p = PrintSettings { infill_every_layers: 2, ..base.clone() };
+        assert!(s.execute(Command::Profile(Box::new(p))).is_ok());
+        assert!(matches!(s.execute(Command::Slice), Ok(Outcome::Sliced { .. })));
+        let half = sparse_layers(&s);
+        assert!(half * 2 <= every + 1 && half * 2 >= every - 1, "{half} vs {every}");
+        // holes 0.2 mm bigger: the inner wall moves 0.2 mm out
+        let outer_x = |s: &Session| {
+            s.slice_result().and_then(|o| {
+                o.layers.get(30).map(|l| {
+                    l.paths
+                        .iter()
+                        .filter(|p| p.kind == PathKind::OuterPerimeter)
+                        .flat_map(|p| p.points.iter())
+                        .map(|q| q.x)
+                        .fold(f64::INFINITY, f64::min)
+                })
+            })
+        };
+        let p = PrintSettings { outer_size_offset: 0.2, ..base };
+        let before = outer_x(&s);
+        assert!(s.execute(Command::Profile(Box::new(p))).is_ok());
+        assert!(matches!(s.execute(Command::Slice), Ok(Outcome::Sliced { .. })));
+        let after = outer_x(&s);
+        assert!(
+            matches!((before, after), (Some(a), Some(b)) if (a - b - 0.2).abs() < 0.02),
+            "{before:?} {after:?}"
+        );
+    }
+
+    #[test]
     fn restoring_a_profile_does_not_mark_changes() {
         let mut s = Session::new();
         let profile = Profile {

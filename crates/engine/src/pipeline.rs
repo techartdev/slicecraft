@@ -309,6 +309,83 @@ fn gap_fill(
     Ok(fill_narrow(&area, w, PathKind::GapFill)?)
 }
 
+/// Adaptive layer slots: each layer as tall as the surface allows. A surface
+/// at angle θ from vertical leaves a stair-step of `h · cos θ`... measured as
+/// `h · |n_z|`; each layer keeps that under a cusp height set by the quality.
+pub fn adaptive_schedule(
+    meshes: &[Mesh],
+    s: &slicecraft_doc::PrintSettings,
+    model_top: f64,
+) -> Result<Vec<LayerSlot>, EngineError> {
+    const BIN: f64 = 0.05;
+    let (min_h, max_h) = (s.adaptive_min_height.min(s.adaptive_max_height), s.adaptive_max_height);
+    let q = f64::from(s.adaptive_quality.clamp(1, 10));
+    let cusp = max_h * 0.5 * (11.0 - q) / 10.0;
+    let bins = ((model_top / BIN).ceil() as usize).saturating_add(2);
+    if bins > MAX_LAYERS * 40 {
+        return Err(EngineError::TooManyLayers);
+    }
+    // the tallest layer each height band allows
+    let mut allowed = vec![max_h; bins];
+    for m in meshes {
+        for t in m.triangles() {
+            let Some(n) = t.normal() else { continue };
+            let nz = n.z.abs();
+            if nz < 1e-3 {
+                continue;
+            }
+            let h = (cusp / nz).clamp(min_h, max_h);
+            let (lo, hi) =
+                ((t.min_z() / BIN).floor().max(0.0) as usize, (t.max_z() / BIN).ceil() as usize);
+            for b in allowed.iter_mut().take(hi.min(bins)).skip(lo) {
+                if h < *b {
+                    *b = h;
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    let mut top = s.first_layer_height;
+    out.push(LayerSlot { index: 0, top, height: s.first_layer_height });
+    while top < model_top {
+        if out.len() >= MAX_LAYERS {
+            return Err(EngineError::TooManyLayers);
+        }
+        let (lo, hi) = ((top / BIN).floor() as usize, ((top + max_h) / BIN).ceil() as usize);
+        let h = allowed.iter().take(hi.min(bins)).skip(lo).fold(max_h, |a, b| a.min(*b)).max(min_h);
+        let slot = LayerSlot { index: out.len(), top: top + h, height: h };
+        if slot.cut_z() >= model_top {
+            break;
+        }
+        top += h;
+        out.push(slot);
+    }
+    Ok(out)
+}
+
+/// Size compensation: outer contours grow by `outer`, holes by `hole`.
+fn compensate(region: Region, outer: f64, hole: f64) -> Result<Region, EngineError> {
+    if outer == 0.0 && hole == 0.0 {
+        return Ok(region);
+    }
+    let outers = Region {
+        polygons: region
+            .polygons
+            .iter()
+            .map(|p| slicecraft_geom::Polygon { outer: p.outer.clone(), holes: Vec::new() })
+            .collect(),
+    }
+    .union(&Region::new())?;
+    let holes = Region::from_loops(
+        &region
+            .polygons
+            .iter()
+            .flat_map(|p| p.holes.iter().map(|h| h.iter().rev().copied().collect::<Vec<_>>()))
+            .collect::<Vec<_>>(),
+    )?;
+    Ok(outers.offset(outer)?.difference(&holes.offset(hole)?)?)
+}
+
 /// The layer schedule and each layer's model region, plus the open loops
 /// dropped while stitching.
 fn layer_regions(
@@ -319,7 +396,11 @@ fn layer_regions(
     let s = &doc.settings;
     let meshes = bed_meshes(doc)?;
     let top = meshes.iter().map(|m| m.bounds().max().z).fold(0.0f64, f64::max);
-    let slots = layer_schedule(s.first_layer_height, s.layer_height, top)?;
+    let slots = if s.adaptive_layers {
+        adaptive_schedule(&meshes, s, top)?
+    } else {
+        layer_schedule(s.first_layer_height, s.layer_height, top)?
+    };
     if slots.is_empty() {
         return Err(EngineError::NothingToSlice);
     }
@@ -331,7 +412,9 @@ fn layer_regions(
             dropped += layer.dropped_chains;
             loops.extend(layer.loops.into_iter().map(|l| l.points));
         }
-        Ok((Region::from_loops(&loops)?, dropped))
+        let region =
+            compensate(Region::from_loops(&loops)?, s.outer_size_offset, s.hole_size_offset)?;
+        Ok((region, dropped))
     })?;
     let dropped_chains: usize = sections.iter().map(|(_, d)| d).sum();
     let regions: Vec<Region> = sections.into_iter().map(|(r, _)| r).collect();
@@ -770,7 +853,10 @@ pub fn slice_document(
                 )?);
             }
         }
-        if let Some(spacing) = sparse_spacing {
+        // combined infill: printed once per N layers, N times thicker
+        let every = s.infill_every_layers.max(1) as usize;
+        let sparse_here = every == 1 || (i + 1) % every == 0;
+        if let (Some(spacing), true) = (sparse_spacing, sparse_here) {
             let area = if s.infill_pattern == InfillPattern::Concentric {
                 sparse
             } else {
@@ -836,6 +922,14 @@ pub fn slice_document(
         }
         let mut model: Vec<ToolPath> = sh.shells;
         model.extend(infill);
+        if s.vase_mode && i >= s.solid_layers_bottom as usize {
+            let wall = model
+                .into_iter()
+                .filter(|p| p.kind == PathKind::OuterPerimeter)
+                .max_by(|a, b| a.points.len().cmp(&b.points.len()));
+            model = wall.into_iter().collect();
+            pre.retain(|g| g.iter().all(|p| p.kind != PathKind::Support));
+        }
         let islands: Vec<Vec<Vec<ToolPath>>> = match s.island_order {
             IslandOrder::ByFeature => vec![feature_groups(model, s)],
             IslandOrder::Nearest | IslandOrder::Consistent => {

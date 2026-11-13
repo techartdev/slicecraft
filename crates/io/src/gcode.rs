@@ -130,11 +130,15 @@ pub struct GcodeWriter<'a> {
     fan: u8,
     /// The fan duty this layer runs at outside bridges and top surfaces.
     layer_fan: u8,
+    /// On a spiral layer, the height the wall rises from.
+    spiral_from: Option<f64>,
 }
 
 /// Flow multiplier for a feature, on top of the profile's.
 pub fn kind_flow(s: &PrintSettings, kind: PathKind) -> f64 {
     match kind {
+        // combined infill is as thick as the layers it stands for
+        PathKind::SparseInfill => f64::from(s.infill_every_layers.max(1)),
         PathKind::Bridge => s.bridge_flow_percent / 100.0,
         PathKind::TopSolid => s.top_flow_percent / 100.0,
         PathKind::Ironing => s.ironing_flow / 100.0,
@@ -196,6 +200,7 @@ impl<'a> GcodeWriter<'a> {
             speed_factor: 1.0,
             fan: 0,
             layer_fan: 0,
+            spiral_from: None,
         }
     }
 
@@ -367,6 +372,11 @@ impl<'a> GcodeWriter<'a> {
         t
     }
 
+    /// True when this layer is printed as part of the spiral (vase mode).
+    fn spiral(&self, layer: &LayerPaths) -> bool {
+        self.settings.vase_mode && layer.index > self.settings.solid_layers_bottom as usize
+    }
+
     /// Move to `z` for a new layer: retract, lift, reset E.
     fn layer_change(&mut self, layer: &LayerPaths) {
         let _ = writeln!(
@@ -374,14 +384,19 @@ impl<'a> GcodeWriter<'a> {
             ";LAYER:{} Z:{:.3} HEIGHT:{:.3}",
             layer.index, layer.z, layer.height
         );
-        if self.settings.retract_on_layer_change {
+        let spiral = self.spiral(layer);
+        if self.settings.retract_on_layer_change && !spiral {
             self.retract();
         }
-        let z_speed = self.settings.z_speed.min(self.settings.travel_speed);
-        let f = self.feed_word(z_speed);
-        let _ = writeln!(self.out, "G0 Z{:.3}{f}", layer.z + self.settings.gcode_offset_z);
-        let dz = self.z.map_or(layer.z, |z| (layer.z - z).abs());
-        self.stats.estimated_seconds += dz / z_speed;
+        // a spiral layer rises along its wall: no separate Z move
+        if !spiral {
+            let z_speed = self.settings.z_speed.min(self.settings.travel_speed);
+            let f = self.feed_word(z_speed);
+            let _ = writeln!(self.out, "G0 Z{:.3}{f}", layer.z + self.settings.gcode_offset_z);
+            let dz = self.z.map_or(layer.z, |z| (layer.z - z).abs());
+            self.stats.estimated_seconds += dz / z_speed;
+        }
+        self.spiral_from = if spiral { self.z } else { None };
         self.z = Some(layer.z);
         let s = self.settings;
         if layer.index == 1 {
@@ -519,10 +534,31 @@ impl<'a> GcodeWriter<'a> {
             self.kind = Some(path.kind);
         }
         let s = self.settings;
-        let full = path_speed(s, path.kind, layer.index);
-        let speed = (full * self.speed_factor).max(s.min_layer_speed.min(full));
         let width = layer_line_width(s, layer.index);
         let e_per_mm = filament_per_mm(width, layer.height, s) * kind_flow(s, path.kind);
+        let mut full = path_speed(s, path.kind, layer.index);
+        // short walls print slower so they can cool
+        if s.short_wall_length > 0.0
+            && matches!(path.kind, PathKind::OuterPerimeter | PathKind::InnerPerimeter)
+        {
+            let mut len = polyline_length(&path.points);
+            if path.closed
+                && let (Some(a), Some(b)) = (path.points.first(), path.points.last())
+            {
+                len += a.distance(*b);
+            }
+            if len < s.short_wall_length {
+                full *= (len / s.short_wall_length).max(0.5);
+            }
+        }
+        // never melt more than the hot end can
+        if s.max_volumetric_flow > 0.0 {
+            let section = width * layer.height * kind_flow(s, path.kind);
+            if section > 0.0 {
+                full = full.min(s.max_volumetric_flow / section);
+            }
+        }
+        let speed = (full * self.speed_factor).max(s.min_layer_speed.min(full));
         // bridges and top surfaces may want their own fan, once the fan is on
         let fan_for = |pct: f64| (pct / 100.0 * 255.0).round().clamp(0.0, 255.0) as u8;
         let wanted = match path.kind {
@@ -541,6 +577,35 @@ impl<'a> GcodeWriter<'a> {
             pts.push(start);
         }
         let total = polyline_length(&pts);
+        // vase mode: the outer wall rises from the last layer's height to this one's
+        if let (Some(z0), Some(z1), PathKind::OuterPerimeter) =
+            (self.spiral_from, self.z, path.kind)
+            && total > 0.0
+        {
+            let mut done = 0.0;
+            for w in pts.windows(2) {
+                let [a, b] = w else { continue };
+                done += a.distance(*b);
+                self.unretract();
+                let d = a.distance(*b);
+                let e = self.e_word(d * e_per_mm);
+                let f = self.feed_word(speed);
+                let z = z0 + (z1 - z0) * done / total;
+                let (ox, oy, oz) = (s.gcode_offset_x, s.gcode_offset_y, s.gcode_offset_z);
+                let _ = writeln!(
+                    self.out,
+                    "G1 X{:.3} Y{:.3} Z{:.4} {e}{f}",
+                    b.x + ox,
+                    b.y + oy,
+                    z + oz
+                );
+                self.stats.extruded_mm += d;
+                self.stats.filament_mm += d * e_per_mm;
+                self.stats.estimated_seconds += d / speed;
+                self.pos = Some(*b);
+            }
+            return;
+        }
         // coast: the last stretch without extruding, if the path is long enough
         let coast =
             if finish.coast > 0.0 && total > 2.0 * finish.coast { finish.coast } else { 0.0 };
@@ -1062,5 +1127,28 @@ mod tests {
         let out = write_gcode(&two_far_lines(), &s, &Bed::default());
         // 20 mm extruded before the travel: below 50, so only the end retracts... or not at all
         assert!(out.stats.retractions <= 1, "{}", out.stats.retractions);
+    }
+
+    #[test]
+    fn short_walls_and_the_flow_cap_slow_down() {
+        let wall = |len: f64| {
+            one_layer(vec![ToolPath {
+                kind: PathKind::OuterPerimeter,
+                points: vec![
+                    Point2::new(0.0, 0.0),
+                    Point2::new(len, 0.0),
+                    Point2::new(len, len),
+                    Point2::new(0.0, len),
+                ],
+                closed: true,
+            }])
+        };
+        let base = PrintSettings::default();
+        let t =
+            |s: &PrintSettings| write_gcode(&wall(5.0), s, &Bed::default()).stats.estimated_seconds;
+        let short = PrintSettings { short_wall_length: 100.0, ..base.clone() };
+        assert!(t(&short) > t(&base) * 1.5);
+        let capped = PrintSettings { max_volumetric_flow: 1.0, ..base.clone() };
+        assert!(t(&capped) > t(&base) * 1.5);
     }
 }

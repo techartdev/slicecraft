@@ -59,8 +59,8 @@ the architecture document, not to a quieter line here.
 - **Retraction** — distance, speed, minimum travel, minimum extrusion, Z lift,
   layer-change retraction, extra restart, "only when crossing outlines", coasting,
   wipe and firmware retraction (G10/G11). Travel inside the part walks around holes.
-- **Adaptive layer heights, size compensation, layer ranges, per-object settings** —
-  absent.
+- **Adaptive layer heights, size compensation, combined infill, vase mode** — done.
+  **Layer ranges and per-object settings** — absent.
 - **First-layer width** — set by percentage; no separate first-layer line width for the part on a raft.
 
 ## Output
