@@ -30,7 +30,8 @@ pub struct Profile {
     pub settings: PrintSettings,
 }
 
-fn quote(s: &str) -> String {
+/// A string as a double-quoted, escaped value (shared with project files).
+pub fn quote(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
     for c in s.chars() {
@@ -47,7 +48,8 @@ fn quote(s: &str) -> String {
     out
 }
 
-fn unquote(s: &str) -> Option<String> {
+/// The inverse of `quote`; `None` when the value is not a well-formed quoted string.
+pub fn unquote(s: &str) -> Option<String> {
     let inner = s.strip_prefix('"')?.strip_suffix('"')?;
     let mut out = String::with_capacity(inner.len());
     let mut chars = inner.chars();

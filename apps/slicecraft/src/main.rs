@@ -11,10 +11,11 @@
 
 //! SliceCraft desktop entry point.
 //!
-//! `slicecraft [model files…]` opens the window with those models on the bed.
+//! `slicecraft [files…]` opens the window with those files: a project
+//! (`.scproj`), a profile (`.scprofile`) or models (STL, OBJ).
 //! `--version` and `--commands` answer from the terminal without a window.
 
-use slicecraft_engine::{COMMANDS, Command, Session};
+use slicecraft_engine::{COMMANDS, Session};
 use std::path::PathBuf;
 
 fn main() -> std::process::ExitCode {
@@ -31,13 +32,9 @@ fn main() -> std::process::ExitCode {
             std::process::ExitCode::SUCCESS
         }
         _ => {
-            let mut session = Session::new();
-            for a in args.iter().filter(|a| !a.starts_with("--")) {
-                if let Err(e) = session.execute(Command::ImportFile(PathBuf::from(a))) {
-                    eprintln!("slicecraft: {a}: {e}");
-                }
-            }
-            match slicecraft_ui_egui::run(session) {
+            let files: Vec<PathBuf> =
+                args.iter().filter(|a| !a.starts_with("--")).map(PathBuf::from).collect();
+            match slicecraft_ui_egui::run(Session::new(), files) {
                 Ok(()) => std::process::ExitCode::SUCCESS,
                 Err(e) => {
                     eprintln!("slicecraft: cannot open the window: {e}");

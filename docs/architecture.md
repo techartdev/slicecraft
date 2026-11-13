@@ -9,8 +9,8 @@ describes code that exists. The rules that keep the shape are in
 
 ## Workspace
 
-13 packages: 7 libraries, 2 apps, `xtask`. About 12,400 lines of Rust
-(`cargo xtask stats`, 2026-11-13), 121 tests in 17 test binaries.
+13 packages: 7 libraries, 2 apps, `xtask`. About 13,700 lines of Rust
+(`cargo xtask stats`, 2026-11-13), 133 tests in 17 test binaries.
 
 | Layer | Crate | What it does |
 |---|---|---|
@@ -113,6 +113,7 @@ session revision; a slice is served only for the revision it was taken at, and a
 | `dialogs` | profile editor rendered from the settings schema (tabs, sections, search, changed-only, planned tags, per-setting reset), preferences, mesh analysis, machine control (placeholder), shortcuts, feature status, about |
 | `icons` | toolbar glyphs drawn in code |
 | `camera` | orbit camera, view presets, fit to a box, ray to the bed plane |
+| `config` | what is remembered between sessions: `preferences.txt` (preferences, recent projects) and `last.scprofile` in the per-user folder (`%APPDATA%\SliceCraft`, `~/Library/Application Support/SliceCraft`, `$XDG_CONFIG_HOME/slicecraft`; `SLICECRAFT_CONFIG_DIR` overrides) |
 
 Every change to the document goes through `Session::execute`. Dragging a model and
 editing the profile coalesce into one undo step per gesture.
@@ -126,6 +127,23 @@ uses; a row without one is a placeholder stored in `PrintSettings::extra`.
 Validation, the profile editor, profile files (`doc::profile`) and the "unused
 settings" slice note all read this table. `Document::set_settings` keeps the bed in
 step with the profile's machine settings.
+
+## Projects
+
+`io::project` reads and writes `.scproj`: one UTF-8 text file with a header, a
+`[profile]` section in `.scprofile` form and one `[object]` block per model (name,
+visibility, translate/rotate/scale, triangle count, mesh as base64 little-endian
+`f64`). `f64` text uses Rust's shortest round-trip form, so open-then-save is
+byte-identical. Reading checks the header, the triangle count against
+`MAX_TRIANGLES` and the base64 length before decoding, every coordinate through
+`Mesh::new` and every placement through `Transform::is_valid`; unknown keys and
+sections are skipped with a warning.
+
+The engine commands are `new-project`, `open-project` and `save-project`. The session
+keeps the project path and the revision at the last save, so `is_modified` drives the
+window title and the "save changes?" prompt before New, Open and Quit. Opening or
+starting a project clears undo. The CLI's `slice` accepts a project in place of (or
+with) models, and MCP has `open_project` and `save_project`.
 
 ## Agent control
 
@@ -152,3 +170,4 @@ points panic on out-of-range input.
 | 2026-11-13 | first | Scaffold measured: 7 crates, 2 apps, xtask; ASCII STL + cross sections + templated G-code writer |
 | 2026-11-13 | MVP | Loops, regions, shells, solid/sparse infill, skirt, ordering, extrusion model, binary STL + OBJ, command API, egui window with 3D bed and toolpath preview |
 | 2026-11-13 | UI | Settings schema (169 settings), profiles, undo/redo, XYZ transforms, mirror/duplicate, brim, more patterns and seams, scripts, offsets; full window: menus, toolbars, placement, profile editor, preview controls, analysis |
+| 2026-11-13 | projects | `.scproj` project files, new/open/save/recent, unsaved-changes prompt, preferences and last profile remembered |

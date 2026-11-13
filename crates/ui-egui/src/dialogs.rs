@@ -76,6 +76,42 @@ pub fn show(app: &mut SliceCraftApp, ctx: &egui::Context) {
     features_window(app, ctx);
     about_window(app, ctx);
     planned_window(app, ctx);
+    confirm_window(app, ctx);
+}
+
+/// "Save your changes?" before an action that replaces the document.
+fn confirm_window(app: &mut SliceCraftApp, ctx: &egui::Context) {
+    let Some(action) = app.confirm.clone() else { return };
+    let mut choice = None;
+    egui::Window::new("Unsaved changes")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .show(ctx, |ui| {
+            ui.label(format!(
+                "Save the changes to \"{}\" before {}?",
+                app.project_name(),
+                action.verb()
+            ));
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("Save").clicked() {
+                    choice = Some(true);
+                }
+                if ui.button("Don't save").clicked() {
+                    choice = Some(false);
+                }
+                if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    app.confirm = None;
+                }
+            });
+        });
+    if let Some(save) = choice {
+        app.confirm = None;
+        if !save || app.save_project(false) {
+            app.perform(action);
+        }
+    }
 }
 
 /// One setting's editor widget. Returns a new value when it was changed.
@@ -369,10 +405,17 @@ fn preferences_window(app: &mut SliceCraftApp, ctx: &egui::Context) {
             ui.checkbox(&mut p.preview_after_slice, "Show the toolpaths after slicing");
             ui.checkbox(&mut p.fit_on_import, "Fit the view to models after import");
             ui.add_space(6.0);
+            match crate::config::config_dir() {
+                Some(dir) => ui.weak(format!("Remembered in {}", dir.display())),
+                None => ui.weak("This system gives no settings folder; preferences last until the window closes."),
+            };
+            if ui.button("Restore default preferences").clicked() {
+                app.prefs = crate::app::Preferences::default();
+            }
+            ui.add_space(6.0);
             ui.label(RichText::new("Planned").strong().color(PLANNED));
             ui.add_enabled_ui(false, |ui| {
                 let mut f = false;
-                ui.checkbox(&mut f, "Remember preferences between sessions");
                 ui.checkbox(&mut f, "Ask to scale models that look like inches");
                 ui.checkbox(&mut f, "Rotate or scale every imported model by a fixed amount");
                 ui.checkbox(&mut f, "Orthographic camera");
@@ -381,6 +424,9 @@ fn preferences_window(app: &mut SliceCraftApp, ctx: &egui::Context) {
             });
         },
     );
+    if app.dialogs.preferences && !open {
+        app.persist();
+    }
     app.dialogs.preferences = open;
 }
 

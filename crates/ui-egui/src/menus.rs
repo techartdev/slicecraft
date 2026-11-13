@@ -4,7 +4,7 @@
 //! `slicecraft_engine::COMMANDS` as planned; planned items are shown disabled
 //! with a "planned" note, and clicking their row opens an explanation.
 
-use crate::app::{Mode, SliceCraftApp, Tool};
+use crate::app::{Mode, Pending, SliceCraftApp, Tool};
 use crate::camera::ViewPreset;
 use crate::icons::{self, Icon};
 use eframe::egui::{self, Ui};
@@ -37,9 +37,37 @@ pub fn menu_bar(app: &mut SliceCraftApp, ui: &mut Ui) {
     let has_sel = !app.selected.is_empty();
     egui::MenuBar::new().ui(ui, |ui| {
         ui.menu_button("File", |ui| {
-            item(app, ui, "new-project", "", true);
-            item(app, ui, "open-project", "", true);
-            item(app, ui, "save-project", "", true);
+            if item(app, ui, "new-project", "Ctrl+N", true) {
+                app.request(Pending::NewProject);
+            }
+            if item(app, ui, "open-project", "Ctrl+Shift+O", true) {
+                app.request(Pending::OpenProject(None));
+            }
+            let recent = app.recent.clone();
+            ui.add_enabled_ui(!recent.is_empty(), |ui| {
+                ui.menu_button("Open Recent", |ui| {
+                    for path in recent {
+                        let label = path.file_name().map_or_else(
+                            || path.display().to_string(),
+                            |n| n.to_string_lossy().into_owned(),
+                        );
+                        if ui.button(label).on_hover_text(path.display().to_string()).clicked() {
+                            app.request(Pending::OpenProject(Some(path)));
+                        }
+                    }
+                    ui.separator();
+                    if ui.button("Clear the list").clicked() {
+                        app.recent.clear();
+                        app.persist();
+                    }
+                });
+            });
+            if item(app, ui, "save-project", "Ctrl+S", true) {
+                app.save_project(false);
+            }
+            if plain(ui, "Save Project As…", "Ctrl+Shift+S", true) {
+                app.save_project(true);
+            }
             ui.separator();
             if item(app, ui, "import", "Ctrl+O", true) {
                 app.open_import_dialog();

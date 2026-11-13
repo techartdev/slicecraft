@@ -67,12 +67,13 @@ the architecture document, not to a quieter line here.
 ## Profiles and project
 
 - **Profiles** — 169 typed settings with ranges and help; 59 drive the slicer, 110 are
-  placeholders that are saved and shown as planned. Profiles save and load as text;
-  no inheritance or comparison, and the current profile is not remembered between
-  sessions.
+  placeholders that are saved and shown as planned. Profiles save and load as text and
+  the last one is restored at start-up; no inheritance or comparison.
 - **Several profiles per job, height zones** — not supported (menu items are planned).
 - **No printer or material database**; the bed size comes from the profile.
-- **No project file format** — a document cannot be saved.
+- **Projects** — `.scproj` holds models, placement, visibility and the profile. It is
+  uncompressed (≈ 96 bytes per triangle), keeps no undo history and no slice result,
+  and does not remember the camera. Opening a project clears undo.
 
 ## UI
 
@@ -82,11 +83,13 @@ the architecture document, not to a quieter line here.
   exact values come from the placement panel.
 - **Placeholders in the window**: lay flat, repair, supports (generate, add, remove),
   several profiles, setting zones, machine control, printing, orthographic camera,
-  wireframe, colour by tool/flow/profile, preference persistence, language,
+  wireframe, colour by tool/flow/profile, language,
   shortcut editor. Each is shown disabled or opens a "planned" note.
-- **Ctrl+P** (print settings) did not respond to synthetic key events in the driven
-  test, although Ctrl+R did; the button and the menu item work. Unverified with a
-  physical keyboard.
+- **Keyboard shortcuts** are untested with a physical keyboard: synthetic key events
+  from the test driver were unreliable (Ctrl+R once worked, Ctrl+P, Ctrl+S and Ctrl+D
+  did not register). Every shortcut also has a menu item, and those were driven.
+- **File dialogs block the window** while open (native dialogs on the UI thread); the
+  view does not repaint behind them.
 - **No app icon, no `craft-ui` theme tokens, no i18n catalogue.**
 - **Accessibility** — AccessKit is on through egui; the 3D view has no accessible
   description.

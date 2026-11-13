@@ -15,6 +15,7 @@
 
 pub mod app;
 pub mod camera;
+pub mod config;
 pub mod dialogs;
 pub mod icons;
 pub mod menus;
@@ -27,8 +28,9 @@ use slicecraft_render::{Layer, Point2};
 
 pub use app::SliceCraftApp;
 
-/// Open the SliceCraft window and run until it is closed.
-pub fn run(session: Session) -> Result<(), String> {
+/// Open the SliceCraft window and run until it is closed. `files` are opened
+/// as if dropped on the window: projects, profiles or models.
+pub fn run(session: Session, files: Vec<std::path::PathBuf>) -> Result<(), String> {
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("SliceCraft")
@@ -40,7 +42,11 @@ pub fn run(session: Session) -> Result<(), String> {
     eframe::run_native(
         "SliceCraft",
         options,
-        Box::new(move |_cc| Ok(Box::new(SliceCraftApp::new(session)))),
+        Box::new(move |_cc| {
+            let mut app = SliceCraftApp::with_config(session, config::config_dir());
+            app.open_paths(files);
+            Ok(Box::new(app))
+        }),
     )
     .map_err(|e| e.to_string())
 }

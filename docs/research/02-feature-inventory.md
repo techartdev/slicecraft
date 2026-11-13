@@ -50,7 +50,9 @@ Status: **done** = works and is tested · **partial** = works with stated limits
 | Drag-and-drop import | public | done | P1 |
 | Preview an existing G-code file | public | placeholder | P5 |
 | Export models (STL/OBJ/3MF) | public | placeholder | P2 |
-| Project file holding models, placement, settings, supports | public | placeholder | P2 |
+| Project file holding models, placement, settings, supports | public | done (models, placement, visibility, profile; supports when they exist) | P2 |
+| Recent projects | public | done | P2 |
+| Ask before dropping unsaved changes | public | done (new, open, quit) | P2 |
 | Reload a model when its file changes | public | — | P6 |
 | Detect and correct inch/cm models | public | partial (manual unit correction) | P1 |
 | Automatic actions on every import (rotate/scale/offset) | public | placeholder (preferences) | P6 |
@@ -187,7 +189,7 @@ grouping is its own.
 | Camera options: invert zoom, orbit speed | observed | done | P6 |
 | Camera schemes of other CAD tools, 3D mouse | public | — | P6 |
 | Keyboard shortcuts list; shortcut editor | public | partial (list only) | P6 |
-| Preferences that persist | public | placeholder | P6 |
+| Preferences that persist | public | done (preferences, recent projects, last profile) | P6 |
 | Language selection | public | placeholder | P6 |
 | Workspace tabs | observed | — | P6 |
 | Agent control (CLI, MCP) | absent in the reference | partial (CLI done, MCP dispatch done, no transport) | P5 |
@@ -213,8 +215,9 @@ grouping is its own.
 4. Should SliceCraft read the reference's project or profile files for migration?
    That would need a clean-room format study of its own and is out of scope until the
    operator decides.
-5. Preferences persistence: which storage, given the suite's conventions
-   (`craft-platform`, `craft-docpath`)?
+5. Preferences persistence: answered for now with two text files in the platform's
+   per-user folder (`ui-egui::config`). Move to `craft-platform` / `craft-docpath`
+   when SliceCraft joins the suite.
 
 ## 6. Clean-room statement
 

@@ -15,7 +15,7 @@ use slicecraft_engine::{
 };
 use slicecraft_io::format_duration;
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc};
 
@@ -130,7 +130,26 @@ impl Default for PreviewState {
     }
 }
 
-/// Window preferences (this session only until preferences are saved).
+/// Something that would drop unsaved changes, waiting for the user's answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Pending {
+    NewProject,
+    /// Open a project; `None` asks for the file.
+    OpenProject(Option<PathBuf>),
+    Quit,
+}
+
+impl Pending {
+    pub fn verb(&self) -> &'static str {
+        match self {
+            Pending::NewProject => "starting a new project",
+            Pending::OpenProject(_) => "opening another project",
+            Pending::Quit => "quitting",
+        }
+    }
+}
+
+/// Window preferences, remembered between sessions (see `config`).
 #[derive(Debug, Clone)]
 pub struct Preferences {
     pub bed: BedStyle,
@@ -175,6 +194,17 @@ pub struct SliceCraftApp {
     pub(crate) uniform_scale: bool,
     pub(crate) drag: Option<crate::viewport::Drag>,
     applied_dark: Option<bool>,
+    /// Recent project files, newest first.
+    pub(crate) recent: Vec<PathBuf>,
+    /// Where preferences are remembered; `None` keeps them for this session only.
+    config_dir: Option<PathBuf>,
+    /// An action waiting for "save your changes?".
+    pub(crate) confirm: Option<Pending>,
+    /// Set once the user agreed to close, so the next close request goes through.
+    allow_close: bool,
+    /// Close the window on the next frame (after "save changes?" was answered).
+    quit_requested: bool,
+    shown_title: String,
 }
 
 impl Default for SliceCraftApp {
@@ -205,6 +235,199 @@ impl SliceCraftApp {
             uniform_scale: true,
             drag: None,
             applied_dark: None,
+            recent: Vec::new(),
+            config_dir: None,
+            confirm: None,
+            allow_close: false,
+            quit_requested: false,
+            shown_title: String::new(),
+        }
+    }
+
+    /// The window with remembered preferences, recent projects and the last
+    /// profile from `dir`, saving them back there on exit.
+    pub fn with_config(session: Session, dir: Option<PathBuf>) -> Self {
+        let mut app = Self::new(session);
+        if let Some(dir) = &dir {
+            let (config, notes) = crate::config::load(dir);
+            app.prefs = config.prefs;
+            app.recent = config.recent;
+            if let Some(profile) = config.profile
+                && app.session.project_path().is_none()
+                && let Err(e) = app.session.restore_profile(profile)
+            {
+                app.error(format!("The last profile was not restored: {e}"));
+            }
+            if !notes.is_empty() {
+                app.info(format!("Preferences: {}", notes.join("; ")));
+            }
+            let bed = app.session.document().bed.clone();
+            app.camera = OrbitCamera::for_bed(bed.width, bed.depth, bed.height);
+        }
+        app.config_dir = dir;
+        app
+    }
+
+    /// Write preferences, recent projects and the current profile.
+    pub(crate) fn persist(&mut self) {
+        let Some(dir) = self.config_dir.clone() else { return };
+        let config = crate::config::Config {
+            prefs: self.prefs.clone(),
+            recent: self.recent.clone(),
+            profile: Some(self.session.profile()),
+        };
+        if let Err(e) = crate::config::save(&dir, &config) {
+            self.error(format!("Preferences were not saved: {e}"));
+        }
+    }
+
+    /// Open files given on the command line or dropped: projects, profiles or models.
+    pub fn open_paths(&mut self, paths: Vec<PathBuf>) {
+        let mut models = Vec::new();
+        for path in paths {
+            match extension(&path).as_deref() {
+                Some("scproj") => self.request(Pending::OpenProject(Some(path))),
+                Some("scprofile") => {
+                    self.run(Command::LoadProfile(path));
+                }
+                _ => models.push(path),
+            }
+        }
+        if !models.is_empty() {
+            self.import_paths(models);
+        }
+    }
+
+    /// The project's display name: its file name, or "Untitled".
+    pub(crate) fn project_name(&self) -> String {
+        self.session
+            .project_path()
+            .and_then(|p| p.file_stem())
+            .map_or_else(|| "Untitled".into(), |s| s.to_string_lossy().into_owned())
+    }
+
+    /// Unsaved work that an action would drop.
+    pub(crate) fn has_unsaved_work(&self) -> bool {
+        self.session.is_modified() && !self.session.document().objects.is_empty()
+    }
+
+    /// Run an action that would replace the document, asking first when
+    /// there are unsaved changes.
+    pub(crate) fn request(&mut self, action: Pending) {
+        if self.has_unsaved_work() {
+            self.confirm = Some(action);
+        } else {
+            self.perform(action);
+        }
+    }
+
+    /// Run an action whose unsaved changes were dealt with.
+    pub(crate) fn perform(&mut self, action: Pending) {
+        match action {
+            Pending::NewProject => {
+                if self.run(Command::NewProject).is_some() {
+                    self.after_document_replaced();
+                    self.info("New project.");
+                }
+            }
+            Pending::OpenProject(Some(path)) => self.open_project(path),
+            Pending::OpenProject(None) => {
+                if let Some(path) = rfd::FileDialog::new()
+                    .set_title("Open project")
+                    .add_filter("SliceCraft project", &["scproj"])
+                    .pick_file()
+                {
+                    self.open_project(path);
+                }
+            }
+            Pending::Quit => {
+                self.allow_close = true;
+                self.quit_requested = true;
+            }
+        }
+    }
+
+    fn open_project(&mut self, path: PathBuf) {
+        if let Some(Outcome::ProjectOpened { objects, warnings, .. }) =
+            self.run(Command::OpenProject(path.clone()))
+        {
+            crate::config::push_recent(&mut self.recent, &path);
+            self.after_document_replaced();
+            let mut msg = format!("Opened {} ({objects} model(s)).", path.display());
+            if !warnings.is_empty() {
+                msg.push_str(&format!(
+                    " {} line(s) skipped: {}",
+                    warnings.len(),
+                    warnings.join("; ")
+                ));
+            }
+            self.info(msg);
+            self.persist();
+        } else if !path.exists() {
+            // a project that is gone leaves the recent list
+            self.recent.retain(|p| p != &path);
+        }
+    }
+
+    fn after_document_replaced(&mut self) {
+        self.selected.clear();
+        self.mode = Mode::Prepare;
+        self.dialogs.settings = None;
+        self.refresh_caches();
+        self.fit_view();
+    }
+
+    /// Save to the project's file, or ask for one. False when nothing was saved.
+    pub(crate) fn save_project(&mut self, ask: bool) -> bool {
+        let path = match self.session.project_path() {
+            Some(p) if !ask => Some(p.to_path_buf()),
+            current => {
+                let name = current
+                    .and_then(|p| p.file_name())
+                    .map_or_else(|| "project.scproj".into(), |n| n.to_string_lossy().into_owned());
+                rfd::FileDialog::new()
+                    .set_title("Save project")
+                    .add_filter("SliceCraft project", &["scproj"])
+                    .set_file_name(name)
+                    .save_file()
+            }
+        };
+        let Some(mut path) = path else { return false };
+        if path.extension().is_none() {
+            path.set_extension("scproj");
+        }
+        if self.run(Command::SaveProject(path.clone())).is_some() {
+            crate::config::push_recent(&mut self.recent, &path);
+            self.persist();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn update_title(&mut self, ctx: &egui::Context) {
+        let dirty = if self.session.is_modified() { " *" } else { "" };
+        let title = format!("{}{dirty} - SliceCraft", self.project_name());
+        if title != self.shown_title {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+            self.shown_title = title;
+        }
+    }
+
+    /// Catch the window's close button when there is unsaved work.
+    fn guard_close(&mut self, ctx: &egui::Context) {
+        if self.quit_requested {
+            self.quit_requested = false;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+        if ctx.input(|i| i.viewport().close_requested()) && !self.allow_close {
+            if self.has_unsaved_work() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.confirm = Some(Pending::Quit);
+            } else {
+                self.allow_close = true;
+            }
         }
     }
 
@@ -262,7 +485,10 @@ impl SliceCraftApp {
                         self.info(format!("Loaded profile \"{name}\".{w}"));
                     }
                     Outcome::Saved { path } => self.info(format!("Saved {}.", path.display())),
-                    Outcome::Sliced { .. } | Outcome::Changed | Outcome::Unchanged => {}
+                    Outcome::Sliced { .. }
+                    | Outcome::ProjectOpened { .. }
+                    | Outcome::Changed
+                    | Outcome::Unchanged => {}
                 }
                 Some(o)
             }
@@ -663,11 +889,23 @@ impl SliceCraftApp {
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
+        if self.confirm.is_some() {
+            return;
+        }
         let typing = ctx.memory(|m| m.focused().is_some());
         let (cmd, shift) = ctx.input(|i| (i.modifiers.command, i.modifiers.shift));
         let pressed = |k: Key| ctx.input(|i| i.key_pressed(k));
-        if cmd && pressed(Key::O) {
+        if cmd && !shift && pressed(Key::O) {
             self.open_import_dialog();
+        }
+        if cmd && shift && pressed(Key::O) {
+            self.request(Pending::OpenProject(None));
+        }
+        if cmd && pressed(Key::S) {
+            self.save_project(shift);
+        }
+        if cmd && pressed(Key::N) {
+            self.request(Pending::NewProject);
         }
         if cmd && pressed(Key::E) {
             self.export(ctx);
@@ -758,11 +996,7 @@ impl SliceCraftApp {
         let mut paths = Vec::new();
         for f in dropped {
             if let Some(path) = f.path {
-                if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("scprofile")) {
-                    self.run(Command::LoadProfile(path));
-                } else {
-                    paths.push(path);
-                }
+                paths.push(path);
             } else if let Some(bytes) = f.bytes {
                 let ext = std::path::Path::new(&f.name)
                     .extension()
@@ -776,7 +1010,7 @@ impl SliceCraftApp {
             }
         }
         if !paths.is_empty() {
-            self.import_paths(paths);
+            self.open_paths(paths);
         }
     }
 
@@ -796,6 +1030,8 @@ impl eframe::App for SliceCraftApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.apply_theme(&ctx);
+        self.guard_close(&ctx);
+        self.update_title(&ctx);
         self.poll_job();
         self.dropped_files(&ctx);
         self.shortcuts(&ctx);
@@ -827,4 +1063,13 @@ impl eframe::App for SliceCraftApp {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
     }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.cancel_slice();
+        self.persist();
+    }
+}
+
+fn extension(path: &Path) -> Option<String> {
+    path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase)
 }

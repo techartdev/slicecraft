@@ -88,7 +88,8 @@ can grant.** Everything must build and test with `cargo` on one machine.
 
 - No copying of Simplify3D's profiles, firmware definitions, supports, or strings.
 - No proprietary file formats (`.factory`) written or read in phase 1; our own
-  project format is a documented JSON/ZIP container, decided in P2.
+  project format is our own documented text container (`.scproj`, see
+  `crates/io/src/project.rs`).
 - No cloud service, no account, no telemetry.
 
 ---
@@ -158,7 +159,11 @@ areas computed analytically match within 1e-6 relative; no panics on truncated f
 ### P2 — Profiles, project format, repair (≈ 25–40 h)
 
 - Profile model: printer / material / quality with inheritance and overrides; validated on load.
-- Our own project container (documented; `.slicecraft` = ZIP with `project.json` + meshes).
+- Our own project container: **landed** as `.scproj`, one UTF-8 text file (header, the
+  profile in `.scprofile` form, one `[object]` block per model with placement and the
+  mesh as base64 little-endian `f64`). Chosen over ZIP + JSON so it needs no new
+  dependency, diffs as text and round-trips byte for byte; compression can come
+  later if file size matters (≈ 96 bytes per triangle today).
 - Repair: degenerate removal, duplicate vertex weld, hole detection, normal fix, non-manifold report.
 - Settings UI data model (no widgets yet): every setting has an id, unit, range, default and help text.
 
@@ -310,3 +315,4 @@ A single checklist that turns "we would like to join" into "this is ready to rev
 |---|---|---|
 | 2026-11-13 | first | Program plan after scaffold |
 | 2026-11-13 | MVP | Window + real pipeline landed ahead of the phase order (P1/P3 mostly, slices of P4–P6); licence exceptions for the egui stack recorded in `ATTRIBUTION.md`; state in `ROADMAP.md` |
+| 2026-11-13 | projects | Project format decided (`.scproj` text, not ZIP + JSON); new/open/save project, recent list, preferences and last profile remembered |
