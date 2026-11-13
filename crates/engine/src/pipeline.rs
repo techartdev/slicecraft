@@ -527,29 +527,45 @@ pub fn slice_document(
             height: slot.height,
             paths,
             inside_travel: Vec::new(),
+            travel_via: Vec::new(),
         });
     }
 
     // Travel that does not cross the model's outline (inside the part, or
     // outside it, between support pillars) needs no retraction: a string
-    // there is hidden in infill or in support.
-    if s.retract_only_outside {
-        let flags = par_map(&layers, Stage::Gcode, observer, |i, layer| {
-            let Some(area) = regions.get(i) else { return Ok(Vec::new()) };
+    // there is hidden in infill or in support. With combing, travel that
+    // would cross a hole walks around it inside the part instead.
+    if s.retract_only_outside || s.avoid_crossing_walls {
+        let routes = par_map(&layers, Stage::Gcode, observer, |i, layer| {
+            let Some(area) = regions.get(i) else { return Ok((Vec::new(), Vec::new())) };
+            let comb_area =
+                if s.avoid_crossing_walls { Some(area.offset(-0.25 * w)?) } else { None };
             let mut flags = Vec::with_capacity(layer.paths.len());
+            let mut vias = Vec::with_capacity(layer.paths.len());
             let mut prev: Option<Point2> = None;
             for p in &layer.paths {
-                let inside = match (prev, p.start()) {
-                    (Some(a), Some(b)) => !area.crosses_boundary(a, b),
-                    _ => false,
-                };
+                let (mut inside, mut via) = (false, Vec::new());
+                if let (Some(a), Some(b)) = (prev, p.start()) {
+                    let crosses = area.crosses_boundary(a, b);
+                    if !crosses {
+                        inside = s.retract_only_outside;
+                    } else if let Some(c) = &comb_area {
+                        let limit = a.distance(b) * s.travel_detour_limit + 2.0 * w;
+                        if let Some(route) = slicecraft_render::paths::comb(c, a, b, limit) {
+                            inside = true;
+                            via = route;
+                        }
+                    }
+                }
                 flags.push(inside);
+                vias.push(via);
                 prev = p.end();
             }
-            Ok(flags)
+            Ok((flags, vias))
         })?;
-        for (layer, f) in layers.iter_mut().zip(flags) {
+        for (layer, (f, v)) in layers.iter_mut().zip(routes) {
             layer.inside_travel = f;
+            layer.travel_via = v;
         }
     }
     let out = write_gcode(&layers, s, &doc.bed);

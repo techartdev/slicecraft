@@ -780,6 +780,7 @@ mod tests {
                 },
             ],
             inside_travel: Vec::new(),
+            travel_via: Vec::new(),
         }]
     }
 

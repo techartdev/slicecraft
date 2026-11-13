@@ -355,6 +355,12 @@ impl<'a> GcodeWriter<'a> {
         self.layer_change(layer);
         for (k, p) in layer.paths.iter().enumerate() {
             let inside = layer.inside_travel.get(k).copied().unwrap_or(false);
+            // a combed travel follows its waypoints, inside the part
+            if inside && let Some(via) = layer.travel_via.get(k) {
+                for w in via {
+                    self.travel_to(*w, true);
+                }
+            }
             self.path_after(p, layer, inside);
         }
         self.stats.layers += 1;
@@ -452,7 +458,14 @@ mod tests {
     }
 
     fn one_layer(paths: Vec<ToolPath>) -> Vec<LayerPaths> {
-        vec![LayerPaths { index: 0, z: 0.3, height: 0.3, paths, inside_travel: Vec::new() }]
+        vec![LayerPaths {
+            index: 0,
+            z: 0.3,
+            height: 0.3,
+            paths,
+            inside_travel: Vec::new(),
+            travel_via: Vec::new(),
+        }]
     }
 
     #[test]
@@ -513,6 +526,7 @@ mod tests {
             height: 0.2,
             paths: vec![line((0.0, 0.0), (10.0, 0.0), PathKind::SparseInfill)],
             inside_travel: Vec::new(),
+            travel_via: Vec::new(),
         });
         let out = write_gcode(&layers, &s, &Bed::default());
         let t = &out.text;
@@ -549,6 +563,7 @@ mod tests {
             height: 0.2,
             paths: vec![line((0.0, 0.0), (10.0, 0.0), PathKind::SparseInfill)],
             inside_travel: Vec::new(),
+            travel_via: Vec::new(),
         });
         let text = write_gcode(&layers, &s, &Bed::default()).text;
         let after = text.split(";LAYER:1").nth(1).unwrap_or_default();
@@ -602,6 +617,7 @@ mod tests {
             height: 0.2,
             paths: vec![],
             inside_travel: Vec::new(),
+            travel_via: Vec::new(),
         });
         let t = write_gcode(&layers, &s, &Bed::default()).text;
         assert!(t.contains("M109 S220"));

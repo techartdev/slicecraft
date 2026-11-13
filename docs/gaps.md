@@ -47,16 +47,15 @@ the architecture document, not to a quieter line here.
   rectilinear with a note. No dense layers, ironing, ordered (monotonic) tops.
 - **Thin walls / gap fill** — absent.
 - **Seams** — nearest, aligned to a point, or scattered; no preferred-region hiding.
-- **Travel** — nearest-neighbour ordering per feature group; no combing, so sparse
-  infill retracts on most moves.
+- **Travel** — nearest-neighbour ordering per feature group; combing walks around holes
+  inside the part.
 - **Ordering** — per layer, by feature across all islands, not island by island.
 - **Multi-tool** — absent.
 - **Cooling** — fan on from a chosen layer; no schedules, minimum layer time,
   bridge or top-surface fan.
 - **Retraction** — distance, speed, minimum travel, Z lift, layer-change retraction and
   "only when crossing outlines" (on by default); no wipe, coasting or extra restart.
-  Travel is a straight line: no combing around holes, so a travel across a hole
-  retracts.
+  Travel inside the part walks around holes (combing, on by default, detour limit 3×).
 - **Adaptive layer heights, size compensation, layer ranges, per-object settings** —
   absent.
 - **First-layer width** — the first layer uses the normal line width.

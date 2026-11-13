@@ -145,6 +145,7 @@ grouping is its own.
 | Ironing, ordered top lines, top-surface modifiers | public | placeholder | P4 |
 | Automatic support | public | done: pillars (default) or areas, own design ([R5](05-support.md)) | P4 |
 | Retract only when crossing outlines | public | done (on by default) | P4 |
+| Avoid crossing outlines (combing) with a detour limit | public | done (on by default) | P4 |
 | Support preview before slicing | public | done (background, pillars drawn as prisms) | P4 |
 | Manual support add/remove, blockers | public | done as boxes on the bed (add: every downward surface inside; block: none); not per pillar | P4 |
 | Retraction with Z lift, first-layer temperatures, wait-for-heat, scripts | public | done | P4 |

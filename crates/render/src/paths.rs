@@ -94,6 +94,9 @@ pub struct LayerPaths {
     /// `inside_travel[k]`: the travel to `paths[k]` crosses no model outline,
     /// so it needs no retraction. Missing entries mean "retract as usual".
     pub inside_travel: Vec<bool>,
+    /// `travel_via[k]`: waypoints the travel to `paths[k]` follows (combing).
+    /// Empty or missing means a straight move.
+    pub travel_via: Vec<Vec<Point2>>,
 }
 
 /// Perimeter shells of `region`, outermost first, and the area left inside the
@@ -266,6 +269,83 @@ pub fn zigzag(lines: Vec<ToolPath>, region: &Region, max_link: f64) -> Vec<ToolP
     out
 }
 
+/// Largest outline `comb` walks along; bigger ones fall back to a straight move.
+pub const MAX_COMB_RING: usize = 20_000;
+
+/// A route from `a` to `b` that stays inside `region`: the straight line, with
+/// each stretch that leaves the region replaced by a walk along the outline it
+/// crossed, the shorter way round. Returns the waypoints between `a` and `b`
+/// (empty when the straight line stays inside), or `None` when there is no
+/// such route or it is longer than `max_len`.
+pub fn comb(region: &Region, a: Point2, b: Point2, max_len: f64) -> Option<Vec<Point2>> {
+    if !region.contains(a) || !region.contains(b) {
+        return None;
+    }
+    let rings: Vec<&Vec<Point2>> = region.contours().collect();
+    // every crossing of a→b with an outline edge: (t along a→b, ring, edge, point)
+    let mut hits: Vec<(f64, usize, usize, Point2)> = Vec::new();
+    let (dx, dy) = (b.x - a.x, b.y - a.y);
+    for (r, ring) in rings.iter().enumerate() {
+        let n = ring.len();
+        for i in 0..n {
+            let (Some(&p), Some(&q)) = (ring.get(i), ring.get((i + 1) % n)) else { continue };
+            let (ex, ey) = (q.x - p.x, q.y - p.y);
+            let den = dx * ey - dy * ex;
+            if den.abs() < 1e-12 {
+                continue;
+            }
+            let t = ((p.x - a.x) * ey - (p.y - a.y) * ex) / den;
+            let u = ((p.x - a.x) * dy - (p.y - a.y) * dx) / den;
+            if t > 1e-9 && t < 1.0 - 1e-9 && (0.0..1.0).contains(&u) {
+                hits.push((t, r, i, Point2::new(a.x + t * dx, a.y + t * dy)));
+            }
+        }
+    }
+    if hits.is_empty() {
+        return Some(Vec::new());
+    }
+    if !hits.len().is_multiple_of(2) {
+        return None;
+    }
+    hits.sort_by(|x, y| x.0.total_cmp(&y.0));
+    let mut via = Vec::new();
+    for pair in hits.chunks_exact(2) {
+        let [(_, r0, i0, p0), (_, r1, i1, p1)] = pair else { return None };
+        if r0 != r1 {
+            return None;
+        }
+        let ring = rings.get(*r0)?;
+        let n = ring.len();
+        if n > MAX_COMB_RING {
+            return None;
+        }
+        // forward: vertices i0+1 ..= i1; backward: i0, i0-1, ..., i1+1
+        let forward: Vec<Point2> =
+            (1..=((i1 + n - i0) % n)).filter_map(|k| ring.get((i0 + k) % n).copied()).collect();
+        let backward: Vec<Point2> =
+            (0..((i0 + n - i1) % n)).filter_map(|k| ring.get((i0 + n - k) % n).copied()).collect();
+        let len = |pts: &[Point2]| {
+            let mut at = *p0;
+            let mut total = 0.0;
+            for q in pts.iter().chain(std::iter::once(p1)) {
+                total += at.distance(*q);
+                at = *q;
+            }
+            total
+        };
+        via.push(*p0);
+        via.extend(if len(&forward) <= len(&backward) { forward } else { backward });
+        via.push(*p1);
+    }
+    let mut total = 0.0;
+    let mut at = a;
+    for q in via.iter().chain(std::iter::once(&b)) {
+        total += at.distance(*q);
+        at = *q;
+    }
+    (total <= max_len).then_some(via)
+}
+
 pub const MAX_RINGS: usize = 10_000;
 
 /// Rings following the outline inward, `spacing` apart; the first ring sits
@@ -385,6 +465,37 @@ mod tests {
             Point2::new(0.0, s),
         ]])
         .ok()
+    }
+
+    #[test]
+    fn comb_walks_around_a_hole_and_stays_inside() {
+        let sq = |x0: f64, s: f64| {
+            vec![
+                Point2::new(x0, x0),
+                Point2::new(x0 + s, x0),
+                Point2::new(x0 + s, x0 + s),
+                Point2::new(x0, x0 + s),
+            ]
+        };
+        let mut hole = sq(4.0, 2.0);
+        hole.reverse();
+        let r = Region::from_loops(&[sq(0.0, 10.0), hole]).unwrap_or_default();
+        let (a, b) = (Point2::new(1.0, 5.0), Point2::new(9.0, 5.0));
+        let via = comb(&r, a, b, 100.0);
+        assert!(via.as_ref().is_some_and(|v| !v.is_empty()), "{via:?}");
+        let mut pts = vec![a];
+        pts.extend(via.unwrap_or_default());
+        pts.push(b);
+        for w in pts.windows(2) {
+            if let [p, q] = w {
+                assert!(r.segment_inside(*p, *q), "left the region: {p:?} {q:?}");
+            }
+        }
+        // a straight line inside needs no waypoints; too short a limit refuses
+        assert_eq!(comb(&r, Point2::new(1.0, 1.0), Point2::new(9.0, 1.0), 100.0), Some(vec![]));
+        assert!(comb(&r, a, b, 8.5).is_none());
+        // a point outside: no route
+        assert!(comb(&r, Point2::new(-1.0, 5.0), b, 100.0).is_none());
     }
 
     #[test]

@@ -200,6 +200,10 @@ pub struct PrintSettings {
     pub retract_on_layer_change: bool,
     /// Retract only on travel that crosses the model's outline.
     pub retract_only_outside: bool,
+    /// Route travel around holes inside the part instead of across them.
+    pub avoid_crossing_walls: bool,
+    /// Longest combed route, relative to the straight one.
+    pub travel_detour_limit: f64,
     // layer
     pub layer_height: f64,
     pub first_layer_height: f64,
@@ -318,6 +322,8 @@ impl Default for PrintSettings {
             retract_min_travel: 2.0,
             retract_on_layer_change: true,
             retract_only_outside: true,
+            avoid_crossing_walls: true,
+            travel_detour_limit: 3.0,
             layer_height: 0.2,
             first_layer_height: 0.3,
             perimeter_count: 2,
@@ -1986,9 +1992,9 @@ pub static SETTINGS: &[SettingSpec] = &[
         Advanced,
         "Travel",
         B,
-        Db(false),
+        Db(true),
         "Route travel inside the part instead of across its outline.",
-        None,
+        bind_b!(avoid_crossing_walls),
     ),
     row(
         "retract_only_outside",
@@ -2447,7 +2453,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(1.0, 10.0, 0.1, "×"),
         Df(3.0),
         "Longest detour, relative to the direct route, when avoiding walls.",
-        None,
+        bind_f!(travel_detour_limit),
     ),
     row(
         "single_line_min_width",

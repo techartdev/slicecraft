@@ -57,7 +57,7 @@ damaged meshes dominate the uncertainty.
 
 ## What is next (concrete)
 
-1. **Turn placeholders into features in order of use** (combing is the next travel improvement) (from R2 §3): adaptive layers,
+1. **Turn placeholders into features in order of use** (island-by-island ordering next) (from R2 §3): adaptive layers,
    gyroid infill, raft, thin walls/gap fill, combing, coast/wipe, schedules.
 2. **Several profiles per job and height zones.**
 3. **3MF import and model export.**

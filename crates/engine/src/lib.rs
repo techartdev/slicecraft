@@ -1323,6 +1323,31 @@ mesh = AAAA
     }
 
     #[test]
+    fn combing_walks_around_holes_instead_of_retracting() {
+        // a box with a square hole: infill on either side of the hole
+        let Some(mut s) = session_with(hollow_box(30.0, 10.0)) else { return };
+        let count = |s: &mut Session, comb: bool| {
+            let p = PrintSettings { avoid_crossing_walls: comb, ..s.document().settings.clone() };
+            let _ = s.execute(Command::Profile(Box::new(p)));
+            match s.execute(Command::Slice) {
+                Ok(Outcome::Sliced { stats, .. }) => stats.gcode.retractions,
+                _ => usize::MAX,
+            }
+        };
+        let straight = count(&mut s, false);
+        let combed = count(&mut s, true);
+        assert!(combed < straight, "{combed} vs {straight}");
+        // every combed travel stays on the bed
+        let out = s.slice_result();
+        assert!(out.is_some_and(|o| o.layers.iter().all(|l| {
+            l.travel_via
+                .iter()
+                .flatten()
+                .all(|p| p.x > 0.0 && p.y > 0.0 && p.x < 220.0 && p.y < 220.0)
+        })));
+    }
+
+    #[test]
     fn restoring_a_profile_does_not_mark_changes() {
         let mut s = Session::new();
         let profile = Profile {
