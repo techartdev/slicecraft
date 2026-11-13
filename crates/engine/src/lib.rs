@@ -80,9 +80,9 @@ pub const COMMANDS: &[CommandSpec] = &[
     ready("arrange", "Arrange Models"),
     ready("undo", "Undo"),
     ready("redo", "Redo"),
-    planned("lay-flat", "Lay Face Flat"),
-    planned("split-parts", "Split into Parts"),
-    planned("merge-models", "Merge Models"),
+    ready("lay-flat", "Lay Face Flat"),
+    ready("split-parts", "Split into Parts"),
+    ready("merge-models", "Merge Models"),
     planned("group-models", "Group Models"),
     planned("model-role", "Use Model as Support or Cutter"),
     ready("export-models", "Export Models (STL, OBJ, 3MF)"),
@@ -97,12 +97,12 @@ pub const COMMANDS: &[CommandSpec] = &[
     planned("setting-zones", "Height and Region Setting Zones"),
     planned("profile-wizard", "Printer Setup Assistant"),
     // mesh tools
-    planned("repair-mesh", "Repair Mesh"),
+    ready("repair-mesh", "Repair Mesh"),
     ready("analyze-mesh", "Analyse Mesh"),
-    planned("fix-normals", "Fix Inverted Faces"),
+    ready("fix-normals", "Fix Inverted Faces"),
     planned("find-intersections", "Find Self-Intersections"),
     planned("reduce-mesh", "Reduce Triangle Count"),
-    planned("fill-holes", "Fill Holes"),
+    ready("fill-holes", "Fill Holes"),
     planned("hollow", "Hollow Model"),
     planned("cut-plane", "Cut with a Plane"),
     // support
@@ -153,6 +153,23 @@ pub enum Command {
     Mirror {
         index: usize,
         axis: Axis,
+    },
+    /// Weld, drop degenerate faces, fix the winding and (with `fill`) close holes.
+    RepairMesh {
+        index: usize,
+        fill: bool,
+    },
+    /// Split a model into its connected parts, each its own model.
+    SplitParts {
+        index: usize,
+    },
+    /// Combine models into one, as they are placed.
+    MergeModels {
+        indices: Vec<usize>,
+    },
+    /// Turn a model so its largest flat face lies on the bed.
+    LayFlat {
+        index: usize,
     },
     /// Include or leave out a model when slicing.
     SetVisible {
@@ -207,6 +224,11 @@ impl Command {
             Command::Duplicate { .. } => "duplicate",
             Command::Mirror { .. } => "mirror",
             Command::SetVisible { .. } => "visibility",
+            Command::RepairMesh { fill: true, .. } => "repair-mesh",
+            Command::RepairMesh { fill: false, .. } => "fix-normals",
+            Command::SplitParts { .. } => "split-parts",
+            Command::MergeModels { .. } => "merge-models",
+            Command::LayFlat { .. } => "lay-flat",
             Command::Arrange => "arrange",
             Command::Undo => "undo",
             Command::Redo => "redo",
@@ -259,6 +281,11 @@ pub enum Outcome {
         path: PathBuf,
         objects: usize,
         warnings: Vec<String>,
+    },
+    /// What a repair changed.
+    Repaired {
+        index: usize,
+        report: slicecraft_geom::repair::RepairReport,
     },
     /// The support a slice would print.
     SupportPreviewed {
@@ -530,6 +557,102 @@ impl Session {
                 }
                 Ok(self.changed())
             }
+            Command::RepairMesh { index, fill } => {
+                let index = self.object_index(index)?;
+                let Some(o) = self.doc.objects.get(index) else {
+                    return Err(EngineError::Doc(DocError::NoSuchObject(index)));
+                };
+                let (mesh, report) = slicecraft_geom::repair::repair(&o.mesh, fill)?;
+                let replaced = with_mesh(o, o.name.clone(), mesh);
+                self.checkpoint(None);
+                if let Some(slot) = self.doc.objects.get_mut(index) {
+                    *slot = replaced;
+                }
+                self.changed();
+                Ok(Outcome::Repaired { index, report })
+            }
+            Command::SplitParts { index } => {
+                let index = self.object_index(index)?;
+                let Some(o) = self.doc.objects.get(index).cloned() else {
+                    return Err(EngineError::Doc(DocError::NoSuchObject(index)));
+                };
+                let parts = slicecraft_geom::repair::parts(&o.mesh)?;
+                if parts.len() < 2 {
+                    return Ok(Outcome::Unchanged);
+                }
+                if self.doc.objects.len() + parts.len() > slicecraft_doc::MAX_OBJECTS {
+                    return Err(EngineError::Doc(DocError::TooManyObjects));
+                }
+                self.checkpoint(None);
+                self.doc.objects.remove(index);
+                for (k, mesh) in parts.into_iter().enumerate() {
+                    // each part keeps its place: the anchor moves with its own box
+                    let mut part = with_mesh(&o, format!("{} part {}", o.name, k + 1), mesh);
+                    let shift = o.transform.apply_linear(part.anchor() - o.anchor());
+                    part.transform.translate = Vec3::new(
+                        o.transform.translate.x + shift.x,
+                        o.transform.translate.y + shift.y,
+                        0.0,
+                    );
+                    self.doc.add(part)?;
+                }
+                Ok(self.changed())
+            }
+            Command::MergeModels { indices } => {
+                let mut seen = std::collections::BTreeSet::new();
+                let mut tris = Vec::new();
+                let mut names = Vec::new();
+                for &i in &indices {
+                    let i = self.object_index(i)?;
+                    if !seen.insert(i) {
+                        continue;
+                    }
+                    if let Some(o) = self.doc.objects.get(i) {
+                        tris.extend_from_slice(o.world_mesh()?.triangles());
+                        names.push(o.name.clone());
+                    }
+                }
+                if seen.len() < 2 {
+                    return Ok(Outcome::Unchanged);
+                }
+                let mesh = slicecraft_geom::Mesh::new(tris)?;
+                let centre = mesh.bounds().center();
+                let mut merged = SceneObject::new(names.join(" + "), mesh);
+                merged.transform.translate = Vec3::new(centre.x, centre.y, 0.0);
+                self.checkpoint(None);
+                for i in seen.iter().rev() {
+                    self.doc.objects.remove(*i);
+                }
+                let index = self.doc.add(merged)?;
+                self.changed();
+                Ok(Outcome::Imported {
+                    index,
+                    triangles: self.doc.objects.get(index).map_or(0, |o| o.mesh.len()),
+                    skipped_facets: 0,
+                    format: MeshFormat::StlBinary,
+                })
+            }
+            Command::LayFlat { index } => {
+                let index = self.object_index(index)?;
+                let Some(o) = self.doc.objects.get(index).cloned() else {
+                    return Err(EngineError::Doc(DocError::NoSuchObject(index)));
+                };
+                // the face is found on the model as it is turned and scaled now
+                let t = o.transform;
+                let shaped = o.mesh.map_vertices(|v| t.apply_linear(v))?;
+                let Some(n) = slicecraft_geom::repair::largest_flat_face(&shaped) else {
+                    return Ok(Outcome::Unchanged);
+                };
+                let flat = slicecraft_geom::repair::rotate_to_down(&shaped, n)?;
+                let mut laid = with_mesh(&o, o.name.clone(), flat);
+                laid.transform =
+                    slicecraft_doc::Transform { translate: t.translate, ..Default::default() };
+                self.checkpoint(None);
+                if let Some(slot) = self.doc.objects.get_mut(index) {
+                    *slot = laid;
+                }
+                Ok(self.changed())
+            }
             Command::SetVisible { index, visible } => {
                 let index = self.object_index(index)?;
                 if self.doc.objects.get(index).is_some_and(|o| o.visible == visible) {
@@ -795,6 +918,14 @@ fn read_bounded(path: &Path, limit: u64) -> Result<Vec<u8>, EngineError> {
         .map_err(|e| EngineError::File(format!("cannot read {}: {e}", path.display())))
 }
 
+/// A copy of `o` with another mesh (and name): same placement and visibility.
+fn with_mesh(o: &SceneObject, name: String, mesh: slicecraft_geom::Mesh) -> SceneObject {
+    let mut out = SceneObject::new(name, mesh);
+    out.transform = o.transform;
+    out.visible = o.visible;
+    out
+}
+
 /// A world-space vector helper for front ends that move models.
 pub fn bed_point(x: f64, y: f64) -> Vec3 {
     Vec3::new(x, y, 0.0)
@@ -908,6 +1039,11 @@ mod tests {
             Command::ExportGcode(PathBuf::new()),
             Command::Supports(true),
             Command::ExportModels(PathBuf::new()),
+            Command::RepairMesh { index: 0, fill: true },
+            Command::RepairMesh { index: 0, fill: false },
+            Command::SplitParts { index: 0 },
+            Command::MergeModels { indices: vec![] },
+            Command::LayFlat { index: 0 },
             Command::AddSupportEdit(SupportEdit::columns(
                 SupportEditKind::Block,
                 (0.0, 0.0),
@@ -1608,6 +1744,57 @@ mesh = AAAA
             assert_eq!(tris, 24, "{ext}");
             let _ = std::fs::remove_file(&path);
         }
+    }
+
+    #[test]
+    fn mesh_tools_repair_split_merge_and_lay_flat() {
+        use slicecraft_render::fixtures::octahedron;
+        // two separate cubes in one mesh, one face flipped
+        let a = cuboid(Vec3::ZERO, Vec3::new(10.0, 10.0, 10.0)).unwrap_or_default();
+        let b = cuboid(Vec3::new(20.0, 0.0, 0.0), Vec3::new(10.0, 10.0, 10.0)).unwrap_or_default();
+        let mut tris = a.triangles().to_vec();
+        tris.extend_from_slice(b.triangles());
+        if let Some(t) = tris.get_mut(0) {
+            std::mem::swap(&mut t.b, &mut t.c);
+        }
+        let Some(mut s) = session_with(slicecraft_geom::Mesh::new(tris).ok()) else { return };
+        let r = s.execute(Command::RepairMesh { index: 0, fill: true });
+        assert!(matches!(&r, Ok(Outcome::Repaired { report, .. }) if report.flipped == 1), "{r:?}");
+        assert!(s.document().objects.first().is_some_and(|o| o.mesh.report().is_watertight()));
+        let before = s.document().objects.first().map(|o| o.world_bounds());
+        assert!(matches!(s.execute(Command::SplitParts { index: 0 }), Ok(Outcome::Changed)));
+        assert_eq!(s.document().objects.len(), 2);
+        // the parts stay where they were
+        let mut after = slicecraft_geom::Bounds3::empty();
+        for o in &s.document().objects {
+            let wb = o.world_bounds();
+            after.add(wb.min());
+            after.add(wb.max());
+        }
+        let before = before.unwrap_or_else(slicecraft_geom::Bounds3::empty);
+        assert!(
+            (after.min().x - before.min().x).abs() < 1e-6
+                && (after.max().x - before.max().x).abs() < 1e-6
+        );
+        assert!(matches!(
+            s.execute(Command::MergeModels { indices: vec![0, 1] }),
+            Ok(Outcome::Imported { .. })
+        ));
+        assert_eq!(s.document().objects.len(), 1);
+        assert!(s.execute(Command::Undo).is_ok());
+        assert_eq!(s.document().objects.len(), 2);
+        // lay an octahedron on a face: its lowest layer becomes a full triangle
+        let Some(mut t) = session_with(octahedron(10.0)) else { return };
+        assert!(matches!(t.execute(Command::LayFlat { index: 0 }), Ok(Outcome::Changed)));
+        let mesh = t.document().objects.first().map(|o| o.world_mesh());
+        let Some(Ok(mesh)) = mesh else { return };
+        let bottom = mesh.bounds().min().z;
+        let on_bed = mesh
+            .triangles()
+            .iter()
+            .filter(|t| t.vertices().iter().all(|v| (v.z - bottom).abs() < 1e-6))
+            .count();
+        assert_eq!(on_bed, 1, "one face lies on the bed");
     }
 
     #[test]

@@ -61,10 +61,10 @@ Status: **done** = works and is tested · **partial** = works with stated limits
 | Rotate in 90° steps | public | done | P1 |
 | Arrange all models on the bed | public | done (row packing) | P1 |
 | Drop to bed | public | done (always on the bed) | P1 |
-| Lay a face flat on the bed | public | placeholder | P2 |
+| Lay a face flat on the bed | public | done (largest flat face) | P2 |
 | Mirror X/Y/Z | public | done | P1 |
 | Copy/duplicate | public | done | P1 |
-| Group / ungroup / combine / separate parts | public | placeholder | P2 |
+| Group / ungroup / combine / separate parts | public | partial: combine (merge) and separate (split) done; grouping planned | P2 |
 | Scale to the largest size that fits | observed | done | P1 |
 | Model role: print / support / cutter | observed | placeholder | P4 |
 | Out-of-bounds warning | public | done | P1 |
@@ -78,7 +78,7 @@ Status: **done** = works and is tested · **partial** = works with stated limits
 | Mesh statistics (volume, area, errors) | public | done (`Mesh::report`) | P2 |
 | Find non-manifold edges / open edges | public | done (counts) | P2 |
 | Find self-intersections | public | placeholder | P2 |
-| Repair flipped faces / flip a whole surface | public | placeholder | P2 |
+| Repair flipped faces / flip a whole surface | public | done (per part, plus weld, degenerate removal, hole filling) | P2 |
 | Remove duplicate and orphaned faces | public | placeholder | P2 |
 | Reduce triangle count | public | placeholder | P2 |
 | Repair during slicing: close open outlines, choose how overlaps fill | public | partial (closes gaps ≤ 1 mm, non-zero fill); the choices are placeholders | P2 |

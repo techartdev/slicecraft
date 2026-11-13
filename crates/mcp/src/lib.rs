@@ -133,6 +133,10 @@ fn run(session: &mut Session, command: Command) -> Reply {
         Ok(Outcome::SupportPreviewed { layers, volume }) => {
             Reply::Text(format!("support on {layers} layers, {volume:.0} mm³"))
         }
+        Ok(Outcome::Repaired { index, report }) => Reply::Text(format!(
+            "model {index}: {} degenerate removed, {} flipped, {} holes filled",
+            report.degenerate_removed, report.flipped, report.holes_filled
+        )),
         Ok(Outcome::Saved { path }) => Reply::Text(format!("saved {}", path.display())),
         Ok(Outcome::ProjectOpened { path, objects, warnings }) => Reply::Text(format!(
             "opened {} with {objects} model(s) ({} warnings)",

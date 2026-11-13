@@ -128,7 +128,11 @@ pub fn menu_bar(app: &mut SliceCraftApp, ui: &mut Ui) {
                 app.reset_selected();
             }
             item(app, ui, "group-models", "", true);
-            item(app, ui, "merge-models", "", true);
+            if item(app, ui, "merge-models", "", app.selected.len() >= 2) {
+                let indices: Vec<usize> = app.selected.iter().copied().collect();
+                app.run(Command::MergeModels { indices });
+                app.selected.clear();
+            }
         });
         ui.menu_button("View", |ui| {
             for v in ViewPreset::ALL {
@@ -208,8 +212,14 @@ pub fn menu_bar(app: &mut SliceCraftApp, ui: &mut Ui) {
             });
             ui.separator();
             item(app, ui, "model-role", "", true);
-            item(app, ui, "lay-flat", "", true);
-            item(app, ui, "split-parts", "", true);
+            if item(app, ui, "lay-flat", "", has_sel) {
+                app.for_selected(|index| Command::LayFlat { index });
+            }
+            if item(app, ui, "split-parts", "", has_sel)
+                && let Some(index) = app.primary()
+            {
+                app.run(Command::SplitParts { index });
+            }
             item(app, ui, "cut-plane", "", true);
             item(app, ui, "hollow", "", true);
         });
@@ -219,10 +229,16 @@ pub fn menu_bar(app: &mut SliceCraftApp, ui: &mut Ui) {
             }
             ui.separator();
             item(app, ui, "find-intersections", "", true);
-            item(app, ui, "repair-mesh", "", true);
+            if item(app, ui, "repair-mesh", "", has_sel) {
+                app.for_selected(|index| Command::RepairMesh { index, fill: true });
+            }
             item(app, ui, "reduce-mesh", "", true);
-            item(app, ui, "fix-normals", "", true);
-            item(app, ui, "fill-holes", "", true);
+            if item(app, ui, "fix-normals", "", has_sel) {
+                app.for_selected(|index| Command::RepairMesh { index, fill: false });
+            }
+            if item(app, ui, "fill-holes", "", has_sel) {
+                app.for_selected(|index| Command::RepairMesh { index, fill: true });
+            }
         });
         ui.menu_button("Supports", |ui| {
             let mut show = app.show_support;
@@ -359,10 +375,16 @@ pub fn toolbar(app: &mut SliceCraftApp, ui: &mut Ui) {
             if icons::button(ui, Icon::Center, "Centre on the bed", has_sel, false).clicked() {
                 app.center_selected();
             }
-            if icons::button(ui, Icon::LayFlat, "Lay a face flat", ready("lay-flat"), false)
-                .clicked()
+            if icons::button(
+                ui,
+                Icon::LayFlat,
+                "Lay the largest flat face on the bed",
+                has_sel,
+                false,
+            )
+            .clicked()
             {
-                app.planned("lay-flat");
+                app.for_selected(|index| Command::LayFlat { index });
             }
             if icons::button(ui, Icon::Delete, "Remove (Del)", has_sel, false).clicked() {
                 app.remove_selected();
@@ -371,9 +393,8 @@ pub fn toolbar(app: &mut SliceCraftApp, ui: &mut Ui) {
             if icons::button(ui, Icon::Analyze, "Analyse mesh", has_models, false).clicked() {
                 app.dialogs.analysis = true;
             }
-            if icons::button(ui, Icon::Repair, "Repair mesh", ready("repair-mesh"), false).clicked()
-            {
-                app.planned("repair-mesh");
+            if icons::button(ui, Icon::Repair, "Repair mesh", has_sel, false).clicked() {
+                app.for_selected(|index| Command::RepairMesh { index, fill: true });
             }
             let on = app.session.document().settings.support_enabled;
             let tip = if on {

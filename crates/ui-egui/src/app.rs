@@ -593,6 +593,16 @@ impl SliceCraftApp {
                         ));
                         self.dialogs.import_report = Some((name.clone(), report.clone()));
                     }
+                    Outcome::Repaired { report, .. } => {
+                        self.info(format!(
+                            "Repaired: {} degenerate faces removed, {} flipped, {} holes filled ({} faces added){}.",
+                            report.degenerate_removed,
+                            report.flipped,
+                            report.holes_filled,
+                            report.triangles_added,
+                            if report.turned_inside_out { ", turned right side out" } else { "" }
+                        ));
+                    }
                     Outcome::Saved { path } => self.info(format!("Saved {}.", path.display())),
                     Outcome::SupportPreviewed { layers, volume } => {
                         self.info(format!(
@@ -826,6 +836,14 @@ impl SliceCraftApp {
         let indices: Vec<usize> = self.selected.iter().copied().collect();
         for i in indices {
             self.run(Command::Duplicate { index: i });
+        }
+    }
+
+    /// Run a per-model command on every selected model.
+    pub(crate) fn for_selected(&mut self, command: impl Fn(usize) -> Command) {
+        let indices: Vec<usize> = self.selected.iter().copied().collect();
+        for i in indices {
+            self.run(command(i));
         }
     }
 

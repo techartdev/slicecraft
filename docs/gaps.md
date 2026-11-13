@@ -18,11 +18,12 @@ the architecture document, not to a quieter line here.
   object.
 - **Units** — the mesh is treated as millimetres; inch and centimetre models are fixed
   by hand (Model ▸ Correct units). No automatic detection.
-- **Repair** — analysis reports open, non-manifold and degenerate faces; nothing
-  repairs them yet. Slicing tolerates small gaps (joins ends within 0.01 mm, closes
-  chains with gaps under 1 mm) and reports what it drops.
-- **Placement** — no lay-flat, no grouping, no split or merge. Arrange is a row
-  packer, not a nesting algorithm.
+- **Repair** — weld, degenerate-face removal, consistent outward normals per part, and
+  hole filling (fan from the hole's centre: fine for small, roughly flat holes). No
+  self-intersection removal, no decimation.
+- **Placement** — lay flat (largest flat face), split into parts, merge models. No
+  grouping, no cut plane, no hollowing. Arrange is a row packer, not a nesting
+  algorithm.
 - **Model export** — STL (binary), OBJ and 3MF of the visible models as placed.
 
 ## Geometry

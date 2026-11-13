@@ -168,6 +168,11 @@ impl SceneObject {
         Ok(())
     }
 
+    /// The mesh's reference point: the centre of its bounding box.
+    pub fn anchor(&self) -> Vec3 {
+        self.anchor
+    }
+
     /// Size of the model as placed (after scale and rotation).
     pub fn size(&self) -> Vec3 {
         self.world_bounds().size()
