@@ -59,7 +59,7 @@ the architecture document, not to a quieter line here.
   Travel inside the part walks around holes (combing, on by default, detour limit 3×).
 - **Adaptive layer heights, size compensation, layer ranges, per-object settings** —
   absent.
-- **First-layer width** — the first layer uses the normal line width.
+- **First-layer width** — set by percentage; no separate first-layer line width for the part on a raft.
 
 ## Output
 

@@ -24,13 +24,27 @@ pub fn bead_area(width: f64, height: f64) -> f64 {
     }
 }
 
-/// Millimetres of filament per millimetre of path.
+/// Millimetres of filament per millimetre of path, for the profile's bead shape.
 pub fn filament_per_mm(width: f64, height: f64, settings: &PrintSettings) -> f64 {
     let filament_area = std::f64::consts::PI * settings.filament_diameter.powi(2) / 4.0;
     if filament_area <= 0.0 {
         return 0.0;
     }
-    bead_area(width, height) / filament_area * settings.extrusion_multiplier
+    let bead = match settings.bead_shape {
+        slicecraft_doc::BeadShape::Rectangle => width * height,
+        slicecraft_doc::BeadShape::Rounded => bead_area(width, height),
+    };
+    bead / filament_area * settings.extrusion_multiplier
+}
+
+/// Line width on a printed layer: the first layer may be wider, unless a raft
+/// is under it (then the raft is the first layer).
+pub fn layer_line_width(settings: &PrintSettings, layer_index: usize) -> f64 {
+    if layer_index == 0 && !settings.raft_enabled {
+        settings.line_width() * settings.first_layer_width_percent / 100.0
+    } else {
+        settings.line_width()
+    }
 }
 
 /// Feed speed for a feature on a layer, mm/s: the one rule the writer and the
@@ -344,7 +358,8 @@ impl<'a> GcodeWriter<'a> {
             self.kind = Some(path.kind);
         }
         let speed = path_speed(self.settings, path.kind, layer.index);
-        let e_per_mm = filament_per_mm(self.settings.line_width(), layer.height, self.settings);
+        let width = layer_line_width(self.settings, layer.index);
+        let e_per_mm = filament_per_mm(width, layer.height, self.settings);
         self.travel_to(start, inside);
         for p in path.points.iter().skip(1) {
             self.extrude_to(*p, speed, e_per_mm);
@@ -503,8 +518,22 @@ mod tests {
         s.extrusion_width = 0.9;
         let b = write_gcode(&layers, &s, &Bed::default()).stats.filament_mm;
         let expect_a = 100.0 * filament_per_mm(0.45, 0.3, &PrintSettings::default());
+        assert!(
+            (filament_per_mm(0.45, 0.3, &PrintSettings::default())
+                - 0.45 * 0.3 / (std::f64::consts::PI * 1.75f64.powi(2) / 4.0))
+                .abs()
+                < 1e-12,
+            "rectangle by default"
+        );
         assert!((a - expect_a).abs() < 1e-9);
-        assert!(b > a * 2.0, "wider line uses more than twice the filament");
+        // a rectangle bead scales exactly with width
+        assert!((b - a * 2.0).abs() < 1e-9, "twice the width, twice the filament");
+        // the rounded bead gives more than twice: its rounded sides do not grow
+        s.bead_shape = slicecraft_doc::BeadShape::Rounded;
+        let c = write_gcode(&layers, &s, &Bed::default()).stats.filament_mm;
+        s.extrusion_width = 0.45;
+        let d = write_gcode(&layers, &s, &Bed::default()).stats.filament_mm;
+        assert!(c > d * 2.0 && d < a, "rounded: {c} {d} vs {a}");
     }
 
     #[test]

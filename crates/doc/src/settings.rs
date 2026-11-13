@@ -148,6 +148,21 @@ impl SupportPlacement {
     const NAMES: &'static [&'static str] = &["everywhere", "from the bed only"];
 }
 
+/// The cross-section the extrusion volume is computed for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BeadShape {
+    /// Width × height: the same volume as the reference, so tuned flow
+    /// multipliers carry over.
+    Rectangle,
+    /// A rectangle with rounded sides, closer to a squashed bead.
+    Rounded,
+}
+
+impl BeadShape {
+    pub const ALL: [BeadShape; 2] = [BeadShape::Rectangle, BeadShape::Rounded];
+    const NAMES: &'static [&'static str] = &["rectangle", "rounded sides"];
+}
+
 /// What to print where two walls do not fit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThinWalls {
@@ -217,6 +232,9 @@ pub struct PrintSettings {
     pub extrusion_width_auto: bool,
     pub extrusion_width: f64,
     pub extrusion_multiplier: f64,
+    pub bead_shape: BeadShape,
+    /// First-layer line width, % of the normal width.
+    pub first_layer_width_percent: f64,
     pub retract_enabled: bool,
     pub retract_length: f64,
     pub retract_speed: f64,
@@ -353,6 +371,8 @@ impl Default for PrintSettings {
             extrusion_width_auto: false,
             extrusion_width: 0.45,
             extrusion_multiplier: 1.0,
+            bead_shape: BeadShape::Rectangle,
+            first_layer_width_percent: 100.0,
             retract_enabled: true,
             retract_length: 1.0,
             retract_speed: 35.0,
@@ -870,6 +890,16 @@ pub static SETTINGS: &[SettingSpec] = &[
         bind_f!(extrusion_multiplier),
     ),
     row(
+        "bead_shape",
+        "Bead shape",
+        Extruder,
+        "Nozzle",
+        SettingKind::Choice(BeadShape::NAMES),
+        Dc(0),
+        "How extrusion volume is computed. Rectangle matches Simplify3D, so flow multipliers tuned there carry over.",
+        bind_e!(bead_shape, BeadShape),
+    ),
+    row(
         "tool_number",
         "Tool number",
         Extruder,
@@ -1018,7 +1048,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(50.0, 300.0, 1.0, PCT),
         Df(100.0),
         "Line width on the first layer, relative to the normal width.",
-        None,
+        bind_f!(first_layer_width_percent),
     ),
     row(
         "adaptive_layers",

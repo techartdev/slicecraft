@@ -935,7 +935,8 @@ mod tests {
         let mut expect = 0.0;
         for i in 0..99usize {
             let h = if i == 0 { 0.3 } else { 0.2 };
-            let bead = slicecraft_io::gcode::bead_area(w, h);
+            // the default bead is the rectangle, as in the reference
+            let bead = w * h;
             let shells = 4.0 * (20.0 - w) + 4.0 * (20.0 - 3.0 * w);
             let inner = (20.0 - 4.0 * w) * (20.0 - 4.0 * w);
             let solid = !(3..95).contains(&i);

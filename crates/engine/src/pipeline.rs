@@ -596,7 +596,8 @@ pub fn slice_document(
     drop(support_areas);
 
     // 3. shells
-    let shelled = par_map(&regions, Stage::Shells, observer, |_, region| {
+    let shelled = par_map(&regions, Stage::Shells, observer, |i, region| {
+        let w = slicecraft_io::gcode::layer_line_width(s, i);
         let (mut shells, inner) = perimeters(region, s.perimeter_count, w)?;
         shells.extend(gap_fill(region, &inner, s, w)?);
         Ok(Shelled { shells, inner })
@@ -606,11 +607,12 @@ pub fn slice_document(
     let empty = Region::new();
     let (below, above) = (s.solid_layers_bottom as usize, s.solid_layers_top as usize);
     let base_angle = s.infill_angle.to_radians();
-    let overlap = s.infill_overlap / 100.0 * w;
-    let sparse_spacing =
-        if s.infill_percentage > 0.0 { Some(w * 100.0 / s.infill_percentage) } else { None };
     let n = regions.len();
     let infilled = par_map(&shelled, Stage::Infill, observer, |i, sh| {
+        let w = slicecraft_io::gcode::layer_line_width(s, i);
+        let overlap = s.infill_overlap / 100.0 * w;
+        let sparse_spacing =
+            if s.infill_percentage > 0.0 { Some(w * 100.0 / s.infill_percentage) } else { None };
         if sh.inner.is_empty() {
             return Ok(Vec::new());
         }
@@ -676,15 +678,16 @@ pub fn slice_document(
         Some(r) => r.footprint.clone(),
         None => first,
     };
+    let w0 = slicecraft_io::gcode::layer_line_width(s, 0);
     let brim = if s.brim_enabled && raft.is_none() {
-        rings_around(&first, 0.0, s.brim_loops, w, PathKind::Brim)?
+        rings_around(&first, 0.0, s.brim_loops, w0, PathKind::Brim)?
     } else {
         Vec::new()
     };
     // a skirt goes around the brim, not through it
-    let brim_reach = if s.brim_enabled { f64::from(s.brim_loops) * w } else { 0.0 };
+    let brim_reach = if s.brim_enabled { f64::from(s.brim_loops) * w0 } else { 0.0 };
     let skirt = if s.skirt_enabled {
-        rings_around(&first, s.skirt_distance + brim_reach, s.skirt_loops, w, PathKind::Skirt)?
+        rings_around(&first, s.skirt_distance + brim_reach, s.skirt_loops, w0, PathKind::Skirt)?
     } else {
         Vec::new()
     };
