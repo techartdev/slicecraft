@@ -60,6 +60,11 @@ pub const TOOLS: &[ToolSpec] = &[
         description: "Describe the layer preview of the current document",
     },
     ToolSpec {
+        name: "slicecraft.supports",
+        command: "supports",
+        description: "Turn automatic support on (`enabled` = true) or off",
+    },
+    ToolSpec {
         name: "slicecraft.slice",
         command: "slice",
         description: "Slice the document and report layers, filament and time",
@@ -169,6 +174,11 @@ pub fn dispatch(session: &mut Session, call: &Call) -> Reply {
             let z = layers.last().map(|l| l.z);
             Reply::Text(format!("{} layers, top z {}", layers.len(), z.unwrap_or(0.0)))
         }
+        "supports" => match call.args.get("enabled").map(String::as_str) {
+            Some("true") => run(session, Command::Supports(true)),
+            Some("false") => run(session, Command::Supports(false)),
+            _ => Reply::Error("supports needs `enabled` = true or false".into()),
+        },
         "slice" => run(session, Command::Slice),
         "export-gcode" => match path {
             Some(p) => run(session, Command::ExportGcode(p)),

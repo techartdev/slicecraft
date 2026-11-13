@@ -58,7 +58,8 @@ pub struct Progress {
     pub total: AtomicUsize,
 }
 
-pub const STAGES: [Stage; 4] = [Stage::Sections, Stage::Shells, Stage::Infill, Stage::Gcode];
+pub const STAGES: [Stage; 5] =
+    [Stage::Sections, Stage::Support, Stage::Shells, Stage::Infill, Stage::Gcode];
 
 struct Observer {
     progress: Arc<Progress>,

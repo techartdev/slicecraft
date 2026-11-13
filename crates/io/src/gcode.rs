@@ -59,6 +59,9 @@ pub fn path_speed(s: &PrintSettings, kind: PathKind, layer_index: usize) -> f64 
         PathKind::InnerPerimeter => s.perimeter_speed,
         PathKind::SolidInfill => s.print_speed * s.solid_infill_speed_percent / 100.0,
         PathKind::SparseInfill => s.print_speed,
+        PathKind::Support | PathKind::SupportInterface => {
+            s.print_speed * s.support_speed_percent / 100.0
+        }
     }
 }
 

@@ -14,6 +14,7 @@
 //! `Session::execute`, so nothing is reachable from one front end only.
 
 pub mod pipeline;
+pub mod support;
 
 use slicecraft_doc::profile::{MAX_PROFILE_BYTES, Profile};
 use slicecraft_doc::{Axis, DocError, Document, PrintSettings, SceneObject, Transform};
@@ -102,7 +103,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     planned("hollow", "Hollow Model"),
     planned("cut-plane", "Cut with a Plane"),
     // support
-    planned("supports", "Generate Supports"),
+    ready("supports", "Generate Supports"),
     planned("support-edit", "Add or Remove Support by Hand"),
     planned("support-clear", "Clear Supports"),
     planned("support-blockers", "Support Blockers"),
@@ -173,6 +174,8 @@ pub enum Command {
     OpenProject(PathBuf),
     /// Write models, placement and profile to a project file.
     SaveProject(PathBuf),
+    /// Turn automatic support on or off in the current profile.
+    Supports(bool),
     /// Slice now, on the calling thread.
     Slice,
     /// Write G-code to a file, slicing first if the slice is stale.
@@ -197,6 +200,7 @@ impl Command {
             Command::NewProject => "new-project",
             Command::OpenProject(_) => "open-project",
             Command::SaveProject(_) => "save-project",
+            Command::Supports(_) => "supports",
             Command::Slice => "slice",
             Command::ExportGcode(_) => "export-gcode",
         }
@@ -574,6 +578,16 @@ impl Session {
                 self.saved_revision = self.revision;
                 Ok(Outcome::Saved { path })
             }
+            Command::Supports(on) => {
+                if self.doc.settings.support_enabled == on {
+                    return Ok(Outcome::Unchanged);
+                }
+                self.checkpoint(None);
+                let mut settings = self.doc.settings.clone();
+                settings.support_enabled = on;
+                self.doc.set_settings(settings);
+                Ok(self.changed())
+            }
             Command::Slice => {
                 let out = self.slice_now()?;
                 Ok(Outcome::Sliced { layers: out.layers.len(), stats: out.stats.clone() })
@@ -756,11 +770,12 @@ mod tests {
             Command::SaveProfile { path: PathBuf::new(), name: String::new() },
             Command::Slice,
             Command::ExportGcode(PathBuf::new()),
+            Command::Supports(true),
         ];
         for c in samples {
             assert_eq!(s.command(c.id()).map(|spec| spec.state), Some(CommandState::Ready));
         }
-        assert_eq!(s.command("supports").map(|c| c.state), Some(CommandState::Planned));
+        assert_eq!(s.command("support-edit").map(|c| c.state), Some(CommandState::Planned));
         assert!(s.command("nope").is_none());
     }
 
@@ -1076,6 +1091,51 @@ mesh = AAAA
         assert!(s.execute(Command::LoadProfile(path.clone())).is_err());
         assert_eq!(s.document().settings.layer_height, 0.25, "a broken file changes nothing");
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// A 10 mm post under a 30 mm slab: the slab's underside needs support.
+    fn table_mesh() -> Option<slicecraft_geom::Mesh> {
+        let post = cuboid(Vec3::new(10.0, 10.0, 0.0), Vec3::new(10.0, 10.0, 10.0))?;
+        let top = cuboid(Vec3::new(0.0, 0.0, 10.0), Vec3::new(30.0, 30.0, 3.0))?;
+        let mut tris = post.triangles().to_vec();
+        tris.extend_from_slice(top.triangles());
+        slicecraft_geom::Mesh::new(tris).ok()
+    }
+
+    #[test]
+    fn support_holds_up_a_table_top_and_toggles_by_command() {
+        let Some(mut s) = session_with(table_mesh()) else { return };
+        let r = s.execute(Command::Slice);
+        assert!(matches!(&r, Ok(Outcome::Sliced { .. })), "{r:?}");
+        let has_support = |s: &Session| {
+            s.slice_result().is_some_and(|o| {
+                o.layers.iter().any(|l| l.paths.iter().any(|p| p.kind == PathKind::Support))
+            })
+        };
+        assert!(!has_support(&s), "off by default");
+
+        assert!(matches!(s.execute(Command::Supports(true)), Ok(Outcome::Changed)));
+        assert!(matches!(s.execute(Command::Supports(true)), Ok(Outcome::Unchanged)));
+        let r = s.execute(Command::Slice);
+        assert!(matches!(&r, Ok(Outcome::Sliced { .. })), "{r:?}");
+        assert!(has_support(&s));
+        let Some(out) = s.slice_result() else { return };
+        // support only below the slab, dense right under it, and in the G-code
+        let slab = 10.0;
+        for l in &out.layers {
+            let sup = l
+                .paths
+                .iter()
+                .any(|p| matches!(p.kind, PathKind::Support | PathKind::SupportInterface));
+            assert!(!sup || l.z < slab, "support at z {}", l.z);
+        }
+        assert!(
+            out.layers.iter().any(|l| l.paths.iter().any(|p| p.kind == PathKind::SupportInterface))
+        );
+        assert!(out.gcode.contains(";TYPE:support"));
+        // and it is undoable like any other edit
+        assert!(s.execute(Command::Undo).is_ok());
+        assert!(!s.document().settings.support_enabled);
     }
 
     #[test]

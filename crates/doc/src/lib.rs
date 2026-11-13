@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 pub use settings::{
     Flavor, InfillPattern, PerimeterOrder, PrintSettings, SeamMode, SettingKind, SettingSpec,
-    SettingValue, SolidPattern, Tab,
+    SettingValue, SolidPattern, SupportPattern, SupportPlacement, Tab,
 };
 
 /// Largest scale factor a placement may apply on any axis.

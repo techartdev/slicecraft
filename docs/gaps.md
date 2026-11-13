@@ -34,7 +34,10 @@ the architecture document, not to a quieter line here.
 
 ## Slicing pipeline
 
-- **Support** — absent (no overhang detection, projection, interfaces, blockers).
+- **Support** — automatic, region-based: overhang angle, everywhere or bed-only, lines or
+  grid, gaps, interface/floor/base layers, expansion, walls. No support preview before
+  slicing, no manual editing or blockers, no pillar mode; support lines are not joined
+  into zigzags, so it retracts often.
 - **Bridges** — absent.
 - **Adhesion** — skirt (loops, layers) and brim; no raft, prime tower or ooze shield.
 - **Infill patterns** — rectilinear, one-direction lines, grid, triangles and
@@ -86,7 +89,7 @@ the architecture document, not to a quieter line here.
   400k triangles, thinned above that. The preview draws at most 200k moves.
 - **No gizmos** — tools are drag modes (move on the bed, rotate about Z, scale);
   exact values come from the placement panel.
-- **Placeholders in the window**: lay flat, repair, supports (generate, add, remove),
+- **Placeholders in the window**: lay flat, repair, manual supports (add, remove, blockers),
   several profiles, setting zones, machine control, printing, orthographic camera,
   wireframe, colour by tool/flow/profile, language,
   shortcut editor. Each is shown disabled or opens a "planned" note.

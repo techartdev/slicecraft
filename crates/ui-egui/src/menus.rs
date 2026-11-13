@@ -223,7 +223,14 @@ pub fn menu_bar(app: &mut SliceCraftApp, ui: &mut Ui) {
             item(app, ui, "fill-holes", "", true);
         });
         ui.menu_button("Supports", |ui| {
-            item(app, ui, "supports", "", true);
+            let mut on = app.session.document().settings.support_enabled;
+            if ui
+                .checkbox(&mut on, "Generate Supports")
+                .on_hover_text("Build support under overhangs when slicing")
+                .changed()
+            {
+                app.run(Command::Supports(on));
+            }
             item(app, ui, "support-edit", "", true);
             item(app, ui, "support-clear", "", true);
             item(app, ui, "support-blockers", "", true);
@@ -352,10 +359,14 @@ pub fn toolbar(app: &mut SliceCraftApp, ui: &mut Ui) {
             {
                 app.planned("repair-mesh");
             }
-            if icons::button(ui, Icon::Supports, "Generate supports", ready("supports"), false)
-                .clicked()
-            {
-                app.planned("supports");
+            let on = app.session.document().settings.support_enabled;
+            let tip = if on {
+                "Support is on (click to turn off)"
+            } else {
+                "Generate support when slicing"
+            };
+            if icons::button(ui, Icon::Supports, tip, ready("supports"), on).clicked() {
+                app.run(Command::Supports(!on));
             }
             if icons::button(ui, Icon::SupportAdd, "Add support", ready("support-edit"), false)
                 .clicked()

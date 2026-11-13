@@ -10,7 +10,7 @@ describes code that exists. The rules that keep the shape are in
 ## Workspace
 
 13 packages: 7 libraries, 2 apps, `xtask`. About 13,700 lines of Rust
-(`cargo xtask stats`, 2026-11-13), 141 tests in 17 test binaries.
+(`cargo xtask stats`, 2026-11-13), 148 tests in 17 test binaries.
 
 | Layer | Crate | What it does |
 |---|---|---|
@@ -18,7 +18,7 @@ describes code that exists. The rules that keep the shape are in
 | L1 | `doc` | `Document` (bed, profile, objects), `SceneObject` + `Transform` (centre → scale → rotate Z → place), `PrintSettings` (25 validated fields incl. `Flavor`), arrange, off-bed check |
 | L2 | `render` | `section`: triangle → directed segment → stitched loops; `paths`: toolpath types, perimeter shells, line infill, path ordering; `fixtures` for tests |
 | L3 | `io` | STL (binary + ASCII, detected by content), OBJ; `GcodeWriter` and `write_gcode` with the extrusion model, retraction, fan and estimates; `project` (`.scproj`); `fff` (Simplify3D profile import) |
-| L4 | `engine` | `Session`, `Command`/`Outcome`, `COMMANDS`, `SliceJob`; `pipeline`: the parallel slicing pipeline |
+| L4 | `engine` | `Session`, `Command`/`Outcome`, `COMMANDS`, `SliceJob`; `pipeline`: the parallel slicing pipeline; `support`: support areas and paths |
 | L5 | `ui-egui` | eframe window: `app` (panels, commands, slicing thread), `camera` (orbit camera math), `scene` (bed, models, toolpaths as egui meshes) |
 | L5 | `mcp` | `ToolSpec` table bound to engine command ids, `dispatch` with arguments |
 | app | `slicecraft` | Opens the window, with model files from the command line pre-loaded |
@@ -145,6 +145,25 @@ window title and the "save changes?" prompt before New, Open and Quit. Opening o
 starting a project clears undo. The CLI's `slice` accepts a project in place of (or
 with) models, and MCP has `open_project` and `save_project`.
 
+## Support
+
+`engine::support` runs after the layer regions and before the shells:
+
+1. **Overhang:** per layer (in parallel), the area beyond the layer below plus
+   `h · tan(angle)`.
+2. **Joining:** each neighbouring pair of overhang strips is closed, so a slope's
+   thin strips become one area.
+3. **Columns:** stacked from the top down, cut by the model, and for "from the bed
+   only" filtered from the bottom up. This is the one sequential pass, unions only.
+4. **Clearance and density:** per layer (in parallel), the horizontal and bottom
+   gaps, an opening by half a line, and dense zones under the model, on the model
+   and at the base.
+
+Paths are `PathKind::Support` and `PathKind::SupportInterface`. They are printed
+first on each layer, at `support_speed_percent`. The first layer's support is inside
+the skirt and brim. The design and its comparison with the reference are in
+[research/05-support.md](research/05-support.md).
+
 ## Importing Simplify3D profiles
 
 `io::fff` reads `.fff` profiles of both generations (plain values in 4.x, option lists
@@ -183,3 +202,4 @@ points panic on out-of-range input.
 | 2026-11-13 | UI | Settings schema (169 settings), profiles, undo/redo, XYZ transforms, mirror/duplicate, brim, more patterns and seams, scripts, offsets; full window: menus, toolbars, placement, profile editor, preview controls, analysis |
 | 2026-11-13 | projects | `.scproj` project files, new/open/save/recent, unsaved-changes prompt, preferences and last profile remembered |
 | 2026-11-13 | fff | Simplify3D `.fff` import with a report; heat-up before custom start scripts |
+| 2026-11-13 | support | Region-based automatic support with interface, floor and base layers; `supports` command |

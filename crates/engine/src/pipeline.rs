@@ -34,6 +34,7 @@ impl SliceObserver for Quiet {}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stage {
     Sections,
+    Support,
     Shells,
     Infill,
     Gcode,
@@ -43,6 +44,7 @@ impl Stage {
     pub fn label(self) -> &'static str {
         match self {
             Stage::Sections => "cutting layers",
+            Stage::Support => "building support",
             Stage::Shells => "building perimeters",
             Stage::Infill => "filling",
             Stage::Gcode => "writing G-code",
@@ -106,7 +108,7 @@ pub fn layer_schedule(
 }
 
 /// Map `f` over `items` on worker threads, in order, reporting progress.
-fn par_map<T, R, F>(
+pub(crate) fn par_map<T, R, F>(
     items: &[T],
     stage: Stage,
     observer: &mut dyn SliceObserver,
@@ -314,13 +316,25 @@ pub fn slice_document(
     let dropped_chains: usize = sections.iter().map(|(_, d)| d).sum();
     let regions: Vec<Region> = sections.into_iter().map(|(r, _)| r).collect();
 
-    // 2. shells
+    // 2. support, from the model's layers
+    let support_areas = crate::support::support_layers(&regions, &slots, s, w, observer)?;
+    let support_first = match support_areas.first() {
+        Some(l) if !l.is_empty() => l.area()?,
+        _ => Region::new(),
+    };
+    let supported_layers = support_areas.iter().filter(|l| !l.is_empty()).count();
+    let mut support_toolpaths = par_map(&support_areas, Stage::Support, observer, |i, layer| {
+        crate::support::support_paths(layer, i, s, w)
+    })?;
+    drop(support_areas);
+
+    // 3. shells
     let shelled = par_map(&regions, Stage::Shells, observer, |_, region| {
         let (shells, inner) = perimeters(region, s.perimeter_count, w)?;
         Ok(Shelled { shells, inner })
     })?;
 
-    // 3. solid vs sparse, infill
+    // 4. solid vs sparse, infill
     let empty = Region::new();
     let (below, above) = (s.solid_layers_bottom as usize, s.solid_layers_top as usize);
     let base_angle = s.infill_angle.to_radians();
@@ -384,8 +398,9 @@ pub fn slice_document(
         Ok(paths)
     })?;
 
-    // 4. skirt and brim, around the first layer
+    // 5. skirt and brim, around the first layer and its support
     let first = regions.first().cloned().unwrap_or_default();
+    let first = if support_first.is_empty() { first } else { first.union(&support_first)? };
     let brim = if s.brim_enabled {
         rings_around(&first, 0.0, s.brim_loops, w, PathKind::Brim)?
     } else {
@@ -399,7 +414,7 @@ pub fn slice_document(
         Vec::new()
     };
 
-    // 5. order everything
+    // 6. order everything
     let mut at = Point2::new(0.0, 0.0);
     let mut layers = Vec::with_capacity(n);
     for (i, (slot, (sh, infill))) in slots.iter().zip(shelled.into_iter().zip(infilled)).enumerate()
@@ -414,6 +429,10 @@ pub fn slice_document(
         }
         if i == 0 {
             groups.push(brim.clone());
+        }
+        // support first, so walls never wait on a column that is not there yet
+        if let Some(sup) = support_toolpaths.get_mut(i) {
+            groups.push(std::mem::take(sup));
         }
         let (outer, inner): (Vec<ToolPath>, Vec<ToolPath>) =
             sh.shells.into_iter().partition(|p| p.kind == PathKind::OuterPerimeter);
@@ -467,6 +486,12 @@ pub fn slice_document(
         warnings.push(
             "the chosen infill pattern is not drawn yet; rectilinear was used instead".to_string(),
         );
+    }
+    if s.support_enabled && supported_layers == 0 {
+        warnings.push(format!(
+            "support is on, but nothing overhangs more than {:.0}° from vertical",
+            s.support_angle
+        ));
     }
     let unused = s.unused_changes();
     if !unused.is_empty() {

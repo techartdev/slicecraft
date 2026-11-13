@@ -191,11 +191,19 @@ fn quick_settings(app: &mut SliceCraftApp, ui: &mut Ui) {
         });
         ui.end_row();
         ui.label("Support");
-        let mut support =
-            matches!(s.get("support_enabled"), Some(slicecraft_doc::SettingValue::Bool(true)));
-        if ui.checkbox(&mut support, "generate (planned)").changed() {
-            let _ = s.set("support_enabled", slicecraft_doc::SettingValue::Bool(support));
-        }
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut s.support_enabled, "generate");
+            ui.add_enabled_ui(s.support_enabled, |ui| {
+                let mut bed_only = s.support_placement == slicecraft_doc::SupportPlacement::BedOnly;
+                if ui.checkbox(&mut bed_only, "from bed only").changed() {
+                    s.support_placement = if bed_only {
+                        slicecraft_doc::SupportPlacement::BedOnly
+                    } else {
+                        slicecraft_doc::SupportPlacement::Everywhere
+                    };
+                }
+            });
+        });
         ui.end_row();
     });
     // keep first-layer temperatures in step with the quick fields

@@ -138,6 +138,35 @@ impl SeamMode {
     const NAMES: &'static [&'static str] = &["nearest", "aligned to a point", "scattered"];
 }
 
+/// Where support may stand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SupportPlacement {
+    /// On the bed and on the model.
+    Everywhere,
+    /// Only columns that reach the bed.
+    BedOnly,
+}
+
+impl SupportPlacement {
+    pub const ALL: [SupportPlacement; 2] =
+        [SupportPlacement::Everywhere, SupportPlacement::BedOnly];
+    const NAMES: &'static [&'static str] = &["everywhere", "from the bed only"];
+}
+
+/// Shape of the support body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SupportPattern {
+    /// Parallel lines in one direction, stacked on every layer.
+    Lines,
+    /// Lines in two directions on every layer.
+    Grid,
+}
+
+impl SupportPattern {
+    pub const ALL: [SupportPattern; 2] = [SupportPattern::Lines, SupportPattern::Grid];
+    const NAMES: &'static [&'static str] = &["lines", "grid"];
+}
+
 /// The print profile: the settings the slicer uses as typed fields, and every
 /// other setting in `extra`.
 #[derive(Debug, Clone, PartialEq)]
@@ -223,6 +252,34 @@ pub struct PrintSettings {
     pub gcode_offset_x: f64,
     pub gcode_offset_y: f64,
     pub gcode_offset_z: f64,
+    // support
+    pub support_enabled: bool,
+    pub support_placement: SupportPlacement,
+    /// Surfaces flatter than this, measured from vertical, get support. Degrees.
+    pub support_angle: f64,
+    /// Density of the support body, %.
+    pub support_infill: f64,
+    pub support_pattern: SupportPattern,
+    /// Horizontal gap between support and model, mm.
+    pub support_xy_gap: f64,
+    /// Empty layers between the top of support and the model above it.
+    pub support_top_gap_layers: u32,
+    /// Empty layers between the model and support standing on it.
+    pub support_bottom_gap_layers: u32,
+    /// Dense layers directly under supported surfaces.
+    pub support_interface_layers: u32,
+    /// Density of those layers, %.
+    pub support_interface_infill: f64,
+    /// Dense layers where support stands on the model.
+    pub support_floor_layers: u32,
+    /// Solid layers at the foot of support on the bed.
+    pub support_base_layers: u32,
+    /// Grows (or shrinks) every supported area, mm.
+    pub support_expansion: f64,
+    /// Perimeters around support areas.
+    pub support_outlines: u32,
+    /// Support speed, % of the default speed.
+    pub support_speed_percent: f64,
     /// Placeholder settings, by key. Missing keys read as their default.
     pub extra: BTreeMap<String, SettingValue>,
 }
@@ -289,6 +346,21 @@ impl Default for PrintSettings {
             gcode_offset_x: 0.0,
             gcode_offset_y: 0.0,
             gcode_offset_z: 0.0,
+            support_enabled: false,
+            support_placement: SupportPlacement::Everywhere,
+            support_angle: 45.0,
+            support_infill: 25.0,
+            support_pattern: SupportPattern::Lines,
+            support_xy_gap: 0.4,
+            support_top_gap_layers: 1,
+            support_bottom_gap_layers: 1,
+            support_interface_layers: 2,
+            support_interface_infill: 70.0,
+            support_floor_layers: 0,
+            support_base_layers: 0,
+            support_expansion: 0.0,
+            support_outlines: 0,
+            support_speed_percent: 100.0,
             extra: BTreeMap::new(),
         }
     }
@@ -1325,17 +1397,17 @@ pub static SETTINGS: &[SettingSpec] = &[
         B,
         Db(false),
         "Hold up overhangs with removable structures.",
-        None,
+        bind_b!(support_enabled),
     ),
     row(
         "support_type",
         "Support placement",
         Support,
         "Support",
-        SettingKind::Choice(&["everywhere", "from the bed only"]),
+        SettingKind::Choice(SupportPlacement::NAMES),
         Dc(0),
         "Whether support may stand on the model.",
-        None,
+        bind_e!(support_placement, SupportPlacement),
     ),
     row(
         "support_angle",
@@ -1345,7 +1417,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(0.0, 90.0, 1.0, DEG),
         Df(45.0),
         "Surfaces flatter than this (from vertical) get support.",
-        None,
+        bind_f!(support_angle),
     ),
     row(
         "support_infill",
@@ -1355,17 +1427,17 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(1.0, 100.0, 1.0, PCT),
         Df(25.0),
         "Density of the support body.",
-        None,
+        bind_f!(support_infill),
     ),
     row(
         "support_pattern",
         "Support pattern",
         Support,
         "Support",
-        SettingKind::Choice(&["lines", "grid"]),
+        SettingKind::Choice(SupportPattern::NAMES),
         Dc(0),
         "Shape of the support body.",
-        None,
+        bind_e!(support_pattern, SupportPattern),
     ),
     row(
         "support_xy_gap",
@@ -1375,7 +1447,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(0.0, 5.0, 0.05, MM),
         Df(0.4),
         "Space between support and the walls of the part.",
-        None,
+        bind_f!(support_xy_gap),
     ),
     row(
         "support_top_gap_layers",
@@ -1385,7 +1457,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         i(0, 10, ""),
         Di(1),
         "Empty layers between support and the part above it.",
-        None,
+        bind_u!(support_top_gap_layers),
     ),
     row(
         "support_bottom_gap_layers",
@@ -1395,7 +1467,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         i(0, 10, ""),
         Di(1),
         "Empty layers between the part and support standing on it.",
-        None,
+        bind_u!(support_bottom_gap_layers),
     ),
     row(
         "support_interface_layers",
@@ -1405,7 +1477,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         i(0, 10, ""),
         Di(2),
         "Dense layers directly under supported surfaces.",
-        None,
+        bind_u!(support_interface_layers),
     ),
     row(
         "support_interface_infill",
@@ -1415,7 +1487,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(1.0, 100.0, 1.0, PCT),
         Df(70.0),
         "Density of the interface layers.",
-        None,
+        bind_f!(support_interface_infill),
     ),
     row(
         "support_base_layers",
@@ -1425,7 +1497,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         i(0, 10, ""),
         Di(0),
         "Wider, denser layers where support meets the bed.",
-        None,
+        bind_u!(support_base_layers),
     ),
     row(
         "support_expansion",
@@ -1435,7 +1507,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(-5.0, 10.0, 0.1, MM),
         Df(0.0),
         "Grow support areas by this much.",
-        None,
+        bind_f!(support_expansion),
     ),
     row(
         "support_pillar_size",
@@ -1628,7 +1700,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(5.0, 200.0, 1.0, PCT),
         Df(100.0),
         "Support speed, relative to the default speed.",
-        None,
+        bind_f!(support_speed_percent),
     ),
     row(
         "bridge_speed_percent",
@@ -2109,7 +2181,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         i(0, 5, ""),
         Di(0),
         "Perimeters around support areas.",
-        None,
+        bind_u!(support_outlines),
     ),
     row(
         "support_every_layers",
@@ -2129,7 +2201,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         i(0, 10, ""),
         Di(0),
         "Dense layers where support stands on the part.",
-        None,
+        bind_u!(support_floor_layers),
     ),
     row(
         "temperature_schedule",
@@ -2445,11 +2517,11 @@ mod tests {
     fn placeholders_are_stored_and_reported() {
         let mut p = PrintSettings::default();
         assert!(p.unused_changes().is_empty());
-        assert!(p.set("support_enabled", SettingValue::Bool(true)).is_ok());
-        assert_eq!(p.get("support_enabled"), Some(SettingValue::Bool(true)));
-        assert_eq!(p.unused_changes(), vec!["Generate support"]);
+        assert!(p.set("raft_enabled", SettingValue::Bool(true)).is_ok());
+        assert_eq!(p.get("raft_enabled"), Some(SettingValue::Bool(true)));
+        assert_eq!(p.unused_changes(), vec!["Raft"]);
         // setting it back to the default forgets it
-        assert!(p.set("support_enabled", SettingValue::Bool(false)).is_ok());
+        assert!(p.set("raft_enabled", SettingValue::Bool(false)).is_ok());
         assert!(p.extra.is_empty());
     }
 
