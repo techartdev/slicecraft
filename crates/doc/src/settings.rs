@@ -153,6 +153,22 @@ impl SupportPlacement {
     const NAMES: &'static [&'static str] = &["everywhere", "from the bed only"];
 }
 
+/// The order islands (separate parts of a layer) are printed in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IslandOrder {
+    /// Finish one island, then go to the nearest next one: fewest travels.
+    Nearest,
+    /// The same order on every layer (left to right, front to back).
+    Consistent,
+    /// Each feature on every island before the next feature.
+    ByFeature,
+}
+
+impl IslandOrder {
+    pub const ALL: [IslandOrder; 3] =
+        [IslandOrder::Nearest, IslandOrder::Consistent, IslandOrder::ByFeature];
+}
+
 /// How support areas are built.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SupportStyle {
@@ -211,6 +227,7 @@ pub struct PrintSettings {
     pub solid_layers_top: u32,
     pub solid_layers_bottom: u32,
     pub perimeter_order: PerimeterOrder,
+    pub island_order: IslandOrder,
     pub seam_mode: SeamMode,
     pub seam_x: f64,
     pub seam_y: f64,
@@ -330,6 +347,7 @@ impl Default for PrintSettings {
             solid_layers_top: 4,
             solid_layers_bottom: 3,
             perimeter_order: PerimeterOrder::InsideOut,
+            island_order: IslandOrder::Nearest,
             seam_mode: SeamMode::Nearest,
             seam_x: 0.0,
             seam_y: 300.0,
@@ -2129,7 +2147,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         ]),
         Dc(0),
         "How separate parts of a layer are visited.",
-        None,
+        bind_e!(island_order, IslandOrder),
     ),
     row(
         "solid_min_area",

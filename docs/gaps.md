@@ -49,7 +49,6 @@ the architecture document, not to a quieter line here.
 - **Seams** — nearest, aligned to a point, or scattered; no preferred-region hiding.
 - **Travel** — nearest-neighbour ordering per feature group; combing walks around holes
   inside the part.
-- **Ordering** — per layer, by feature across all islands, not island by island.
 - **Multi-tool** — absent.
 - **Cooling** — fan on from a chosen layer; no schedules, minimum layer time,
   bridge or top-surface fan.

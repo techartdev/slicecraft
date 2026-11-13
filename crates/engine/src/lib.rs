@@ -1348,6 +1348,41 @@ mesh = AAAA
     }
 
     #[test]
+    fn islands_are_finished_one_at_a_time() {
+        // two cubes side by side: printing by island travels between them
+        // once per layer, by feature three times
+        let Some(mut s) = session_with(cube(15.0)) else { return };
+        let bytes = stl_of(&cube(15.0).unwrap_or_default());
+        assert!(
+            s.execute(Command::Import { name: "b".into(), bytes, extension: Some("stl".into()) })
+                .is_ok()
+        );
+        let run = |s: &mut Session, order: slicecraft_doc::IslandOrder| {
+            let p = PrintSettings { island_order: order, ..s.document().settings.clone() };
+            let _ = s.execute(Command::Profile(Box::new(p)));
+            match s.execute(Command::Slice) {
+                Ok(Outcome::Sliced { stats, .. }) => stats.gcode.retractions,
+                _ => usize::MAX,
+            }
+        };
+        let by_feature = run(&mut s, slicecraft_doc::IslandOrder::ByFeature);
+        let nearest = run(&mut s, slicecraft_doc::IslandOrder::Nearest);
+        let consistent = run(&mut s, slicecraft_doc::IslandOrder::Consistent);
+        assert!(nearest < by_feature, "{nearest} vs {by_feature}");
+        assert!(consistent < by_feature, "{consistent} vs {by_feature}");
+        // within one island, walls still come before infill
+        let Some(out) = s.slice_result() else { return };
+        let Some(layer) = out.layers.get(20) else { return };
+        let kinds: Vec<PathKind> = layer.paths.iter().map(|p| p.kind).collect();
+        let first_infill =
+            kinds.iter().position(|k| matches!(k, PathKind::SparseInfill | PathKind::SolidInfill));
+        let first_wall = kinds
+            .iter()
+            .position(|k| matches!(k, PathKind::OuterPerimeter | PathKind::InnerPerimeter));
+        assert!(first_wall < first_infill);
+    }
+
+    #[test]
     fn restoring_a_profile_does_not_mark_changes() {
         let mut s = Session::new();
         let profile = Profile {

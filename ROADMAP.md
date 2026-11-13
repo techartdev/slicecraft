@@ -29,7 +29,7 @@ and printer control are not there yet, and nothing has been printed — see
 | Tests | 158 in 17 test binaries, all green | measured (`cargo test --workspace`) |
 | Commands | 48 (25 ready, 23 planned) | measured (`engine::COMMANDS`) |
 | Profile settings | 170 (77 used by the slicer, 93 placeholders) | measured (`doc::settings::SETTINGS`) |
-| Crown with support (350 layers, release) | sliced in ≈ 1.5 s; support filament 676 mm vs the reference's 682 mm; 4927 retractions vs 4384 | measured on one Windows machine |
+| Crown with support (350 layers, release) | sliced in ≈ 1.5 s; support filament 676 mm vs the reference's 682 mm; 2606 retractions vs 4384 | measured on one Windows machine |
 | Direct external dependencies | 4 (`i_overlay`, `roxmltree`; `eframe`, `rfd` in the window only) | measured |
 | Simplify3D profiles imported | 16 of 16 operator files (4.0 and 5.1.2) | measured (`io::fff::tests::corpus_profiles_import`, corpus outside the repo) |
 | 20 mm cube, defaults | 99 layers, 1.17 m filament, ≈ 14 min (no acceleration) | measured, uncalibrated |
@@ -57,7 +57,7 @@ damaged meshes dominate the uncertainty.
 
 ## What is next (concrete)
 
-1. **Turn placeholders into features in order of use** (island-by-island ordering next) (from R2 §3): adaptive layers,
+1. **Turn placeholders into features in order of use**  (from R2 §3): adaptive layers,
    gyroid infill, raft, thin walls/gap fill, combing, coast/wipe, schedules.
 2. **Several profiles per job and height zones.**
 3. **3MF import and model export.**

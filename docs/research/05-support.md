@@ -82,7 +82,7 @@ work on the same grid later.
 | support filament, 1.5 mm grid | 682 mm | **676 mm** with pillars; 1432 mm with areas |
 | support filament by pillar size, our grid | — | 1.5 mm: 676 · 2 mm: 782 · 3 mm: 1773 · 4 mm: 1181 |
 | body line spacing at 30 % | 1.33 mm | 1.33 mm |
-| retractions, whole job | 4384 | 4927 with "only when crossing outlines" (9660 before it) |
+| retractions, whole job | 4384 | **2606** island by island (4927 by feature, 9660 before "only when crossing outlines") |
 | slice time, crown, release build | — | about 1.5 s with or without support |
 
 The non-monotonic 3 mm figure comes from how the grid falls on this model's columns.

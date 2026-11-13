@@ -6,7 +6,9 @@
 //! instead of taking the application down with the print.
 
 use crate::EngineError;
-use slicecraft_doc::{Document, InfillPattern, PerimeterOrder, SeamMode, SolidPattern};
+use slicecraft_doc::{
+    Document, InfillPattern, IslandOrder, PerimeterOrder, SeamMode, SolidPattern,
+};
 use slicecraft_geom::{Mesh, Point2, Region, Vec3};
 use slicecraft_io::{GcodeStats, write_gcode};
 use slicecraft_render::paths::{
@@ -349,6 +351,122 @@ pub fn support_preview(
     Ok(out)
 }
 
+/// A layer's model paths as feature groups in print order: walls (in the
+/// profile's perimeter order), solid infill, sparse infill, or infill first.
+fn feature_groups(paths: Vec<ToolPath>, s: &slicecraft_doc::PrintSettings) -> Vec<Vec<ToolPath>> {
+    let (mut outer, mut inner, mut solid, mut sparse) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for p in paths {
+        match p.kind {
+            PathKind::OuterPerimeter => outer.push(p),
+            PathKind::InnerPerimeter => inner.push(p),
+            PathKind::SolidInfill => solid.push(p),
+            _ => sparse.push(p),
+        }
+    }
+    let walls = match s.perimeter_order {
+        PerimeterOrder::InsideOut => [inner, outer],
+        PerimeterOrder::OutsideIn => [outer, inner],
+    };
+    let mut groups = Vec::with_capacity(4);
+    if s.infill_before_perimeters {
+        groups.push(solid);
+        groups.push(sparse);
+        groups.extend(walls);
+    } else {
+        groups.extend(walls);
+        groups.push(solid);
+        groups.push(sparse);
+    }
+    groups.retain(|g| !g.is_empty());
+    groups
+}
+
+/// Split paths by the island (polygon of the layer's region) they start in.
+/// A path that starts in no island joins the nearest one by bounding box.
+fn split_islands(paths: Vec<ToolPath>, region: &Region) -> Vec<Vec<ToolPath>> {
+    let islands: Vec<(Region, slicecraft_geom::Bounds2)> = region
+        .polygons
+        .iter()
+        .filter_map(|p| {
+            let one = Region { polygons: vec![p.clone()] };
+            let b = one.bounds()?;
+            Some((one, b))
+        })
+        .collect();
+    if islands.len() <= 1 {
+        return vec![paths];
+    }
+    let mut out: Vec<Vec<ToolPath>> = vec![Vec::new(); islands.len()];
+    for p in paths {
+        let Some(at) = p.start() else { continue };
+        let inside_box = |b: &slicecraft_geom::Bounds2| {
+            at.x >= b.min_x && at.x <= b.max_x && at.y >= b.min_y && at.y <= b.max_y
+        };
+        let candidates: Vec<usize> = islands
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, b))| inside_box(b))
+            .map(|(k, _)| k)
+            .collect();
+        let chosen = match candidates.as_slice() {
+            [only] => *only,
+            many if !many.is_empty() => many
+                .iter()
+                .copied()
+                .find(|k| islands.get(*k).is_some_and(|(r, _)| r.contains(at)))
+                .unwrap_or(many.first().copied().unwrap_or(0)),
+            _ => {
+                // outside every box: the nearest box
+                let dist = |b: &slicecraft_geom::Bounds2| {
+                    let dx = (b.min_x - at.x).max(at.x - b.max_x).max(0.0);
+                    let dy = (b.min_y - at.y).max(at.y - b.max_y).max(0.0);
+                    dx * dx + dy * dy
+                };
+                islands
+                    .iter()
+                    .enumerate()
+                    .min_by(|a, b| dist(&a.1.1).total_cmp(&dist(&b.1.1)))
+                    .map_or(0, |(k, _)| k)
+            }
+        };
+        if let Some(bucket) = out.get_mut(chosen) {
+            bucket.push(p);
+        }
+    }
+    out.retain(|g| !g.is_empty());
+    out
+}
+
+/// The island with a path starting nearest `at`.
+fn nearest_island(islands: &[Vec<Vec<ToolPath>>], at: Point2) -> usize {
+    let mut best = (f64::INFINITY, 0);
+    for (k, groups) in islands.iter().enumerate() {
+        for p in groups.iter().flatten() {
+            for q in [p.start(), p.end()].into_iter().flatten() {
+                let d = q.distance_sq(at);
+                if d < best.0 {
+                    best = (d, k);
+                }
+            }
+        }
+    }
+    best.1
+}
+
+/// Sort key for "same order every layer": left to right, then front to back.
+fn island_key(groups: &[Vec<ToolPath>]) -> f64 {
+    let mut min = (f64::INFINITY, f64::INFINITY);
+    for p in groups.iter().flatten() {
+        for q in &p.points {
+            if (q.x, q.y) < min {
+                min = (q.x, q.y);
+            }
+        }
+    }
+    (min.0 / 5.0).floor() * 1e6 + min.1
+}
+
 /// Slice a document into toolpaths and G-code.
 pub fn slice_document(
     doc: &Document,
@@ -467,39 +585,35 @@ pub fn slice_document(
         if observer.cancelled() {
             return Err(EngineError::Cancelled);
         }
-        let mut groups: Vec<Vec<ToolPath>> = Vec::with_capacity(6);
+        // first everything outside the model: skirt, brim, then support, so
+        // walls never wait on a column that is not there yet
+        let mut pre: Vec<Vec<ToolPath>> = Vec::with_capacity(3);
         if i < s.skirt_layers as usize {
-            groups.push(skirt.clone());
+            pre.push(skirt.clone());
         }
         if i == 0 {
-            groups.push(brim.clone());
+            pre.push(brim.clone());
         }
-        // support first, so walls never wait on a column that is not there yet
         if let Some(sup) = support_toolpaths.get_mut(i) {
-            groups.push(std::mem::take(sup));
+            pre.push(std::mem::take(sup));
         }
-        let (outer, inner): (Vec<ToolPath>, Vec<ToolPath>) =
-            sh.shells.into_iter().partition(|p| p.kind == PathKind::OuterPerimeter);
-        let walls = match s.perimeter_order {
-            PerimeterOrder::InsideOut => [inner, outer],
-            PerimeterOrder::OutsideIn => [outer, inner],
+        let mut model: Vec<ToolPath> = sh.shells;
+        model.extend(infill);
+        let islands: Vec<Vec<Vec<ToolPath>>> = match s.island_order {
+            IslandOrder::ByFeature => vec![feature_groups(model, s)],
+            IslandOrder::Nearest | IslandOrder::Consistent => {
+                let empty = Region::new();
+                split_islands(model, regions.get(i).unwrap_or(&empty))
+                    .into_iter()
+                    .map(|paths| feature_groups(paths, s))
+                    .collect()
+            }
         };
-        let (solid, sparse): (Vec<ToolPath>, Vec<ToolPath>) =
-            infill.into_iter().partition(|p| p.kind == PathKind::SolidInfill);
-        if s.infill_before_perimeters {
-            groups.push(solid);
-            groups.push(sparse);
-            groups.extend(walls);
-        } else {
-            groups.extend(walls);
-            groups.push(solid);
-            groups.push(sparse);
-        }
         let seam_target = Point2::new(s.seam_x, s.seam_y);
         let mut paths = Vec::new();
-        for g in groups {
-            let (mut ordered, end) = order_paths(g, at);
-            at = end;
+        let place = |g: Vec<ToolPath>, at: &mut Point2, paths: &mut Vec<ToolPath>| {
+            let (mut ordered, end) = order_paths(g, *at);
+            *at = end;
             for (k, p) in ordered.iter_mut().enumerate() {
                 let is_wall = matches!(p.kind, PathKind::OuterPerimeter | PathKind::InnerPerimeter);
                 if !is_wall {
@@ -517,9 +631,31 @@ pub fn slice_document(
             if s.seam_mode != SeamMode::Nearest
                 && let Some(e) = ordered.last().and_then(ToolPath::end)
             {
-                at = e;
+                *at = e;
             }
             paths.extend(ordered);
+        };
+        for g in pre {
+            place(g, &mut at, &mut paths);
+        }
+        let mut remaining = islands;
+        if s.island_order == IslandOrder::Consistent {
+            remaining.sort_by(|a, b| island_key(a).total_cmp(&island_key(b)));
+            remaining.reverse();
+        }
+        while !remaining.is_empty() {
+            let next = match s.island_order {
+                IslandOrder::Nearest => nearest_island(&remaining, at),
+                _ => remaining.len() - 1,
+            };
+            if next >= remaining.len() {
+                break;
+            }
+            // the consistent order is sorted descending, so taking the last
+            // element walks it in ascending order
+            for g in remaining.swap_remove(next) {
+                place(g, &mut at, &mut paths);
+            }
         }
         layers.push(LayerPaths {
             index: slot.index,

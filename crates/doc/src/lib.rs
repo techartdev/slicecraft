@@ -21,8 +21,8 @@ use std::fmt;
 use std::sync::Arc;
 
 pub use settings::{
-    Flavor, InfillPattern, PerimeterOrder, PrintSettings, SeamMode, SettingKind, SettingSpec,
-    SettingValue, SolidPattern, SupportPattern, SupportPlacement, SupportStyle, Tab,
+    Flavor, InfillPattern, IslandOrder, PerimeterOrder, PrintSettings, SeamMode, SettingKind,
+    SettingSpec, SettingValue, SolidPattern, SupportPattern, SupportPlacement, SupportStyle, Tab,
 };
 
 /// Largest scale factor a placement may apply on any axis.
