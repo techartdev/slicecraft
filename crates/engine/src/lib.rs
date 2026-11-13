@@ -18,7 +18,11 @@ pub mod pipeline;
 use slicecraft_doc::profile::{MAX_PROFILE_BYTES, Profile};
 use slicecraft_doc::{Axis, DocError, Document, PrintSettings, SceneObject, Transform};
 use slicecraft_geom::{GeomError, Vec3};
-use slicecraft_io::{IoError, MeshFormat, read_mesh, read_project, write_project};
+use slicecraft_io::fff::MAX_FFF_BYTES;
+use slicecraft_io::{
+    ImportReport, IoError, MeshFormat, import_fff, looks_like_fff, read_mesh, read_project,
+    write_project,
+};
 use slicecraft_render::{Layer, RenderError, layers};
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -155,7 +159,8 @@ pub enum Command {
     Redo,
     /// Replace the print profile after validating it.
     Profile(Box<PrintSettings>),
-    /// Read a profile file and make it the current profile.
+    /// Read a profile file and make it the current profile: a SliceCraft
+    /// `.scprofile` or a Simplify3D `.fff`, recognised by content.
     LoadProfile(PathBuf),
     /// Write the current profile to a file under `name`.
     SaveProfile {
@@ -213,6 +218,11 @@ pub enum Outcome {
     ProfileLoaded {
         name: String,
         warnings: Vec<String>,
+    },
+    /// A profile from another slicer, converted; the report says how.
+    ProfileImported {
+        name: String,
+        report: ImportReport,
     },
     Saved {
         path: PathBuf,
@@ -501,9 +511,19 @@ impl Session {
                 Ok(self.changed())
             }
             Command::LoadProfile(path) => {
-                let bytes = read_bounded(&path, MAX_PROFILE_BYTES as u64)?;
+                let limit = MAX_PROFILE_BYTES.max(MAX_FFF_BYTES) as u64;
+                let bytes = read_bounded(&path, limit)?;
                 let text =
                     String::from_utf8(bytes).map_err(|_| EngineError::Io(IoError::NotUtf8))?;
+                if looks_like_fff(&text) {
+                    let (profile, report) = import_fff(&text)?;
+                    profile.settings.validate()?;
+                    self.checkpoint(None);
+                    self.doc.set_settings(profile.settings);
+                    self.profile_name = profile.name.clone();
+                    self.changed();
+                    return Ok(Outcome::ProfileImported { name: profile.name, report });
+                }
                 let (profile, warnings) = Profile::from_text(&text)?;
                 profile.settings.validate()?;
                 self.checkpoint(None);
@@ -1034,6 +1054,27 @@ mesh = AAAA
         );
         assert!(s.execute(Command::OpenProject(path.clone())).is_err());
         assert_eq!(s.document().objects.len(), 1);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn simplify3d_profiles_load_through_the_profile_command() {
+        let Some(mut s) = session_with(cube(10.0)) else { return };
+        let path = std::env::temp_dir().join(format!("slicecraft-{}.fff", std::process::id()));
+        let fff = "<?xml version=\"1.0\"?>\n<profile name=\"Mine\" app=\"S3D-Software 4.0.0\">\n<extruder name=\"E\"><diameter>0.4</diameter><autoWidth>1</autoWidth></extruder>\n<layerHeight>0.25</layerHeight><defaultSpeed>3000</defaultSpeed><outlineUnderspeed>0.5</outlineUnderspeed>\n</profile>\n";
+        let _ = std::fs::write(&path, fff);
+        let r = s.execute(Command::LoadProfile(path.clone()));
+        assert!(
+            matches!(&r, Ok(Outcome::ProfileImported { name, report }) if name == "Mine" && report.applied.contains(&"layer_height")),
+            "{r:?}"
+        );
+        assert_eq!(s.document().settings.layer_height, 0.25);
+        assert_eq!(s.profile_name(), "Mine");
+        assert!(s.can_undo(), "an import is one undo step");
+        assert!(matches!(s.execute(Command::Slice), Ok(Outcome::Sliced { .. })));
+        let _ = std::fs::write(&path, "<profile><layerHeight>0.2");
+        assert!(s.execute(Command::LoadProfile(path.clone())).is_err());
+        assert_eq!(s.document().settings.layer_height, 0.25, "a broken file changes nothing");
         let _ = std::fs::remove_file(&path);
     }
 

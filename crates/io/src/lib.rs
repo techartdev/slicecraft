@@ -14,12 +14,14 @@
 //! end sequences and the flavour table are SliceCraft's own design, informed
 //! by public firmware documentation and observed behaviour only.
 
+pub mod fff;
 pub mod gcode;
 pub mod mesh_in;
 pub mod project;
 
 use std::fmt;
 
+pub use fff::{ImportReport, import_fff, looks_like_fff};
 pub use gcode::{GcodeOutput, GcodeStats, GcodeWriter, format_duration, path_speed, write_gcode};
 pub use mesh_in::{
     Imported, MAX_FACETS_DECLARED, MAX_TRIANGLES, MeshFormat, read_ascii_stl, read_binary_stl,
@@ -41,6 +43,8 @@ pub enum IoError {
         line: usize,
         what: &'static str,
     },
+    /// A Simplify3D profile that cannot be read.
+    BadFff(&'static str),
 }
 
 impl fmt::Display for IoError {
@@ -57,6 +61,7 @@ impl fmt::Display for IoError {
             }
             IoError::NonFinite => f.write_str("the file contains a non-finite coordinate"),
             IoError::BadProject { line, what } => write!(f, "line {line} of the project: {what}"),
+            IoError::BadFff(what) => write!(f, "Simplify3D profile: {what}"),
         }
     }
 }

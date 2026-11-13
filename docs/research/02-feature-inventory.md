@@ -91,6 +91,7 @@ Status: **done** = works and is tested · **partial** = works with stated limits
 |---|---|---|---|
 | Named profile; presets | public | done (4 built-in presets) | P2 |
 | Save / load profile files | public | done (own text format) | P2 |
+| Import Simplify3D `.fff` profiles (4.x and 5.x) | operator request | done, with an import report ([R9](09-fff-profiles.md)) | P2 |
 | Search settings by name; show changed settings | public | done | P2 |
 | Revert a setting to its default | public | done | P2 |
 | Compare two profiles | public | — | P2 |
@@ -213,8 +214,8 @@ grouping is its own.
 2. Support: pillar-grid (as the reference) or a region-based design? (R5.)
 3. Several profiles per job: per-model, per-height, or both from the start?
 4. Should SliceCraft read the reference's project or profile files for migration?
-   That would need a clean-room format study of its own and is out of scope until the
-   operator decides.
+   Profiles: **yes**, decided by the operator on 2026-11-13 and done ([R9](09-fff-profiles.md)).
+   Project files (`.factory`): still open.
 5. Preferences persistence: answered for now with two text files in the platform's
    per-user folder (`ui-egui::config`). Move to `craft-platform` / `craft-docpath`
    when SliceCraft joins the suite.

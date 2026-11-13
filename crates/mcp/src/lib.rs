@@ -113,6 +113,13 @@ fn run(session: &mut Session, command: Command) -> Reply {
         Ok(Outcome::ProfileLoaded { name, warnings }) => {
             Reply::Text(format!("loaded profile {name} ({} warnings)", warnings.len()))
         }
+        Ok(Outcome::ProfileImported { name, report }) => Reply::Text(format!(
+            "imported profile {name}: {} settings applied, {} kept as planned, {} not used; notes: {}",
+            report.applied.len(),
+            report.placeholders.len(),
+            report.ignored.len(),
+            report.notes.join("; ")
+        )),
         Ok(Outcome::Saved { path }) => Reply::Text(format!("saved {}", path.display())),
         Ok(Outcome::ProjectOpened { path, objects, warnings }) => Reply::Text(format!(
             "opened {} with {objects} model(s) ({} warnings)",

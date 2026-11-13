@@ -35,6 +35,20 @@ pub fn filament_per_mm(width: f64, height: f64, settings: &PrintSettings) -> f64
 
 /// Feed speed for a feature on a layer, mm/s: the one rule the writer and the
 /// preview share.
+/// True when a start script heats the nozzle or bed itself (an `M104`,
+/// `M109`, `M140` or `M190` command, or a temperature placeholder).
+pub fn script_sets_temperatures(script: &str) -> bool {
+    script.contains("{nozzle}")
+        || script.contains("{bed}")
+        || script.contains("{first_nozzle}")
+        || script.contains("{first_bed}")
+        || script.lines().any(|l| {
+            let code = l.split(';').next().unwrap_or("").trim().to_ascii_uppercase();
+            let word = code.split_whitespace().next().unwrap_or("");
+            matches!(word, "M104" | "M109" | "M140" | "M190")
+        })
+}
+
 pub fn path_speed(s: &PrintSettings, kind: PathKind, layer_index: usize) -> f64 {
     if layer_index == 0 {
         return s.first_layer_speed;
@@ -144,7 +158,10 @@ impl<'a> GcodeWriter<'a> {
     fn start(&mut self) {
         let s = self.settings;
         let (nozzle, bed) = (s.first_layer_nozzle_temperature, s.first_layer_bed_temperature);
-        if s.start_script.trim().is_empty() {
+        let script = s.start_script.trim();
+        // heat first, unless the script sets temperatures itself; a script
+        // without heating would otherwise prime a cold nozzle
+        if script.is_empty() || !script_sets_temperatures(script) {
             if bed > 0.0 {
                 let _ = writeln!(self.out, "M140 S{bed:.0} ; bed heating");
             }
@@ -155,6 +172,8 @@ impl<'a> GcodeWriter<'a> {
                 }
                 let _ = writeln!(self.out, "M109 S{nozzle:.0} ; wait for nozzle");
             }
+        }
+        if script.is_empty() {
             self.line("G21 ; millimetres");
             self.line("G28 ; home all axes");
         } else {
@@ -607,5 +626,32 @@ mod tests {
         assert_eq!(format_duration(3723.0), "1h 02m 03s");
         assert_eq!(format_duration(59.4), "0m 59s");
         assert_eq!(format_duration(f64::NAN), "unknown");
+    }
+
+    #[test]
+    fn heating_comes_before_a_start_script_without_temperatures() {
+        let mut s = PrintSettings {
+            start_script: "G28 ; home\nG1 Y80 E10 F600 ; prime".into(),
+            ..PrintSettings::default()
+        };
+        let mut w = GcodeWriter::new(&s);
+        w.start();
+        let text = w.out.clone();
+        let heat = text.find("M109").unwrap_or(usize::MAX);
+        let prime = text.find("G1 Y80 E10").unwrap_or(0);
+        assert!(heat < prime, "the nozzle is hot before the script primes:\n{text}");
+        assert!(!text.contains("G21 ; millimetres"), "the script does its own homing");
+
+        s.start_script = "M190 S{first_bed}\nM109 S{first_nozzle}\nG28".into();
+        let mut w = GcodeWriter::new(&s);
+        w.start();
+        assert_eq!(
+            w.out.matches("M109").count(),
+            1,
+            "a script that heats is not doubled:\n{}",
+            w.out
+        );
+        assert!(script_sets_temperatures("m104 s200"));
+        assert!(!script_sets_temperatures("G28 ; M104 later"));
     }
 }

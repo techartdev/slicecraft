@@ -26,6 +26,8 @@ pub struct Dialogs {
     pub features: bool,
     pub about: bool,
     pub planned: Option<&'static CommandSpec>,
+    /// The last profile imported from another slicer, with its report.
+    pub import_report: Option<(String, slicecraft_io::ImportReport)>,
 }
 
 impl Dialogs {
@@ -38,6 +40,7 @@ impl Dialogs {
             || self.features
             || self.about
             || self.planned.is_some()
+            || self.import_report.is_some()
     }
 }
 
@@ -77,6 +80,78 @@ pub fn show(app: &mut SliceCraftApp, ctx: &egui::Context) {
     about_window(app, ctx);
     planned_window(app, ctx);
     confirm_window(app, ctx);
+    import_report_window(app, ctx);
+}
+
+/// What a profile import carried over, converted or left out.
+fn import_report_window(app: &mut SliceCraftApp, ctx: &egui::Context) {
+    let Some((name, report)) = app.dialogs.import_report.clone() else { return };
+    let mut open = true;
+    let mut edit = false;
+    let mut close = false;
+    egui::Window::new("Profile import")
+        .open(&mut open)
+        .collapsible(false)
+        .default_width(460.0)
+        .show(ctx, |ui| {
+            ui.label(RichText::new(format!("\"{name}\"")).strong());
+            ui.weak(format!("written by {}", report.written_by));
+            ui.add_space(4.0);
+            egui::Grid::new("import-counts").num_columns(2).show(ui, |ui| {
+                ui.label("Used by the slicer");
+                ui.label(report.applied.len().to_string());
+                ui.end_row();
+                ui.label("Kept, not used yet (planned)");
+                ui.label(report.placeholders.len().to_string());
+                ui.end_row();
+                ui.label("No SliceCraft counterpart");
+                ui.label(report.ignored.len().to_string());
+                ui.end_row();
+            });
+            if !report.notes.is_empty() {
+                ui.add_space(6.0);
+                ui.label(RichText::new("Notes").strong());
+                for n in &report.notes {
+                    ui.label(format!("• {n}"));
+                }
+            }
+            ui.add_space(6.0);
+            let label = |key: &str| {
+                slicecraft_doc::settings::spec(key)
+                    .map_or_else(|| key.to_string(), |s| s.label.to_string())
+            };
+            egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
+                ui.collapsing(format!("Used by the slicer ({})", report.applied.len()), |ui| {
+                    ui.label(
+                        report.applied.iter().map(|k| label(k)).collect::<Vec<_>>().join(", "),
+                    );
+                });
+                ui.collapsing(format!("Kept as planned ({})", report.placeholders.len()), |ui| {
+                    ui.label(
+                        report.placeholders.iter().map(|k| label(k)).collect::<Vec<_>>().join(", "),
+                    );
+                });
+                ui.collapsing(format!("Not carried over ({})", report.ignored.len()), |ui| {
+                    ui.weak(report.ignored.join(", "));
+                });
+            });
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if ui.button("Review settings…").clicked() {
+                    edit = true;
+                }
+                if ui.button("Close").clicked() {
+                    close = true;
+                }
+            });
+        });
+    if !open || close {
+        app.dialogs.import_report = None;
+    }
+    if edit {
+        app.dialogs.import_report = None;
+        app.open_settings();
+    }
 }
 
 /// "Save your changes?" before an action that replaces the document.

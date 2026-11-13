@@ -1749,7 +1749,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         "Scripts",
         SettingKind::Text,
         Dt(""),
-        "Replaces the built-in start sequence when not empty. Placeholders: {nozzle} {bed} {first_nozzle} {first_bed}.",
+        "Runs after heat-up and replaces the built-in homing when not empty; a script that sets temperatures itself skips the heat-up. Placeholders: {nozzle} {bed} {first_nozzle} {first_bed}.",
         bind_t!(start_script),
     ),
     row(

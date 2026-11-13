@@ -287,7 +287,7 @@ impl SliceCraftApp {
         for path in paths {
             match extension(&path).as_deref() {
                 Some("scproj") => self.request(Pending::OpenProject(Some(path))),
-                Some("scprofile") => {
+                Some("scprofile" | "fff") => {
                     self.run(Command::LoadProfile(path));
                 }
                 _ => models.push(path),
@@ -484,6 +484,15 @@ impl SliceCraftApp {
                         };
                         self.info(format!("Loaded profile \"{name}\".{w}"));
                     }
+                    Outcome::ProfileImported { name, report } => {
+                        self.info(format!(
+                            "Imported \"{name}\": {} settings applied, {} kept as planned, {} not used.",
+                            report.applied.len(),
+                            report.placeholders.len(),
+                            report.ignored.len()
+                        ));
+                        self.dialogs.import_report = Some((name.clone(), report.clone()));
+                    }
                     Outcome::Saved { path } => self.info(format!("Saved {}.", path.display())),
                     Outcome::Sliced { .. }
                     | Outcome::ProjectOpened { .. }
@@ -523,7 +532,9 @@ impl SliceCraftApp {
     pub(crate) fn load_profile_dialog(&mut self) {
         if let Some(path) = rfd::FileDialog::new()
             .set_title("Load profile")
+            .add_filter("Profiles (SliceCraft, Simplify3D)", &["scprofile", "fff", "txt"])
             .add_filter("SliceCraft profile", &["scprofile", "txt"])
+            .add_filter("Simplify3D profile", &["fff"])
             .pick_file()
             && self.run(Command::LoadProfile(path)).is_some()
         {

@@ -10,14 +10,14 @@ describes code that exists. The rules that keep the shape are in
 ## Workspace
 
 13 packages: 7 libraries, 2 apps, `xtask`. About 13,700 lines of Rust
-(`cargo xtask stats`, 2026-11-13), 133 tests in 17 test binaries.
+(`cargo xtask stats`, 2026-11-13), 141 tests in 17 test binaries.
 
 | Layer | Crate | What it does |
 |---|---|---|
 | L0 | `geom` | `Vec3`, `Point2`, bounds, `Triangle`, `Mesh` (finite and within `±MAX_COORD`), `region`: polygons with holes, offset, union/difference/intersection on a 1 µm grid via `i_overlay` |
 | L1 | `doc` | `Document` (bed, profile, objects), `SceneObject` + `Transform` (centre → scale → rotate Z → place), `PrintSettings` (25 validated fields incl. `Flavor`), arrange, off-bed check |
 | L2 | `render` | `section`: triangle → directed segment → stitched loops; `paths`: toolpath types, perimeter shells, line infill, path ordering; `fixtures` for tests |
-| L3 | `io` | STL (binary + ASCII, detected by content), OBJ; `GcodeWriter` and `write_gcode` with the extrusion model, retraction, fan and estimates |
+| L3 | `io` | STL (binary + ASCII, detected by content), OBJ; `GcodeWriter` and `write_gcode` with the extrusion model, retraction, fan and estimates; `project` (`.scproj`); `fff` (Simplify3D profile import) |
 | L4 | `engine` | `Session`, `Command`/`Outcome`, `COMMANDS`, `SliceJob`; `pipeline`: the parallel slicing pipeline |
 | L5 | `ui-egui` | eframe window: `app` (panels, commands, slicing thread), `camera` (orbit camera math), `scene` (bed, models, toolpaths as egui meshes) |
 | L5 | `mcp` | `ToolSpec` table bound to engine command ids, `dispatch` with arguments |
@@ -145,6 +145,17 @@ window title and the "save changes?" prompt before New, Open and Quit. Opening o
 starting a project clears undo. The CLI's `slice` accepts a project in place of (or
 with) models, and MCP has `open_project` and `save_project`.
 
+## Importing Simplify3D profiles
+
+`io::fff` reads `.fff` profiles of both generations (plain values in 4.x, option lists
+in 5.x) with `roxmltree`, with no DTD and a node limit. It converts mm/min to mm/s,
+the automatic width to 1.2 × the nozzle, and the 4.x speed fractions to SliceCraft's
+wall/outer-wall model. Every value goes through `PrintSettings::set`, so ranges hold.
+It returns the profile and an `ImportReport`: settings the slicer uses, settings kept
+as planned, notes, and elements with no counterpart. `Command::LoadProfile` recognises
+the file by content, so the window, `--profile` and MCP all accept it. The
+measurements behind each conversion are in [research/09-fff-profiles.md](research/09-fff-profiles.md).
+
 ## Agent control
 
 `mcp::TOOLS` binds each tool to an engine command and `dispatch` runs it with string
@@ -171,3 +182,4 @@ points panic on out-of-range input.
 | 2026-11-13 | MVP | Loops, regions, shells, solid/sparse infill, skirt, ordering, extrusion model, binary STL + OBJ, command API, egui window with 3D bed and toolpath preview |
 | 2026-11-13 | UI | Settings schema (169 settings), profiles, undo/redo, XYZ transforms, mirror/duplicate, brim, more patterns and seams, scripts, offsets; full window: menus, toolbars, placement, profile editor, preview controls, analysis |
 | 2026-11-13 | projects | `.scproj` project files, new/open/save/recent, unsaved-changes prompt, preferences and last profile remembered |
+| 2026-11-13 | fff | Simplify3D `.fff` import with a report; heat-up before custom start scripts |

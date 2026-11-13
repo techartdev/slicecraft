@@ -16,6 +16,8 @@
 //!   --flavor marlin|reprap|klipper   --layer-height MM   --first-layer MM
 //!   --width MM   --perimeters N   --infill PCT   --top N   --bottom N
 //!   --nozzle C   --bed C   --skirt N   --profile FILE   --json
+//!
+//! `--profile` takes a SliceCraft `.scprofile` or a Simplify3D `.fff`.
 //! ```
 //!
 //! A project file brings its models, placement and profile; `--profile` and
@@ -121,12 +123,25 @@ fn slice(args: &[String]) -> Result<(), CliError> {
     if let Some(i) = args.iter().position(|a| a == "--profile") {
         let path =
             args.get(i + 1).ok_or_else(|| CliError::Usage("--profile needs a file".into()))?;
-        if let Outcome::ProfileLoaded { warnings, .. } =
-            session.execute(Command::LoadProfile(PathBuf::from(path))).map_err(failed)?
-        {
-            for w in warnings {
-                eprintln!("slicecraft-cli: {path}: {w}");
+        match session.execute(Command::LoadProfile(PathBuf::from(path))).map_err(failed)? {
+            Outcome::ProfileLoaded { warnings, .. } => {
+                for w in warnings {
+                    eprintln!("slicecraft-cli: {path}: {w}");
+                }
             }
+            Outcome::ProfileImported { name, report } => {
+                eprintln!(
+                    "slicecraft-cli: {path}: imported \"{name}\" ({}): {} settings applied, {} kept as planned, {} not used",
+                    report.written_by,
+                    report.applied.len(),
+                    report.placeholders.len(),
+                    report.ignored.len()
+                );
+                for n in report.notes {
+                    eprintln!("slicecraft-cli: {path}: {n}");
+                }
+            }
+            _ => {}
         }
     }
     let mut p = session.document().settings.clone();

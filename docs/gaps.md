@@ -69,6 +69,11 @@ the architecture document, not to a quieter line here.
 - **Profiles** — 169 typed settings with ranges and help; 59 drive the slicer, 110 are
   placeholders that are saved and shown as planned. Profiles save and load as text and
   the last one is restored at start-up; no inheritance or comparison.
+- **Simplify3D import** — `.fff` profiles (4.x and 5.x) load through Load Profile with
+  a report. Only the first extruder, the first two temperature steps and the first
+  fan speed are carried over; material/quality presets inside a 4.x file and
+  `.factory` project files are not read. Some value meanings are inferred, not
+  measured ([R9](research/09-fff-profiles.md) §4).
 - **Several profiles per job, height zones** — not supported (menu items are planned).
 - **No printer or material database**; the bed size comes from the profile.
 - **Projects** — `.scproj` holds models, placement, visibility and the profile. It is

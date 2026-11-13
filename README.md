@@ -33,7 +33,8 @@ implementation is our own.
 **Pre-alpha.** The desktop window places models on a virtual bed, edits a full print
 profile, slices into perimeters, solid and sparse infill, skirt and brim, previews the
 toolpaths (by layer or move, coloured by feature, speed or height) and exports G-code.
-Features that are not built yet (support, raft, printer control, several profiles per
+Jobs save as `.scproj` projects, and Simplify3D `.fff` profiles import through
+Load Profile. Features that are not built yet (support, raft, printer control, several profiles per
 job and more) are in the menus and the profile as clearly marked placeholders.
 [docs/research/02-feature-inventory.md](docs/research/02-feature-inventory.md) lists
 every capability and its status. Nothing has been test-printed yet.
@@ -42,7 +43,7 @@ every capability and its status. Nothing has been test-printed yet.
 cargo run --release -p slicecraft -- examples/cube.stl     # the window
 cargo run -p slicecraft-cli -- info examples/cube.stl
 cargo run -p slicecraft-cli -- slice examples/cube.stl -o cube.gcode --infill 15 --json
-cargo test --workspace          # 133 tests
+cargo test --workspace          # 141 tests
 cargo xtask ci                  # fmt, clippy -D warnings, tests, layering
 ```
 

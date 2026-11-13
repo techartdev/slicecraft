@@ -26,9 +26,10 @@ below.
 | `i_overlay` 9 (+ `i_float`, `i_shape`, `i_tree`, `i_key_sort`, `libm`) | `geom`: polygon offset and booleans | MIT OR Apache-2.0 (deps MIT) |
 | `eframe` / `egui` 0.35 | `ui-egui`: the window | MIT OR Apache-2.0 |
 | `rfd` 0.17 | `ui-egui`: native file dialogs | MIT |
+| `roxmltree` 0.21 (+ `memchr`) | `io`: reading Simplify3D `.fff` profiles | MIT OR Apache-2.0 (`memchr`: Unlicense OR MIT, taken as MIT) |
 
-Everything below the engine (`geom` … `engine`, `mcp`, the CLI) depends on
-`i_overlay` only. The exceptions are confined to the window (`ui-egui` and the
+Everything below the window (`geom` … `engine`, `mcp`, the CLI) depends on
+`i_overlay` and `roxmltree` only. The exceptions are confined to the window (`ui-egui` and the
 `slicecraft` app).
 
 ### Dependency licence exceptions
