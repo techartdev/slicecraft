@@ -412,6 +412,9 @@ pub struct Session {
     saved_revision: u64,
     /// The printer connection, when there is one.
     printer: Option<slicecraft_io::printer::Connection>,
+    /// A person drives this session (the window): the profile's
+    /// post-processing program may run. Never set for agents or scripts.
+    interactive: bool,
 }
 
 impl Session {
@@ -473,6 +476,11 @@ impl Session {
     /// The current profile with its name.
     pub fn profile(&self) -> Profile {
         Profile { name: self.profile_name.clone(), settings: self.doc.settings.clone() }
+    }
+
+    /// Mark this session as driven by a person, so post-processing runs.
+    pub fn set_interactive(&mut self, on: bool) {
+        self.interactive = on;
     }
 
     /// The connected printer's port, if any.
@@ -1028,6 +1036,10 @@ impl Session {
                 std::fs::write(&path, out.gcode.as_bytes()).map_err(|e| {
                     EngineError::File(format!("cannot write {}: {e}", path.display()))
                 })?;
+                let program = self.doc.settings.post_process.trim().to_string();
+                if self.interactive && !program.is_empty() {
+                    post_process(&program, &path)?;
+                }
                 Ok(Outcome::Exported { path, bytes: out.gcode.len() })
             }
         }
@@ -1120,6 +1132,28 @@ fn read_bounded(path: &Path, limit: u64) -> Result<Vec<u8>, EngineError> {
     }
     std::fs::read(path)
         .map_err(|e| EngineError::File(format!("cannot read {}: {e}", path.display())))
+}
+
+/// Run the profile's post-processing program on a written file: the first
+/// word is the program, the rest its arguments, with `{file}` replaced by the
+/// path (or the path added last when no argument names it).
+fn post_process(program: &str, path: &Path) -> Result<(), EngineError> {
+    let mut words = program.split_whitespace();
+    let Some(exe) = words.next() else { return Ok(()) };
+    let file = path.display().to_string();
+    let mut args: Vec<String> = words.map(|w| w.replace("{file}", &file)).collect();
+    if !program.contains("{file}") {
+        args.push(file);
+    }
+    let status = std::process::Command::new(exe)
+        .args(&args)
+        .status()
+        .map_err(|e| EngineError::File(format!("post-processing could not start {exe}: {e}")))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(EngineError::File(format!("post-processing ({exe}) failed: {status}")))
+    }
 }
 
 /// A copy of `o` with another mesh (and name): same placement and visibility.

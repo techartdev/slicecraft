@@ -21,6 +21,7 @@ pub mod mesh_in;
 pub mod printer;
 pub mod project;
 pub mod threemf;
+pub mod thumbnail;
 
 use std::fmt;
 

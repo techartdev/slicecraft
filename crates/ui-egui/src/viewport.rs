@@ -200,6 +200,21 @@ pub fn viewport(app: &mut SliceCraftApp, ui: &mut Ui) {
     let bed = app.session.document().bed.clone();
     let mut b = Builder::default();
     scene::bed(&mut b, &frame, bed.width, bed.depth, bed.height, app.prefs.bed);
+    if app.session.document().settings.bed_shape == slicecraft_doc::BedShape::Circle {
+        let r = bed.width / 2.0;
+        let n = 96;
+        for k in 0..n {
+            let a0 = k as f64 / n as f64 * std::f64::consts::TAU;
+            let a1 = (k + 1) as f64 / n as f64 * std::f64::consts::TAU;
+            b.world_line(
+                &frame,
+                Vec3::new(r + r * a0.cos(), r + r * a0.sin(), 0.0),
+                Vec3::new(r + r * a1.cos(), r + r * a1.sin(), 0.0),
+                2.0,
+                Color32::from_rgb(0x6a, 0xb0, 0xe0),
+            );
+        }
+    }
     let mut head = None;
     match app.mode {
         Mode::Preview => {

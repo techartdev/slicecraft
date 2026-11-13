@@ -43,6 +43,8 @@ pub fn run(session: Session, files: Vec<std::path::PathBuf>) -> Result<(), Strin
         "SliceCraft",
         options,
         Box::new(move |_cc| {
+            let mut session = session;
+            session.set_interactive(true);
             let mut app = SliceCraftApp::with_config(session, config::config_dir());
             app.open_paths(files);
             Ok(Box::new(app))

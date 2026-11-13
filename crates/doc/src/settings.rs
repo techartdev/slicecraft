@@ -148,6 +148,18 @@ impl SupportPlacement {
     const NAMES: &'static [&'static str] = &["everywhere", "from the bed only"];
 }
 
+/// The printable area's outline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BedShape {
+    Rectangle,
+    Circle,
+}
+
+impl BedShape {
+    pub const ALL: [BedShape; 2] = [BedShape::Rectangle, BedShape::Circle];
+    const NAMES: &'static [&'static str] = &["rectangle", "circle"];
+}
+
 /// The cross-section the extrusion volume is computed for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BeadShape {
@@ -378,6 +390,21 @@ pub struct PrintSettings {
     pub gcode_offset_x: f64,
     pub gcode_offset_y: f64,
     pub gcode_offset_z: f64,
+    /// Comment each feature and layer in the G-code.
+    pub verbose_comments: bool,
+    /// Embed a preview image this many pixels square (0 = none).
+    pub thumbnail_size: u32,
+    /// Replace runs of short segments on a circle with G2/G3 arcs.
+    pub arc_fitting: bool,
+    /// A program run on the finished file (only from the window).
+    pub post_process: String,
+    /// The printer's 0,0 is the middle of the bed.
+    pub origin_center: bool,
+    /// Rectangle or circle.
+    pub bed_shape: BedShape,
+    pub bed_diameter: f64,
+    /// Acceleration for the time estimate, mm/s² (0 = ignore).
+    pub max_acceleration: f64,
     // raft
     pub raft_enabled: bool,
     pub raft_base_layers: u32,
@@ -529,6 +556,14 @@ impl Default for PrintSettings {
             gcode_offset_x: 0.0,
             gcode_offset_y: 0.0,
             gcode_offset_z: 0.0,
+            verbose_comments: true,
+            thumbnail_size: 0,
+            arc_fitting: false,
+            post_process: String::new(),
+            origin_center: false,
+            bed_shape: BedShape::Rectangle,
+            bed_diameter: 200.0,
+            max_acceleration: 0.0,
             raft_enabled: false,
             raft_base_layers: 2,
             raft_top_layers: 2,
@@ -1992,7 +2027,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         B,
         Db(false),
         "Replace runs of short segments with G2/G3 arcs.",
-        None,
+        bind_b!(arc_fitting),
     ),
     row(
         "verbose_comments",
@@ -2002,7 +2037,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         B,
         Db(true),
         "Comment each feature and layer.",
-        None,
+        bind_b!(verbose_comments),
     ),
     row(
         "thumbnail_size",
@@ -2012,7 +2047,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         i(0, 512, "px"),
         Di(0),
         "Embed a preview image of this size (0 = none).",
-        None,
+        bind_u!(thumbnail_size),
     ),
     row(
         "post_process",
@@ -2022,7 +2057,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         SettingKind::Text,
         Dt(""),
         "A program to run on the finished file (never run by agents).",
-        None,
+        bind_t!(post_process),
     ),
     // ----------------------------------------------------------- Scripts
     row(
@@ -2101,10 +2136,10 @@ pub static SETTINGS: &[SettingSpec] = &[
         "Bed shape",
         Machine,
         "Build volume",
-        SettingKind::Choice(&["rectangle", "circle"]),
+        SettingKind::Choice(BedShape::NAMES),
         Dc(0),
         "Shape of the printable area.",
-        None,
+        bind_e!(bed_shape, BedShape),
     ),
     row(
         "origin_center",
@@ -2114,7 +2149,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         B,
         Db(false),
         "The printer's 0,0 is the middle of the bed (deltas).",
-        None,
+        bind_b!(origin_center),
     ),
     row("tool_count", "Tools", Machine, "Tools", i(1, 8, ""), Di(1), "Number of extruders.", None),
     row(
@@ -2125,7 +2160,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(0.0, 50_000.0, 100.0, "mm/s²"),
         Df(0.0),
         "Used for the time estimate (0 = ignore).",
-        None,
+        bind_f!(max_acceleration),
     ),
     // ----------------------------------------------------------- Material
     row(
@@ -2566,7 +2601,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(10.0, 2000.0, 1.0, MM),
         Df(200.0),
         "Diameter of a round bed.",
-        None,
+        bind_f!(bed_diameter),
     ),
     row(
         "tool_change_retract",

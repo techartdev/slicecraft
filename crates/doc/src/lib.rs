@@ -21,9 +21,9 @@ use std::fmt;
 use std::sync::Arc;
 
 pub use settings::{
-    BeadShape, Flavor, InfillPattern, IslandOrder, PerimeterOrder, PrintSettings, SeamMode,
-    SettingKind, SettingSpec, SettingValue, SolidPattern, SupportPattern, SupportPlacement,
-    SupportStyle, Tab, ThinWalls,
+    BeadShape, BedShape, Flavor, InfillPattern, IslandOrder, PerimeterOrder, PrintSettings,
+    SeamMode, SettingKind, SettingSpec, SettingValue, SolidPattern, SupportPattern,
+    SupportPlacement, SupportStyle, Tab, ThinWalls,
 };
 
 /// Largest scale factor a placement may apply on any axis.
@@ -366,11 +366,12 @@ pub struct Document {
 impl Document {
     /// Replace the profile; the bed follows the profile's machine settings.
     pub fn set_settings(&mut self, settings: PrintSettings) {
-        self.bed = Bed {
-            width: settings.bed_width,
-            depth: settings.bed_depth,
-            height: settings.bed_height,
+        // a round bed's build area is its diameter square, centred
+        let (width, depth) = match settings.bed_shape {
+            settings::BedShape::Circle => (settings.bed_diameter, settings.bed_diameter),
+            settings::BedShape::Rectangle => (settings.bed_width, settings.bed_depth),
         };
+        self.bed = Bed { width, depth, height: settings.bed_height };
         self.settings = settings;
     }
 

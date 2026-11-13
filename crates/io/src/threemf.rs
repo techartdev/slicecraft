@@ -301,7 +301,8 @@ fn collect(
     Ok(())
 }
 
-fn crc32(data: &[u8]) -> u32 {
+/// CRC-32 (IEEE), as ZIP and PNG use.
+pub fn crc32(data: &[u8]) -> u32 {
     let mut table = [0u32; 256];
     for (i, slot) in table.iter_mut().enumerate() {
         let mut c = i as u32;

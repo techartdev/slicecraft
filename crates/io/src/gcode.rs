@@ -37,6 +37,55 @@ pub fn filament_per_mm(width: f64, height: f64, settings: &PrintSettings) -> f64
     bead / filament_area * settings.extrusion_multiplier
 }
 
+/// How far points may stray from a fitted arc, mm.
+pub const ARC_TOLERANCE: f64 = 0.01;
+
+/// The circle through three points: centre, or `None` when they are in line.
+fn circle(a: Point2, b: Point2, c: Point2) -> Option<Point2> {
+    let d = 2.0 * (a.x * (b.y - c.y) + b.x * (c.y - a.y) + c.x * (a.y - b.y));
+    if d.abs() < 1e-9 {
+        return None;
+    }
+    let (a2, b2, c2) = (a.x * a.x + a.y * a.y, b.x * b.x + b.y * b.y, c.x * c.x + c.y * c.y);
+    Some(Point2::new(
+        (a2 * (b.y - c.y) + b2 * (c.y - a.y) + c2 * (a.y - b.y)) / d,
+        (a2 * (c.x - b.x) + b2 * (a.x - c.x) + c2 * (b.x - a.x)) / d,
+    ))
+}
+
+/// The longest run from `start` (at least four points) on one circle, turning
+/// one way and less than a full turn: (last index, centre, counter-clockwise).
+fn fit_arc(pts: &[Point2], start: usize) -> Option<(usize, Point2, bool)> {
+    let (a, b, c) = (*pts.get(start)?, *pts.get(start + 1)?, *pts.get(start + 2)?);
+    let centre = circle(a, b, c)?;
+    let r = a.distance(centre);
+    if !(0.5..=1000.0).contains(&r) {
+        return None;
+    }
+    let turn =
+        |p: Point2, q: Point2, s: Point2| (q.x - p.x) * (s.y - q.y) - (q.y - p.y) * (s.x - q.x);
+    let ccw = turn(a, b, c) > 0.0;
+    let mut end = start + 2;
+    let mut swept = 0.0;
+    while let Some(&next) = pts.get(end + 1) {
+        let (Some(&p), Some(&q)) = (pts.get(end - 1), pts.get(end)) else { break };
+        if (next.distance(centre) - r).abs() > ARC_TOLERANCE || (turn(p, q, next) > 0.0) != ccw {
+            break;
+        }
+        // the middle of each chord must also lie on the arc
+        let mid = Point2::new((q.x + next.x) / 2.0, (q.y + next.y) / 2.0);
+        if r - mid.distance(centre) > ARC_TOLERANCE {
+            break;
+        }
+        swept += q.distance(next) / r;
+        if swept > 5.5 {
+            break;
+        }
+        end += 1;
+    }
+    (end - start >= 3).then_some((end, centre, ccw))
+}
+
 /// Line width on a printed layer: the first layer may be wider, unless a raft
 /// is under it (then the raft is the first layer).
 pub fn layer_line_width(settings: &PrintSettings, layer_index: usize) -> f64 {
@@ -132,6 +181,8 @@ pub struct GcodeWriter<'a> {
     layer_fan: u8,
     /// On a spiral layer, the height the wall rises from.
     spiral_from: Option<f64>,
+    /// Direction of the last move, for the acceleration estimate.
+    last_dir: Option<(f64, f64)>,
 }
 
 /// Flow multiplier for a feature, on top of the profile's.
@@ -201,6 +252,7 @@ impl<'a> GcodeWriter<'a> {
             fan: 0,
             layer_fan: 0,
             spiral_from: None,
+            last_dir: None,
         }
     }
 
@@ -283,6 +335,50 @@ impl<'a> GcodeWriter<'a> {
         self.retracted = 0.0;
     }
 
+    /// What every X and Y written is shifted by: the user's offsets, and the
+    /// bed centre when the printer's origin is there.
+    fn xy_offset(&self) -> (f64, f64) {
+        let s = self.settings;
+        let (cx, cy) = if s.origin_center {
+            match s.bed_shape {
+                slicecraft_doc::BedShape::Circle => (s.bed_diameter / 2.0, s.bed_diameter / 2.0),
+                slicecraft_doc::BedShape::Rectangle => (s.bed_width / 2.0, s.bed_depth / 2.0),
+            }
+        } else {
+            (0.0, 0.0)
+        };
+        (s.gcode_offset_x - cx, s.gcode_offset_y - cy)
+    }
+
+    /// Time for a move of `d` mm at `v` mm/s towards `to`. With an
+    /// acceleration set, the move pays for slowing down at its start in
+    /// proportion to how sharply it turns from the last move (nothing on a
+    /// straight line, a full stop on a reversal), as firmware junction
+    /// handling does.
+    fn move_time(&mut self, d: f64, v: f64, to: Option<Point2>) -> f64 {
+        let a = self.settings.max_acceleration;
+        if v <= 0.0 {
+            return 0.0;
+        }
+        let dir = match (self.pos, to) {
+            (Some(p), Some(q)) if d > 1e-9 => Some(((q.x - p.x) / d, (q.y - p.y) / d)),
+            _ => None,
+        };
+        let turn = match (self.last_dir, dir) {
+            (Some(u), Some(w)) => (1.0 - (u.0 * w.0 + u.1 * w.1)) / 2.0,
+            _ => 1.0,
+        };
+        if dir.is_some() {
+            self.last_dir = dir;
+        }
+        if a <= 0.0 {
+            return d / v;
+        }
+        // a stop-and-go move: a trapezoid, or a triangle when too short
+        let full = if d >= v * v / a { d / v + v / a } else { 2.0 * (d / a).sqrt() };
+        d / v + turn.clamp(0.0, 1.0) * (full - d / v)
+    }
+
     /// The E word for a move of `de` mm of filament, absolute or relative.
     fn e_word(&mut self, de: f64) -> String {
         self.e += de;
@@ -345,7 +441,12 @@ impl<'a> GcodeWriter<'a> {
                 self.line("M106 S255 ; kick-start the fan");
                 self.line("G4 P200");
             }
-            let _ = writeln!(self.out, "M106 S{duty}");
+            if self.settings.flavor == slicecraft_doc::Flavor::RepRap {
+                // RepRapFirmware takes the fan as a fraction
+                let _ = writeln!(self.out, "M106 S{:.2}", f64::from(duty) / 255.0);
+            } else {
+                let _ = writeln!(self.out, "M106 S{duty}");
+            }
         }
         self.fan = duty;
     }
@@ -379,11 +480,16 @@ impl<'a> GcodeWriter<'a> {
 
     /// Move to `z` for a new layer: retract, lift, reset E.
     fn layer_change(&mut self, layer: &LayerPaths) {
-        let _ = writeln!(
-            self.out,
-            ";LAYER:{} Z:{:.3} HEIGHT:{:.3}",
-            layer.index, layer.z, layer.height
-        );
+        if self.settings.verbose_comments {
+            let _ = writeln!(
+                self.out,
+                ";LAYER:{} Z:{:.3} HEIGHT:{:.3}",
+                layer.index, layer.z, layer.height
+            );
+        }
+        if self.settings.flavor == slicecraft_doc::Flavor::Klipper {
+            let _ = writeln!(self.out, "SET_PRINT_STATS_INFO CURRENT_LAYER={}", layer.index + 1);
+        }
         let spiral = self.spiral(layer);
         if self.settings.retract_on_layer_change && !spiral {
             self.retract();
@@ -467,7 +573,7 @@ impl<'a> GcodeWriter<'a> {
             }
         }
         let f = self.feed_word(self.settings.travel_speed);
-        let (ox, oy) = (self.settings.gcode_offset_x, self.settings.gcode_offset_y);
+        let (ox, oy) = self.xy_offset();
         let _ = writeln!(self.out, "G0 X{:.3} Y{:.3}{f}", p.x + ox, p.y + oy);
         if let Some(z) = lifted {
             let f = self.feed_word(self.settings.z_speed);
@@ -475,7 +581,8 @@ impl<'a> GcodeWriter<'a> {
         }
         if let Some(d) = d {
             self.stats.travel_mm += d;
-            self.stats.estimated_seconds += d / self.settings.travel_speed;
+            let v = self.settings.travel_speed;
+            self.stats.estimated_seconds += self.move_time(d, v, Some(p));
         }
         self.pos = Some(p);
     }
@@ -493,13 +600,62 @@ impl<'a> GcodeWriter<'a> {
         let de = d * e_per_mm;
         let e = self.e_word(de);
         let f = self.feed_word(speed);
-        let (ox, oy) = (self.settings.gcode_offset_x, self.settings.gcode_offset_y);
+        let (ox, oy) = self.xy_offset();
         let _ = writeln!(self.out, "G1 X{:.3} Y{:.3} {e}{f}", p.x + ox, p.y + oy);
         self.stats.extruded_mm += d;
         self.stats.filament_mm += de;
-        self.stats.estimated_seconds += d / speed;
+        self.stats.estimated_seconds += self.move_time(d, speed, Some(p));
         self.since_retract += d;
         self.pos = Some(p);
+    }
+
+    /// Extrude along `pts`, as G2/G3 where at least four points lie on one
+    /// circle (within `ARC_TOLERANCE`), as G1 elsewhere.
+    fn extrude_arcs(&mut self, pts: &[Point2], speed: f64, e_per_mm: f64) {
+        let mut i = 0;
+        while i + 1 < pts.len() {
+            match fit_arc(pts, i) {
+                Some((end, centre, ccw)) => {
+                    let (Some(a), Some(b)) = (pts.get(i), pts.get(end)) else { break };
+                    let r = a.distance(centre);
+                    // length along the arc, from the swept angle
+                    let mut sweep = (b.y - centre.y).atan2(b.x - centre.x)
+                        - (a.y - centre.y).atan2(a.x - centre.x);
+                    if ccw && sweep <= 0.0 {
+                        sweep += std::f64::consts::TAU;
+                    }
+                    if !ccw && sweep >= 0.0 {
+                        sweep -= std::f64::consts::TAU;
+                    }
+                    let len = r * sweep.abs();
+                    self.unretract();
+                    let e = self.e_word(len * e_per_mm);
+                    let f = self.feed_word(speed);
+                    let (ox, oy) = self.xy_offset();
+                    let _ = writeln!(
+                        self.out,
+                        "{} X{:.3} Y{:.3} I{:.3} J{:.3} {e}{f}",
+                        if ccw { "G3" } else { "G2" },
+                        b.x + ox,
+                        b.y + oy,
+                        centre.x - a.x,
+                        centre.y - a.y
+                    );
+                    self.stats.extruded_mm += len;
+                    self.stats.filament_mm += len * e_per_mm;
+                    self.stats.estimated_seconds += self.move_time(len, speed, Some(*b));
+                    self.since_retract += len;
+                    self.pos = Some(*b);
+                    i = end;
+                }
+                None => {
+                    if let Some(b) = pts.get(i + 1) {
+                        self.extrude_to(*b, speed, e_per_mm);
+                    }
+                    i += 1;
+                }
+            }
+        }
     }
 
     /// A move at printing speed without extruding (coasting, wiping).
@@ -510,7 +666,7 @@ impl<'a> GcodeWriter<'a> {
             return;
         }
         let f = self.feed_word(speed);
-        let (ox, oy) = (self.settings.gcode_offset_x, self.settings.gcode_offset_y);
+        let (ox, oy) = self.xy_offset();
         let _ = writeln!(self.out, "G1 X{:.3} Y{:.3}{f}", p.x + ox, p.y + oy);
         self.stats.estimated_seconds += d / speed;
         self.pos = Some(p);
@@ -530,7 +686,9 @@ impl<'a> GcodeWriter<'a> {
     fn path_full(&mut self, path: &ToolPath, layer: &LayerPaths, inside: bool, finish: Finish) {
         let Some(start) = path.start() else { return };
         if self.kind != Some(path.kind) {
-            let _ = writeln!(self.out, ";TYPE:{}", path.kind.label());
+            if self.settings.verbose_comments {
+                let _ = writeln!(self.out, ";TYPE:{}", path.kind.label());
+            }
             self.kind = Some(path.kind);
         }
         let s = self.settings;
@@ -591,7 +749,8 @@ impl<'a> GcodeWriter<'a> {
                 let e = self.e_word(d * e_per_mm);
                 let f = self.feed_word(speed);
                 let z = z0 + (z1 - z0) * done / total;
-                let (ox, oy, oz) = (s.gcode_offset_x, s.gcode_offset_y, s.gcode_offset_z);
+                let (ox, oy) = self.xy_offset();
+                let oz = s.gcode_offset_z;
                 let _ = writeln!(
                     self.out,
                     "G1 X{:.3} Y{:.3} Z{:.4} {e}{f}",
@@ -604,6 +763,11 @@ impl<'a> GcodeWriter<'a> {
                 self.stats.estimated_seconds += d / speed;
                 self.pos = Some(*b);
             }
+            return;
+        }
+        // arcs: only without coasting or wiping (they cut the path)
+        if s.arc_fitting && finish.coast <= 0.0 && finish.wipe <= 0.0 && pts.len() >= 4 {
+            self.extrude_arcs(&pts, speed, e_per_mm);
             return;
         }
         // coast: the last stretch without extruding, if the path is long enough
@@ -743,7 +907,13 @@ pub fn write_gcode_layers<'a>(
     stats.filament_cost = stats.filament_grams / 1000.0 * settings.filament_cost;
 
     let mut text = String::with_capacity(w.out.len() + 1024);
+    if settings.thumbnail_size > 0 {
+        text.push_str(&crate::thumbnail::gcode_block(layers, settings.thumbnail_size));
+    }
     let _ = writeln!(text, "; generated by SliceCraft {}", env!("CARGO_PKG_VERSION"));
+    if settings.flavor == slicecraft_doc::Flavor::Klipper {
+        let _ = writeln!(text, "SET_PRINT_STATS_INFO TOTAL_LAYER={}", stats.layers);
+    }
     let _ = writeln!(text, "; flavor: {}", flavor_label(settings.flavor));
     let _ = writeln!(text, "; layers: {}", stats.layers);
     let _ = writeln!(
@@ -1175,5 +1345,75 @@ mod tests {
         assert!(t(&short) > t(&base) * 1.5);
         let capped = PrintSettings { max_volumetric_flow: 1.0, ..base.clone() };
         assert!(t(&capped) > t(&base) * 1.5);
+    }
+
+    fn circle_path(r: f64, n: usize) -> Vec<LayerPaths> {
+        let points = (0..n)
+            .map(|k| {
+                let a = k as f64 / n as f64 * std::f64::consts::TAU;
+                Point2::new(100.0 + r * a.cos(), 100.0 + r * a.sin())
+            })
+            .collect();
+        one_layer(vec![ToolPath { kind: PathKind::OuterPerimeter, points, closed: true }])
+    }
+
+    #[test]
+    fn arcs_replace_segments_on_a_circle_with_about_the_same_filament() {
+        let base = PrintSettings::default();
+        let arcs = PrintSettings { arc_fitting: true, ..base.clone() };
+        let a = write_gcode(&circle_path(10.0, 120), &base, &Bed::default());
+        let b = write_gcode(&circle_path(10.0, 120), &arcs, &Bed::default());
+        assert!(b.text.contains("G3 ") || b.text.contains("G2 "), "{}", b.text);
+        assert!(b.text.lines().count() < a.text.lines().count() - 50);
+        assert!((a.stats.filament_mm - b.stats.filament_mm).abs() / a.stats.filament_mm < 0.01);
+        // a square is not an arc
+        let sq = write_gcode(
+            &one_layer(vec![ToolPath {
+                kind: PathKind::OuterPerimeter,
+                points: vec![
+                    Point2::new(0.0, 0.0),
+                    Point2::new(10.0, 0.0),
+                    Point2::new(10.0, 10.0),
+                    Point2::new(0.0, 10.0),
+                ],
+                closed: true,
+            }]),
+            &arcs,
+            &Bed::default(),
+        );
+        assert!(!sq.text.contains("G2 ") && !sq.text.contains("G3 "));
+    }
+
+    #[test]
+    fn origin_flavour_comments_thumbnail_and_acceleration() {
+        let centred = PrintSettings { origin_center: true, ..PrintSettings::default() };
+        let out = write_gcode(&circle_path(10.0, 12), &centred, &Bed::default());
+        // the circle around (100, 100) on a 220 bed lands around (-10, -10)
+        assert!(
+            out.text.lines().any(|l| l.starts_with("G1 X-") || l.starts_with("G0 X-")),
+            "{}",
+            out.text
+        );
+        let quiet = PrintSettings { verbose_comments: false, ..PrintSettings::default() };
+        assert!(
+            !write_gcode(&circle_path(10.0, 12), &quiet, &Bed::default()).text.contains(";TYPE:")
+        );
+        let klipper =
+            PrintSettings { flavor: slicecraft_doc::Flavor::Klipper, ..PrintSettings::default() };
+        assert!(
+            write_gcode(&circle_path(10.0, 12), &klipper, &Bed::default())
+                .text
+                .contains("SET_PRINT_STATS_INFO CURRENT_LAYER=1")
+        );
+        let thumb = PrintSettings { thumbnail_size: 64, ..PrintSettings::default() };
+        assert!(
+            write_gcode(&circle_path(10.0, 12), &thumb, &Bed::default())
+                .text
+                .starts_with("; thumbnail begin 64x64")
+        );
+        let slow = PrintSettings { max_acceleration: 500.0, ..PrintSettings::default() };
+        let fast = write_gcode(&circle_path(10.0, 120), &PrintSettings::default(), &Bed::default());
+        let real = write_gcode(&circle_path(10.0, 120), &slow, &Bed::default());
+        assert!(real.stats.estimated_seconds > fast.stats.estimated_seconds);
     }
 }

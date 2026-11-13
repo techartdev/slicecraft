@@ -66,9 +66,12 @@ the architecture document, not to a quieter line here.
 
 ## Output
 
-- **G-code flavours** — Marlin, RepRap and Klipper share one command set today; only
-  the header names the flavour. No binary or printer-specific formats.
-- **Relative extrusion** (M83) works; no arc moves, no pressure advance, no thumbnails.
+- **G-code flavours** — Marlin, RepRap (fan as a fraction) and Klipper
+  (`SET_PRINT_STATS_INFO` layers) differ where it matters most; no binary or
+  printer-specific formats.
+- **Relative extrusion**, **arc moves** (G2/G3, fitted within 0.01 mm), **thumbnails**
+  (PNG in comments), centre origin and round beds, a post-processing program (window
+  only). No pressure advance.
 - **Scripts** — start, end and layer-change scripts with placeholders; no retraction,
   tool-change or profile-change scripts, no conditionals. Coordinate offsets work.
 - **Estimates** ignore acceleration and are optimistic; weight and cost use the
