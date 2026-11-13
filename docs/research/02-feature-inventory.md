@@ -179,7 +179,7 @@ grouping is its own.
 |---|---|---|---|
 | Export G-code to disk | public | done | P5 |
 | Printer-specific binary formats, thumbnails | public | placeholder | P5 |
-| USB printing, network printing (several firmware families), discovery | public | placeholder | P6 |
+| USB printing, network printing (several firmware families), discovery | public | done (serial; simulated-printer tests) | P6 |
 | Control panel: connect, jog, home, temperatures, fan, terminal, pause/stop | public | placeholder window | P6 |
 | Several printers at once | public | — | P6 |
 | Bed levelling assistant | public | — | P6 |

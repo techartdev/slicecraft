@@ -656,74 +656,177 @@ fn preferences_window(app: &mut SliceCraftApp, ctx: &egui::Context) {
 }
 
 fn machine_window(app: &mut SliceCraftApp, ctx: &egui::Context) {
+    use slicecraft_engine::Command;
     let mut open = app.dialogs.machine;
-    egui::Window::new("Machine control")
-        .open(&mut open)
-        .default_width(460.0)
-        .collapsible(false)
-        .show(ctx, |ui| {
-            ui.colored_label(
-                PLANNED,
-                "Printer connection is planned. Every control here is a placeholder.",
-            );
-            ui.add_space(4.0);
-            ui.add_enabled_ui(false, |ui| {
-                ui.label(RichText::new("Connection").strong());
-                ui.horizontal(|ui| {
-                    egui::ComboBox::from_id_salt("port").selected_text("port").show_ui(ui, |_| {});
-                    egui::ComboBox::from_id_salt("baud")
-                        .selected_text("115200")
-                        .show_ui(ui, |_| {});
-                    let _ = ui.button("Connect");
-                    let _ = ui.button("Find network printers");
-                });
-                ui.add_space(6.0);
-                ui.label(RichText::new("Move").strong());
-                egui::Grid::new("jog").show(ui, |ui| {
-                    for row in [["", "Y+", ""], ["X−", "Home", "X+"], ["", "Y−", ""]] {
-                        for c in row {
-                            if c.is_empty() {
-                                ui.label("");
-                            } else {
-                                let _ = ui.button(c);
-                            }
-                        }
-                        ui.end_row();
+    let connected = app.session.printer_port().map(str::to_string);
+    let mut run: Vec<Command> = Vec::new();
+    egui::Window::new("Machine control").open(&mut open).default_width(520.0).show(ctx, |ui| {
+        let m = &mut app.machine;
+        if !m.scanned {
+            m.scanned = true;
+            m.ports = slicecraft_io::printer::list_ports();
+            if m.port.is_empty()
+                && let [only] = m.ports.as_slice()
+            {
+                m.port = only.clone();
+            }
+        }
+        ui.label(RichText::new("Connection").strong());
+        ui.horizontal(|ui| {
+            egui::ComboBox::from_id_salt("port")
+                .selected_text(if m.port.is_empty() { "port" } else { m.port.as_str() })
+                .show_ui(ui, |ui| {
+                    for p in &m.ports {
+                        ui.selectable_value(&mut m.port, p.clone(), p);
                     }
                 });
-                ui.horizontal(|ui| {
-                    let _ = ui.button("Z+");
-                    let _ = ui.button("Z−");
-                    let _ = ui.button("Extrude");
-                    let _ = ui.button("Retract");
-                    let _ = ui.button("Motors off");
-                });
-                ui.add_space(6.0);
-                ui.label(RichText::new("Temperatures").strong());
-                let mut t = 0.0f64;
-                ui.horizontal(|ui| {
-                    ui.label("Nozzle");
-                    ui.add(egui::DragValue::new(&mut t).suffix(" °C"));
-                    ui.label("Bed");
-                    ui.add(egui::DragValue::new(&mut t).suffix(" °C"));
-                    let _ = ui.button("Set");
-                    let _ = ui.button("Cool down");
-                });
-                ui.add_space(6.0);
-                ui.label(RichText::new("Terminal").strong());
-                let mut s = String::new();
-                ui.add(egui::TextEdit::multiline(&mut s).desired_rows(4).hint_text("firmware log"));
-                ui.horizontal(|ui| {
-                    ui.add(egui::TextEdit::singleline(&mut s).hint_text("G-code to send"));
-                    let _ = ui.button("Send");
-                });
-                ui.horizontal(|ui| {
-                    let _ = ui.button("Print");
-                    let _ = ui.button("Pause");
-                    let _ = ui.button("Stop");
-                });
+            if ui.small_button("↻").on_hover_text("Look for serial ports again").clicked() {
+                m.ports = slicecraft_io::printer::list_ports();
+            }
+            egui::ComboBox::from_id_salt("baud").selected_text(m.baud.to_string()).show_ui(
+                ui,
+                |ui| {
+                    for b in [250_000u32, 115_200, 57_600, 38_400, 19_200] {
+                        ui.selectable_value(&mut m.baud, b, b.to_string());
+                    }
+                },
+            );
+            match &connected {
+                Some(p) => {
+                    ui.colored_label(
+                        Color32::from_rgb(0x4c, 0xc0, 0x6a),
+                        format!("connected · {p}"),
+                    );
+                    if ui.button("Disconnect").clicked() {
+                        run.push(Command::DisconnectPrinter);
+                    }
+                }
+                None => {
+                    if ui.add_enabled(!m.port.is_empty(), egui::Button::new("Connect")).clicked() {
+                        run.push(Command::ConnectPrinter { port: m.port.clone(), baud: m.baud });
+                    }
+                }
+            }
+        });
+        let on = connected.is_some();
+        ui.add_enabled_ui(on, |ui| {
+            ui.add_space(6.0);
+            ui.label(RichText::new("Temperatures").strong());
+            egui::Grid::new("temps").num_columns(4).show(ui, |ui| {
+                ui.label("Nozzle");
+                ui.label(format!("{:.1} / {:.0} °C", m.nozzle.0, m.nozzle.1));
+                ui.add(egui::DragValue::new(&mut m.set_nozzle).range(0.0..=320.0).suffix(" °C"));
+                if ui.button("Set").clicked() {
+                    run.push(Command::SendToPrinter(format!("M104 S{:.0}", m.set_nozzle)));
+                }
+                ui.end_row();
+                ui.label("Bed");
+                ui.label(format!("{:.1} / {:.0} °C", m.bed.0, m.bed.1));
+                ui.add(egui::DragValue::new(&mut m.set_bed).range(0.0..=130.0).suffix(" °C"));
+                if ui.button("Set").clicked() {
+                    run.push(Command::SendToPrinter(format!("M140 S{:.0}", m.set_bed)));
+                }
+                ui.end_row();
+            });
+            if ui.button("Heaters off").clicked() {
+                run.push(Command::SendToPrinter("M104 S0".into()));
+                run.push(Command::SendToPrinter("M140 S0".into()));
+            }
+            ui.add_space(6.0);
+            ui.label(RichText::new("Move").strong());
+            ui.horizontal(|ui| {
+                ui.label("Step");
+                for d in [0.1, 1.0, 10.0, 50.0] {
+                    ui.selectable_value(&mut m.step, d, format!("{d} mm"));
+                }
+            });
+            let step = m.step;
+            ui.horizontal(|ui| {
+                for (label, axis, sign) in [
+                    ("X−", "X", -1.0),
+                    ("X+", "X", 1.0),
+                    ("Y−", "Y", -1.0),
+                    ("Y+", "Y", 1.0),
+                    ("Z−", "Z", -1.0),
+                    ("Z+", "Z", 1.0),
+                ] {
+                    if ui.button(label).clicked() {
+                        for l in [
+                            "G91".to_string(),
+                            format!("G1 {axis}{:.2} F3000", sign * step),
+                            "G90".to_string(),
+                        ] {
+                            run.push(Command::SendToPrinter(l));
+                        }
+                    }
+                }
+            });
+            ui.horizontal(|ui| {
+                if ui.button("Home all").clicked() {
+                    run.push(Command::SendToPrinter("G28".into()));
+                }
+                if ui.button("Home XY").clicked() {
+                    run.push(Command::SendToPrinter("G28 X Y".into()));
+                }
+                if ui.button("Extrude 5 mm").clicked() {
+                    for l in ["M83", "G1 E5 F300", "M82"] {
+                        run.push(Command::SendToPrinter(l.into()));
+                    }
+                }
+                if ui.button("Retract 5 mm").clicked() {
+                    for l in ["M83", "G1 E-5 F1800", "M82"] {
+                        run.push(Command::SendToPrinter(l.into()));
+                    }
+                }
+                if ui.button("Fan on").clicked() {
+                    run.push(Command::SendToPrinter("M106 S255".into()));
+                }
+                if ui.button("Fan off").clicked() {
+                    run.push(Command::SendToPrinter("M107".into()));
+                }
+                if ui.button("Motors off").clicked() {
+                    run.push(Command::SendToPrinter("M84".into()));
+                }
+            });
+            ui.add_space(6.0);
+            ui.label(RichText::new("Print").strong());
+            ui.horizontal(|ui| {
+                if ui.button("Print the current slice").clicked() {
+                    run.push(Command::PrintOverUsb);
+                }
+                if ui.button("Pause").clicked() {
+                    run.push(Command::PausePrint);
+                }
+                if ui.button("Resume").clicked() {
+                    run.push(Command::ResumePrint);
+                }
+                if ui.button("Cancel").clicked() {
+                    run.push(Command::CancelPrint);
+                }
+            });
+            if let Some((done, total)) = m.progress {
+                let frac = if total > 0 { done as f32 / total as f32 } else { 0.0 };
+                ui.add(egui::ProgressBar::new(frac).text(format!("{done} / {total} lines")));
+            }
+            ui.add_space(6.0);
+            ui.label(RichText::new("Terminal").strong());
+            egui::ScrollArea::vertical().max_height(160.0).stick_to_bottom(true).show(ui, |ui| {
+                for l in &m.log {
+                    ui.monospace(l);
+                }
+            });
+            ui.horizontal(|ui| {
+                let r = ui.text_edit_singleline(&mut m.input);
+                let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if (ui.button("Send").clicked() || enter) && !m.input.trim().is_empty() {
+                    run.push(Command::SendToPrinter(std::mem::take(&mut m.input)));
+                }
             });
         });
+    });
+    for c in run {
+        app.run(c);
+    }
     app.dialogs.machine = open;
 }
 

@@ -140,7 +140,7 @@ mod tests {
     #[test]
     fn palette_marks_planned_commands_disabled() {
         let rows = ViewState::palette();
-        assert!(rows.iter().any(|r| r.id == "print-usb" && !r.enabled));
+        assert!(rows.iter().any(|r| r.id == "camera-monitor" && !r.enabled));
         assert!(rows.iter().any(|r| r.id == "undo" && r.enabled));
         assert!(rows.iter().any(|r| r.id == "slice" && r.enabled));
     }

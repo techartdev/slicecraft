@@ -115,7 +115,9 @@ the architecture document, not to a quieter line here.
 
 - **No JSON control channel.**
 - **No MCP transport** (the tool table and dispatch exist; stdio JSON-RPC does not).
-- **No printer I/O** — no serial, no discovery, no job upload.
+- **Printer I/O** — USB serial: connect, temperatures, jogging, terminal, print with line
+  numbers, checksums and resends, pause/resume/cancel. Tested against a simulated
+  printer only. No network printers, no SD-card upload, no camera.
 - **No packaging** — no MSI, dmg, nfpm, Flatpak, FreeBSD package.
 - **No CI** beyond `cargo xtask ci`; shared workflows are deferred until approval.
 - **No wasm build.**

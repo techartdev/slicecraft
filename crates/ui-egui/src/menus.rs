@@ -292,9 +292,13 @@ pub fn menu_bar(app: &mut SliceCraftApp, ui: &mut Ui) {
             if item(app, ui, "machine-control", "", true) {
                 app.dialogs.machine = true;
             }
-            item(app, ui, "print-usb", "", true);
+            if item(app, ui, "print-usb", "", true) {
+                app.dialogs.machine = true;
+            }
             item(app, ui, "print-network", "", true);
-            item(app, ui, "firmware-terminal", "", true);
+            if item(app, ui, "firmware-terminal", "", true) {
+                app.dialogs.machine = true;
+            }
             item(app, ui, "camera-monitor", "", true);
             ui.separator();
             item(app, ui, "profile-wizard", "", true);

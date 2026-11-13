@@ -119,10 +119,10 @@ pub const COMMANDS: &[CommandSpec] = &[
     ready("open-gcode", "Open G-code for Preview"),
     planned("variable-layers", "Variable Layer Heights"),
     // machine
-    planned("machine-control", "Machine Control Panel"),
-    planned("print-usb", "Print over USB"),
+    ready("machine-control", "Machine Control Panel"),
+    ready("print-usb", "Print over USB"),
     planned("print-network", "Send to a Network Printer"),
-    planned("firmware-terminal", "Firmware Terminal"),
+    ready("firmware-terminal", "Firmware Terminal"),
     planned("camera-monitor", "Print Camera"),
 ];
 
@@ -226,6 +226,19 @@ pub enum Command {
     ExportModels(PathBuf),
     /// Read a G-code file (from any slicer) and show it as the slice.
     OpenGcode(PathBuf),
+    /// Open a serial connection to a printer.
+    ConnectPrinter {
+        port: String,
+        baud: u32,
+    },
+    DisconnectPrinter,
+    /// Send one line to the printer (terminal, jogging, temperatures).
+    SendToPrinter(String),
+    /// Print the current slice (slicing first if needed) over the connection.
+    PrintOverUsb,
+    PausePrint,
+    ResumePrint,
+    CancelPrint,
 }
 
 impl Command {
@@ -271,6 +284,12 @@ impl Command {
             Command::ExportGcode(_) => "export-gcode",
             Command::ExportModels(_) => "export-models",
             Command::OpenGcode(_) => "open-gcode",
+            Command::ConnectPrinter { .. } | Command::DisconnectPrinter => "machine-control",
+            Command::SendToPrinter(_) => "firmware-terminal",
+            Command::PrintOverUsb
+            | Command::PausePrint
+            | Command::ResumePrint
+            | Command::CancelPrint => "print-usb",
         }
     }
 }
@@ -308,6 +327,12 @@ pub enum Outcome {
     Repaired {
         index: usize,
         report: slicecraft_geom::repair::RepairReport,
+    },
+    PrinterConnected {
+        port: String,
+    },
+    PrintStarted {
+        lines: usize,
     },
     /// A G-code file read for preview.
     GcodeOpened {
@@ -385,6 +410,8 @@ pub struct Session {
     /// Revision at the last project save or open; differs when there are
     /// unsaved changes.
     saved_revision: u64,
+    /// The printer connection, when there is one.
+    printer: Option<slicecraft_io::printer::Connection>,
 }
 
 impl Session {
@@ -446,6 +473,34 @@ impl Session {
     /// The current profile with its name.
     pub fn profile(&self) -> Profile {
         Profile { name: self.profile_name.clone(), settings: self.doc.settings.clone() }
+    }
+
+    /// The connected printer's port, if any.
+    pub fn printer_port(&self) -> Option<&str> {
+        self.printer.as_ref().map(|c| c.port.as_str())
+    }
+
+    /// Everything the printer said since the last call. A dropped link
+    /// closes the connection.
+    pub fn printer_events(&mut self) -> Vec<slicecraft_io::printer::HostEvent> {
+        let Some(c) = &self.printer else { return Vec::new() };
+        let events = c.events();
+        if events.contains(&slicecraft_io::printer::HostEvent::Disconnected) {
+            self.printer = None;
+        }
+        events
+    }
+
+    /// Use an already running connection (tests, other transports).
+    pub fn attach_printer(&mut self, c: slicecraft_io::printer::Connection) {
+        self.printer = Some(c);
+    }
+
+    fn printer_send(&self, cmd: slicecraft_io::printer::HostCommand) -> Result<(), EngineError> {
+        match &self.printer {
+            Some(c) if c.send(cmd) => Ok(()),
+            _ => Err(EngineError::File("no printer is connected".into())),
+        }
     }
 
     /// The project file of this document, once opened or saved.
@@ -876,6 +931,52 @@ impl Session {
                 let out = self.slice_now()?;
                 Ok(Outcome::Sliced { layers: out.layers.len(), stats: out.stats.clone() })
             }
+            Command::ConnectPrinter { port, baud } => {
+                let c = slicecraft_io::printer::connect(&port, baud).map_err(EngineError::File)?;
+                self.printer = Some(c);
+                Ok(Outcome::PrinterConnected { port })
+            }
+            Command::DisconnectPrinter => {
+                if self.printer.take().is_none() {
+                    return Ok(Outcome::Unchanged);
+                }
+                Ok(Outcome::Changed)
+            }
+            Command::SendToPrinter(line) => {
+                let line = line.trim().to_string();
+                if line.is_empty() || line.len() > 256 {
+                    return Err(EngineError::File(
+                        "a printer command is one line, up to 256 characters".into(),
+                    ));
+                }
+                self.printer_send(slicecraft_io::printer::HostCommand::Send(line))?;
+                Ok(Outcome::Changed)
+            }
+            Command::PrintOverUsb => {
+                if self.printer.is_none() {
+                    return Err(EngineError::File("no printer is connected".into()));
+                }
+                let out = match self.slice_result() {
+                    Some(out) => out,
+                    None => self.slice_now()?,
+                };
+                let lines = slicecraft_io::printer::printable_lines(&out.gcode);
+                let count = lines.len();
+                self.printer_send(slicecraft_io::printer::HostCommand::Print(lines))?;
+                Ok(Outcome::PrintStarted { lines: count })
+            }
+            Command::PausePrint => {
+                self.printer_send(slicecraft_io::printer::HostCommand::Pause)?;
+                Ok(Outcome::Changed)
+            }
+            Command::ResumePrint => {
+                self.printer_send(slicecraft_io::printer::HostCommand::Resume)?;
+                Ok(Outcome::Changed)
+            }
+            Command::CancelPrint => {
+                self.printer_send(slicecraft_io::printer::HostCommand::Cancel)?;
+                Ok(Outcome::Changed)
+            }
             Command::OpenGcode(path) => {
                 let bytes = read_bounded(&path, MAX_FILE_BYTES)?;
                 let text = String::from_utf8_lossy(&bytes).into_owned();
@@ -1143,6 +1244,13 @@ mod tests {
             Command::Supports(true),
             Command::ExportModels(PathBuf::new()),
             Command::OpenGcode(PathBuf::new()),
+            Command::ConnectPrinter { port: String::new(), baud: 115_200 },
+            Command::DisconnectPrinter,
+            Command::SendToPrinter(String::new()),
+            Command::PrintOverUsb,
+            Command::PausePrint,
+            Command::ResumePrint,
+            Command::CancelPrint,
             Command::RepairMesh { index: 0, fill: true },
             Command::RepairMesh { index: 0, fill: false },
             Command::SplitParts { index: 0 },
@@ -1167,7 +1275,7 @@ mod tests {
         for c in samples {
             assert_eq!(s.command(c.id()).map(|spec| spec.state), Some(CommandState::Ready));
         }
-        assert_eq!(s.command("print-usb").map(|c| c.state), Some(CommandState::Planned));
+        assert_eq!(s.command("camera-monitor").map(|c| c.state), Some(CommandState::Planned));
         assert!(s.command("nope").is_none());
     }
 
@@ -1978,6 +2086,71 @@ mesh = AAAA
             o.layers.iter().any(|l| l.paths.iter().any(|p| p.kind == PathKind::OuterPerimeter))
         }));
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn printing_needs_a_connection_and_sends_the_slice() {
+        let Some(mut s) = session_with(cube(10.0)) else { return };
+        assert!(s.execute(Command::PrintOverUsb).is_err(), "no printer yet");
+        assert!(s.execute(Command::SendToPrinter("G28".into())).is_err());
+        assert!(matches!(s.execute(Command::DisconnectPrinter), Ok(Outcome::Unchanged)));
+        assert!(
+            s.execute(Command::ConnectPrinter { port: "/no/such/port".into(), baud: 115_200 })
+                .is_err()
+        );
+    }
+
+    /// A printer that says `ok` to everything.
+    struct OkPrinter {
+        pending: std::collections::VecDeque<u8>,
+        lines: std::sync::Arc<std::sync::Mutex<usize>>,
+    }
+
+    impl std::io::Write for OkPrinter {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.pending.extend(b"ok\n");
+            if let Ok(mut n) = self.lines.lock() {
+                *n += 1;
+            }
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl std::io::Read for OkPrinter {
+        fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+            if self.pending.is_empty() {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "idle"));
+            }
+            let n = out.len().min(self.pending.len());
+            for slot in out.iter_mut().take(n) {
+                *slot = self.pending.pop_front().unwrap_or(b' ');
+            }
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn a_slice_prints_to_a_connected_printer() {
+        use slicecraft_io::printer::{HostEvent, spawn_host};
+        let Some(mut s) = session_with(cube(5.0)) else { return };
+        let lines = std::sync::Arc::new(std::sync::Mutex::new(0usize));
+        let fake = OkPrinter { pending: Default::default(), lines: std::sync::Arc::clone(&lines) };
+        s.attach_printer(spawn_host(fake, "fake".into()));
+        let r = s.execute(Command::PrintOverUsb);
+        assert!(matches!(r, Ok(Outcome::PrintStarted { .. })), "{r:?}");
+        let Ok(Outcome::PrintStarted { lines: count }) = r else { return };
+        let start = std::time::Instant::now();
+        let mut finished = false;
+        while start.elapsed() < std::time::Duration::from_secs(30) && !finished {
+            finished = s.printer_events().contains(&HostEvent::PrintFinished);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(finished, "the print did not finish");
+        assert!(lines.lock().map(|n| *n).unwrap_or(0) > count, "every line went out");
     }
 
     #[test]

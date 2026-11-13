@@ -170,6 +170,44 @@ impl Pending {
     }
 }
 
+/// What the machine-control window shows.
+#[derive(Debug, Clone)]
+pub struct MachineState {
+    pub ports: Vec<String>,
+    pub port: String,
+    pub baud: u32,
+    /// (current, target), °C.
+    pub nozzle: (f64, f64),
+    pub bed: (f64, f64),
+    pub set_nozzle: f64,
+    pub set_bed: f64,
+    pub step: f64,
+    pub log: std::collections::VecDeque<String>,
+    pub input: String,
+    pub progress: Option<(usize, usize)>,
+    /// Ports were listed once already.
+    pub scanned: bool,
+}
+
+impl Default for MachineState {
+    fn default() -> Self {
+        Self {
+            ports: Vec::new(),
+            port: String::new(),
+            baud: 115_200,
+            nozzle: (0.0, 0.0),
+            bed: (0.0, 0.0),
+            set_nozzle: 200.0,
+            set_bed: 60.0,
+            step: 10.0,
+            log: Default::default(),
+            input: String::new(),
+            progress: None,
+            scanned: false,
+        }
+    }
+}
+
 /// Window preferences, remembered between sessions (see `config`).
 #[derive(Debug, Clone)]
 pub struct Preferences {
@@ -219,6 +257,7 @@ pub struct SliceCraftApp {
     pub(crate) recent: Vec<PathBuf>,
     /// Show the support a slice would print while preparing.
     pub(crate) show_support: bool,
+    pub(crate) machine: MachineState,
     pub(crate) support_job: Option<SupportPreviewJob>,
     /// The latest support preview: the revision it was made for and its prisms.
     pub(crate) support_view: Option<(u64, Vec<scene::Prism>)>,
@@ -264,6 +303,7 @@ impl SliceCraftApp {
             applied_dark: None,
             recent: Vec::new(),
             show_support: false,
+            machine: MachineState::default(),
             support_job: None,
             support_view: None,
             support_note: None,
@@ -493,6 +533,35 @@ impl SliceCraftApp {
         }
     }
 
+    /// Take in what the printer said.
+    fn poll_printer(&mut self, ctx: &egui::Context) {
+        use slicecraft_io::printer::HostEvent;
+        if self.session.printer_port().is_none() {
+            return;
+        }
+        for e in self.session.printer_events() {
+            let m = &mut self.machine;
+            match e {
+                HostEvent::Line(l) => m.log.push_back(l),
+                HostEvent::Temperatures { nozzle, nozzle_target, bed, bed_target } => {
+                    m.nozzle = (nozzle, nozzle_target);
+                    m.bed = (bed, bed_target);
+                }
+                HostEvent::Progress { done, total } => m.progress = Some((done, total)),
+                HostEvent::PrintFinished => {
+                    m.progress = None;
+                    m.log.push_back("— print finished —".into());
+                }
+                HostEvent::Error(err) => m.log.push_back(format!("! {err}")),
+                HostEvent::Disconnected => m.log.push_back("— disconnected —".into()),
+            }
+            while m.log.len() > 500 {
+                m.log.pop_front();
+            }
+        }
+        ctx.request_repaint_after(std::time::Duration::from_millis(200));
+    }
+
     /// Show or hide the support preview.
     pub(crate) fn set_show_support(&mut self, on: bool) {
         self.show_support = on;
@@ -604,6 +673,12 @@ impl SliceCraftApp {
                         ));
                     }
                     Outcome::Saved { path } => self.info(format!("Saved {}.", path.display())),
+                    Outcome::PrinterConnected { port } => {
+                        self.info(format!("Connected to {port}."))
+                    }
+                    Outcome::PrintStarted { lines } => {
+                        self.info(format!("Printing: {lines} lines sent to the printer in turn."))
+                    }
                     Outcome::GcodeOpened { path, layers } => {
                         self.mode = Mode::Preview;
                         self.preview.first_layer = 0;
@@ -1204,6 +1279,7 @@ impl eframe::App for SliceCraftApp {
         self.shortcuts(&ctx);
         self.refresh_caches();
         self.refresh_support_preview(&ctx);
+        self.poll_printer(&ctx);
         self.advance_playback(&ctx);
 
         egui::Panel::top("menu").show(ui, |ui| crate::menus::menu_bar(self, ui));
