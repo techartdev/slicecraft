@@ -314,7 +314,7 @@ pub fn support_layers(
     let interface = s.support_interface_layers as usize;
     let floor = s.support_floor_layers as usize;
     let base = s.support_base_layers as usize;
-    par_map(&columns, Stage::Support, observer, |j, col| {
+    let mut layers = par_map(&columns, Stage::Support, observer, |j, col| {
         if col.is_empty() {
             return Ok(SupportLayer::default());
         }
@@ -358,7 +358,39 @@ pub fn support_layers(
         let dense = area.intersection(&dense_zone)?.without_slivers(w * w);
         let body = area.difference(&dense)?;
         Ok(SupportLayer { body, dense })
-    })
+    })?;
+    // a support line bridges a gap of about a line width (the clearance
+    // beside a thin wall, say); farther out it would hang in the air
+    stand_on_something(&mut layers, regions, gap_bottom, w + s.support_xy_gap, w)?;
+    Ok(layers)
+}
+
+/// Support must stand on something. Bottom up, each layer's support is kept
+/// only within `reach` of the support of the layer below or of the model
+/// just under its bottom gap; what is farther out would start in mid air
+/// (a pillar that missed a layer), and the cut carries on upwards.
+fn stand_on_something(
+    layers: &mut [SupportLayer],
+    regions: &[Region],
+    gap_bottom: usize,
+    reach: f64,
+    w: f64,
+) -> Result<(), EngineError> {
+    let mut below: Option<Region> = None;
+    for (j, layer) in layers.iter_mut().enumerate() {
+        if j > 0 && !layer.is_empty() {
+            let model = union_range(regions, j.saturating_sub(gap_bottom + 1), j)?;
+            let base = match &below {
+                Some(b) => b.union(&model)?,
+                None => model,
+            };
+            let allowed = base.offset(reach)?;
+            layer.body = layer.body.intersection(&allowed)?.without_slivers(w * w);
+            layer.dense = layer.dense.intersection(&allowed)?.without_slivers(w * w);
+        }
+        below = if layer.is_empty() { None } else { Some(layer.area()?) };
+    }
+    Ok(())
 }
 
 /// Toolpaths for one layer's support.
@@ -624,6 +656,34 @@ mod tests {
             cell = pillars(&t, 4.0, 0.45).unwrap_or_default();
         }
         assert_eq!(cell.polygons.len(), 1);
+    }
+
+    #[test]
+    fn support_that_would_start_in_mid_air_is_removed() {
+        let layer = |r: Region| SupportLayer { body: r, dense: Region::new() };
+        let model = vec![Region::new(), Region::new(), square(40.0, 0.0, 5.0), Region::new()];
+        let mut sup = vec![
+            layer(square(0.0, 0.0, 4.0)),
+            // beside the pillar below, within a line: it bridges; far out: it hangs
+            layer(
+                square(0.0, 0.0, 4.0)
+                    .union(&square(4.5, 0.0, 2.0))
+                    .unwrap_or_default()
+                    .union(&square(20.0, 0.0, 2.0))
+                    .unwrap_or_default(),
+            ),
+            layer(square(0.0, 0.0, 4.0)),
+            // on the model two layers down (across the bottom gap): it stands
+            layer(square(0.0, 0.0, 4.0).union(&square(41.0, 1.0, 2.0)).unwrap_or_default()),
+        ];
+        assert!(stand_on_something(&mut sup, &model, 1, 0.75, 0.45).is_ok());
+        let area = |j: usize| sup.get(j).and_then(|l| l.area().ok()).map_or(0.0, |r| r.area());
+        assert!(
+            (area(1) - 16.5).abs() < 0.2,
+            "the pillar stays, its neighbour only as far as a line can bridge (0.25 mm of it), the far square goes: {}",
+            area(1)
+        );
+        assert!((area(3) - 20.0).abs() < 0.5, "support on the model stays: {}", area(3));
     }
 
     #[test]

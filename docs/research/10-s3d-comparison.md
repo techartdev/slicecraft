@@ -58,6 +58,28 @@ Running it first showed SliceCraft 5–15 % short on filament. Three causes, all
    Among the few nearest candidates, one reachable without crossing an outline (no
    retraction) now wins unless it is more than 10 mm farther.
 
+## Does the support build? (a printer part with a shelf)
+
+A 47 × 84 × 37 mm extruder mount (CC-BY, from a public model site; outside the
+repository) whose notes ask for support, 0.2 mm layers and 30 % infill, sliced with
+the operator's Simplify3D profile (4 mm pillars at 20 %, no dense layer under the
+model). There is no Simplify3D G-code of it to compare against, so the G-code was
+checked on its own: every support line must have support or model within 0.75 mm
+below it (or the model two layers down, across the bottom gap), and every model line
+must have something within 1 mm below it (bridges excepted).
+
+- Support stands from the bed up to the shelf that starts at 23.2 mm; 177 of 183
+  layers carry support, about 2.9 cm³.
+- **Found and fixed:** each layer chose its pillars on its own, so a pillar could
+  skip a layer where the clearance around the model cut it, and the line above would
+  start in mid air. Support is now kept only within a bridgeable distance (a line
+  width plus the side clearance) of the support or model below; the cut carries
+  upwards (`support::stand_on_something`, tested).
+- What remains flagged: the second layer, where the 20 % base lines cross the first
+  layer's at 2.4 mm spacing (an ordinary support grid), and three spots under
+  0.6 mm²; 5.6 mm² of the shelf's first wall layer spans between support lines
+  2.4 mm apart, which the profile's sparse support implies.
+
 ## Evidence and inference
 
 - **Evidence:** layer counts equal on every job; filament within 0.3–3.6 %; by the
