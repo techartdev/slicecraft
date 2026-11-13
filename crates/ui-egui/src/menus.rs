@@ -72,7 +72,9 @@ pub fn menu_bar(app: &mut SliceCraftApp, ui: &mut Ui) {
             if item(app, ui, "import", "Ctrl+O", true) {
                 app.open_import_dialog();
             }
-            item(app, ui, "open-gcode", "", true);
+            if item(app, ui, "open-gcode", "", true) {
+                app.open_gcode_dialog();
+            }
             if item(app, ui, "export-models", "", has_models) {
                 app.export_models_dialog();
             }

@@ -130,6 +130,9 @@ fn run(session: &mut Session, command: Command) -> Reply {
             report.ignored.len(),
             report.notes.join("; ")
         )),
+        Ok(Outcome::GcodeOpened { path, layers }) => {
+            Reply::Text(format!("opened {} ({layers} layers)", path.display()))
+        }
         Ok(Outcome::SupportPreviewed { layers, volume }) => {
             Reply::Text(format!("support on {layers} layers, {volume:.0} mm³"))
         }

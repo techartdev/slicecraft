@@ -48,7 +48,7 @@ Status: **done** = works and is tested · **partial** = works with stated limits
 | Import STL / OBJ | public | done | P1 |
 | Import 3MF | public | done (ZIP64, units, components, one model per build item) | P1 |
 | Drag-and-drop import | public | done | P1 |
-| Preview an existing G-code file | public | placeholder | P5 |
+| Preview an existing G-code file | public | done (features from SliceCraft, Simplify3D, Cura, PrusaSlicer comments) | P5 |
 | Export models (STL/OBJ/3MF) | public | done | P2 |
 | Project file holding models, placement, settings, supports | public | done (models, placement, visibility, profile; supports when they exist) | P2 |
 | Recent projects | public | done | P2 |

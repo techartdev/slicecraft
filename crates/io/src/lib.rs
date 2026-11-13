@@ -16,6 +16,7 @@
 
 pub mod fff;
 pub mod gcode;
+pub mod gcode_in;
 pub mod mesh_in;
 pub mod project;
 pub mod threemf;

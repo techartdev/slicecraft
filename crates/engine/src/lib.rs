@@ -116,7 +116,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     ready("slice", "Slice"),
     ready("export-gcode", "Export G-code"),
     ready("gcode-preview", "Toolpath Preview"),
-    planned("open-gcode", "Open G-code for Preview"),
+    ready("open-gcode", "Open G-code for Preview"),
     planned("variable-layers", "Variable Layer Heights"),
     // machine
     planned("machine-control", "Machine Control Panel"),
@@ -224,6 +224,8 @@ pub enum Command {
     ExportGcode(PathBuf),
     /// Write the visible models, as placed, to an STL, OBJ or 3MF file.
     ExportModels(PathBuf),
+    /// Read a G-code file (from any slicer) and show it as the slice.
+    OpenGcode(PathBuf),
 }
 
 impl Command {
@@ -268,6 +270,7 @@ impl Command {
             Command::Slice => "slice",
             Command::ExportGcode(_) => "export-gcode",
             Command::ExportModels(_) => "export-models",
+            Command::OpenGcode(_) => "open-gcode",
         }
     }
 }
@@ -305,6 +308,11 @@ pub enum Outcome {
     Repaired {
         index: usize,
         report: slicecraft_geom::repair::RepairReport,
+    },
+    /// A G-code file read for preview.
+    GcodeOpened {
+        path: PathBuf,
+        layers: usize,
     },
     /// The support a slice would print.
     SupportPreviewed {
@@ -868,6 +876,30 @@ impl Session {
                 let out = self.slice_now()?;
                 Ok(Outcome::Sliced { layers: out.layers.len(), stats: out.stats.clone() })
             }
+            Command::OpenGcode(path) => {
+                let bytes = read_bounded(&path, MAX_FILE_BYTES)?;
+                let text = String::from_utf8_lossy(&bytes).into_owned();
+                let mut read = slicecraft_io::gcode_in::read_gcode(&text)?;
+                let layers = read.layers.len();
+                // weight and cost at the profile's filament
+                let s = &self.doc.settings;
+                let area = std::f64::consts::PI * s.filament_diameter.powi(2) / 4.0;
+                read.stats.filament_grams =
+                    read.stats.filament_mm * area / 1000.0 * s.filament_density;
+                read.stats.filament_cost = read.stats.filament_grams / 1000.0 * s.filament_cost;
+                let out = SliceOutput {
+                    layers: read.layers,
+                    gcode: text,
+                    stats: SliceStats {
+                        gcode: read.stats,
+                        dropped_chains: 0,
+                        warnings: Vec::new(),
+                    },
+                };
+                // shown until the document changes
+                self.sliced = Some((self.revision, Arc::new(out)));
+                Ok(Outcome::GcodeOpened { path, layers })
+            }
             Command::ExportModels(path) => {
                 let mut models = Vec::new();
                 for o in self.doc.objects.iter().filter(|o| o.visible) {
@@ -1110,6 +1142,7 @@ mod tests {
             Command::ExportGcode(PathBuf::new()),
             Command::Supports(true),
             Command::ExportModels(PathBuf::new()),
+            Command::OpenGcode(PathBuf::new()),
             Command::RepairMesh { index: 0, fill: true },
             Command::RepairMesh { index: 0, fill: false },
             Command::SplitParts { index: 0 },
@@ -1928,6 +1961,23 @@ mesh = AAAA
         let mut bad = SettingZone::new("bad");
         bad.objects = vec![9];
         assert!(s.execute(Command::AddZone(Box::new(bad))).is_err());
+    }
+
+    #[test]
+    fn a_gcode_file_opens_for_preview() {
+        let Some(mut s) = session_with(cube(20.0)) else { return };
+        assert!(matches!(s.execute(Command::Slice), Ok(Outcome::Sliced { .. })));
+        let path =
+            std::env::temp_dir().join(format!("slicecraft-open-{}.gcode", std::process::id()));
+        assert!(s.execute(Command::ExportGcode(path.clone())).is_ok());
+        let made = s.slice_result().map_or(0, |o| o.layers.len());
+        let mut t = Session::new();
+        let r = t.execute(Command::OpenGcode(path.clone()));
+        assert!(matches!(r, Ok(Outcome::GcodeOpened { layers, .. }) if layers == made), "{r:?}");
+        assert!(t.slice_result().is_some_and(|o| {
+            o.layers.iter().any(|l| l.paths.iter().any(|p| p.kind == PathKind::OuterPerimeter))
+        }));
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

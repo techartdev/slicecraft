@@ -604,6 +604,15 @@ impl SliceCraftApp {
                         ));
                     }
                     Outcome::Saved { path } => self.info(format!("Saved {}.", path.display())),
+                    Outcome::GcodeOpened { path, layers } => {
+                        self.mode = Mode::Preview;
+                        self.preview.first_layer = 0;
+                        self.preview.last_layer = layers.saturating_sub(1);
+                        self.info(format!(
+                            "Opened {} for preview: {layers} layers.",
+                            path.display()
+                        ));
+                    }
                     Outcome::SupportPreviewed { layers, volume } => {
                         self.info(format!(
                             "Support on {layers} layers, about {:.1} cm³.",
@@ -642,6 +651,16 @@ impl SliceCraftApp {
             .pick_files()
         {
             self.import_paths(paths);
+        }
+    }
+
+    pub(crate) fn open_gcode_dialog(&mut self) {
+        if let Some(path) = rfd::FileDialog::new()
+            .set_title("Open G-code for preview")
+            .add_filter("G-code", &["gcode", "gco", "g"])
+            .pick_file()
+        {
+            self.run(Command::OpenGcode(path));
         }
     }
 

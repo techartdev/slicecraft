@@ -270,7 +270,7 @@ pub fn viewport(app: &mut SliceCraftApp, ui: &mut Ui) {
 fn overlays(app: &mut SliceCraftApp, ui: &mut Ui, rect: Rect, head: Option<Vec3>) {
     let painter = ui.painter_at(rect);
     let faint = Color32::from_rgb(0x9a, 0xa0, 0xa8);
-    if app.session.document().objects.is_empty() {
+    if app.session.document().objects.is_empty() && app.mode == Mode::Prepare {
         painter.text(
             rect.center(),
             Align2::CENTER_CENTER,
