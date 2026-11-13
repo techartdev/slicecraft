@@ -18,6 +18,7 @@ pub mod fff;
 pub mod gcode;
 pub mod mesh_in;
 pub mod project;
+pub mod threemf;
 
 use std::fmt;
 
@@ -36,6 +37,8 @@ pub enum IoError {
     NotStl,
     UnknownFormat,
     Unsupported(&'static str),
+    /// A file whose structure is broken (or uses something not handled).
+    Damaged(&'static str),
     TooLarge,
     NonFinite,
     /// A project file that cannot be read; `line` is 1-based.
@@ -53,9 +56,10 @@ impl fmt::Display for IoError {
             IoError::NotUtf8 => f.write_str("the file is not UTF-8 text"),
             IoError::NotStl => f.write_str("not an STL file"),
             IoError::UnknownFormat => {
-                f.write_str("not a model format SliceCraft reads (STL or OBJ)")
+                f.write_str("not a model format SliceCraft reads (STL, OBJ or 3MF)")
             }
             IoError::Unsupported(what) => write!(f, "{what} import is not implemented yet"),
+            IoError::Damaged(what) => f.write_str(what),
             IoError::TooLarge => {
                 f.write_str("the file declares more triangles than SliceCraft accepts")
             }

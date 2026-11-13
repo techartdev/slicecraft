@@ -30,6 +30,7 @@ pub enum MeshFormat {
     StlBinary,
     StlAscii,
     Obj,
+    ThreeMf,
 }
 
 impl MeshFormat {
@@ -38,6 +39,7 @@ impl MeshFormat {
             MeshFormat::StlBinary => "binary STL",
             MeshFormat::StlAscii => "ASCII STL",
             MeshFormat::Obj => "OBJ",
+            MeshFormat::ThreeMf => "3MF",
         }
     }
 }
@@ -48,7 +50,16 @@ pub fn read_mesh(bytes: &[u8], extension: Option<&str>) -> Result<Imported, IoEr
     let ext = extension.map(str::to_ascii_lowercase);
     match ext.as_deref() {
         Some("obj") => read_obj(bytes),
-        Some("3mf") => Err(IoError::Unsupported("3MF")),
+        Some("3mf") => {
+            // one mesh: every model of the package together
+            let models = crate::threemf::read_3mf(bytes)?;
+            let mut tris = Vec::new();
+            for (_, m) in models {
+                tris.extend_from_slice(m.triangles());
+            }
+            let mesh = Mesh::new(tris).map_err(|_| IoError::NonFinite)?;
+            Ok(Imported { mesh, skipped_facets: 0, format: MeshFormat::ThreeMf })
+        }
         Some("stl") | None => read_stl(bytes),
         Some(_) => read_stl(bytes).map_err(|_| IoError::UnknownFormat),
     }
@@ -308,7 +319,10 @@ mod tests {
     fn junk_is_refused() {
         assert_eq!(read_stl(b"\x00\x01\x02").err(), Some(IoError::NotStl));
         assert_eq!(read_ascii_stl(b"solid \xff").err(), Some(IoError::NotUtf8));
-        assert_eq!(read_mesh(b"PK\x03\x04", Some("3mf")).err(), Some(IoError::Unsupported("3MF")));
+        assert_eq!(
+            read_mesh(b"PK\x03\x04", Some("3mf")).err(),
+            Some(IoError::Damaged("the 3MF package is damaged or uses an unknown ZIP feature"))
+        );
     }
 
     #[test]

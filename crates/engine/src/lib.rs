@@ -85,7 +85,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     planned("merge-models", "Merge Models"),
     planned("group-models", "Group Models"),
     planned("model-role", "Use Model as Support or Cutter"),
-    planned("export-models", "Export Models (STL, OBJ, 3MF)"),
+    ready("export-models", "Export Models (STL, OBJ, 3MF)"),
     // projects and profiles
     ready("profile", "Print Settings"),
     ready("load-profile", "Load Profile"),
@@ -194,6 +194,8 @@ pub enum Command {
     Slice,
     /// Write G-code to a file, slicing first if the slice is stale.
     ExportGcode(PathBuf),
+    /// Write the visible models, as placed, to an STL, OBJ or 3MF file.
+    ExportModels(PathBuf),
 }
 
 impl Command {
@@ -224,6 +226,7 @@ impl Command {
             Command::PreviewSupport => "support-preview",
             Command::Slice => "slice",
             Command::ExportGcode(_) => "export-gcode",
+            Command::ExportModels(_) => "export-models",
         }
     }
 }
@@ -681,6 +684,25 @@ impl Session {
                 let out = self.slice_now()?;
                 Ok(Outcome::Sliced { layers: out.layers.len(), stats: out.stats.clone() })
             }
+            Command::ExportModels(path) => {
+                let mut models = Vec::new();
+                for o in self.doc.objects.iter().filter(|o| o.visible) {
+                    models.push((o.name.clone(), o.world_mesh()?));
+                }
+                if models.is_empty() {
+                    return Err(EngineError::NothingToSlice);
+                }
+                let ext = path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase);
+                let bytes = match ext.as_deref() {
+                    Some("obj") => slicecraft_io::threemf::write_obj(&models),
+                    Some("3mf") => slicecraft_io::threemf::write_3mf(&models),
+                    _ => slicecraft_io::threemf::write_stl(&models),
+                };
+                std::fs::write(&path, &bytes).map_err(|e| {
+                    EngineError::File(format!("cannot write {}: {e}", path.display()))
+                })?;
+                Ok(Outcome::Exported { path, bytes: bytes.len() })
+            }
             Command::ExportGcode(path) => {
                 let out = match self.slice_result() {
                     Some(out) => out,
@@ -716,6 +738,31 @@ impl Session {
         bytes: &[u8],
         extension: Option<&str>,
     ) -> Result<Outcome, EngineError> {
+        // a 3MF package can hold several models: each becomes its own
+        if extension.is_some_and(|e| e.eq_ignore_ascii_case("3mf")) {
+            let models = slicecraft_io::threemf::read_3mf(bytes)?;
+            self.checkpoint(None);
+            let mut last = 0;
+            let mut triangles = 0;
+            let several = models.len() > 1;
+            for (model_name, mesh) in models {
+                triangles += mesh.len();
+                let n = if several { format!("{name} - {model_name}") } else { name.clone() };
+                last = self.doc.add(SceneObject::new(n, mesh))?;
+            }
+            if self.doc.objects.len() == 1 {
+                self.doc.center_object(last)?;
+            } else {
+                self.doc.arrange(ARRANGE_GAP)?;
+            }
+            self.revision += 1;
+            return Ok(Outcome::Imported {
+                index: last,
+                triangles,
+                skipped_facets: 0,
+                format: MeshFormat::ThreeMf,
+            });
+        }
         let imported = read_mesh(bytes, extension)?;
         if imported.mesh.is_empty() {
             return Err(EngineError::Io(IoError::UnknownFormat));
@@ -860,6 +907,7 @@ mod tests {
             Command::Slice,
             Command::ExportGcode(PathBuf::new()),
             Command::Supports(true),
+            Command::ExportModels(PathBuf::new()),
             Command::AddSupportEdit(SupportEdit::columns(
                 SupportEditKind::Block,
                 (0.0, 0.0),
@@ -1537,6 +1585,29 @@ mesh = AAAA
             matches!((before, after), (Some(a), Some(b)) if (a - b - 0.2).abs() < 0.02),
             "{before:?} {after:?}"
         );
+    }
+
+    #[test]
+    fn models_export_and_3mf_imports_as_separate_models() {
+        let Some(mut s) = session_with(cube(10.0)) else { return };
+        let bytes = stl_of(&cuboid(Vec3::ZERO, Vec3::new(5.0, 8.0, 3.0)).unwrap_or_default());
+        assert!(
+            s.execute(Command::Import { name: "b".into(), bytes, extension: Some("stl".into()) })
+                .is_ok()
+        );
+        let dir = std::env::temp_dir();
+        for ext in ["stl", "obj", "3mf"] {
+            let path = dir.join(format!("slicecraft-export-{}.{ext}", std::process::id()));
+            let r = s.execute(Command::ExportModels(path.clone()));
+            assert!(matches!(r, Ok(Outcome::Exported { .. })), "{ext}: {r:?}");
+            let mut t = Session::new();
+            assert!(t.execute(Command::ImportFile(path.clone())).is_ok(), "{ext} reads back");
+            let want = if ext == "3mf" { 2 } else { 1 };
+            assert_eq!(t.document().objects.len(), want, "{ext}");
+            let tris: usize = t.document().objects.iter().map(|o| o.mesh.len()).sum();
+            assert_eq!(tris, 24, "{ext}");
+            let _ = std::fs::remove_file(&path);
+        }
     }
 
     #[test]

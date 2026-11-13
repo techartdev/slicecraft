@@ -73,7 +73,9 @@ pub fn menu_bar(app: &mut SliceCraftApp, ui: &mut Ui) {
                 app.open_import_dialog();
             }
             item(app, ui, "open-gcode", "", true);
-            item(app, ui, "export-models", "", true);
+            if item(app, ui, "export-models", "", has_models) {
+                app.export_models_dialog();
+            }
             ui.separator();
             if item(app, ui, "load-profile", "", true) {
                 app.load_profile_dialog();

@@ -2726,6 +2726,7 @@ dependencies = [
 name = "slicecraft-io"
 version = "0.0.1"
 dependencies = [
+ "miniz_oxide 0.8.9",
  "roxmltree",
  "slicecraft-doc",
  "slicecraft-geom",

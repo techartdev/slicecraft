@@ -627,11 +627,24 @@ impl SliceCraftApp {
     pub(crate) fn open_import_dialog(&mut self) {
         if let Some(paths) = rfd::FileDialog::new()
             .set_title("Import models")
-            .add_filter("3D models", &["stl", "obj"])
+            .add_filter("3D models", &["stl", "obj", "3mf"])
             .add_filter("All files", &["*"])
             .pick_files()
         {
             self.import_paths(paths);
+        }
+    }
+
+    pub(crate) fn export_models_dialog(&mut self) {
+        if let Some(path) = rfd::FileDialog::new()
+            .set_title("Export models")
+            .add_filter("STL", &["stl"])
+            .add_filter("3MF", &["3mf"])
+            .add_filter("OBJ", &["obj"])
+            .set_file_name("models.stl")
+            .save_file()
+        {
+            self.run(Command::ExportModels(path));
         }
     }
 

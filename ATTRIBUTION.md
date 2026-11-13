@@ -27,9 +27,10 @@ below.
 | `eframe` / `egui` 0.35 | `ui-egui`: the window | MIT OR Apache-2.0 |
 | `rfd` 0.17 | `ui-egui`: native file dialogs | MIT |
 | `roxmltree` 0.21 (+ `memchr`) | `io`: reading Simplify3D `.fff` profiles | MIT OR Apache-2.0 (`memchr`: Unlicense OR MIT, taken as MIT) |
+| `miniz_oxide` 0.8 (+ `adler2`) | `io`: inflating 3MF packages (already in the window's tree) | MIT OR Zlib OR Apache-2.0, taken as MIT (`adler2`: 0BSD OR MIT OR Apache-2.0, taken as MIT) |
 
 Everything below the window (`geom` … `engine`, `mcp`, the CLI) depends on
-`i_overlay` and `roxmltree` only. The exceptions are confined to the window (`ui-egui` and the
+`i_overlay`, `roxmltree` and `miniz_oxide` only. The exceptions are confined to the window (`ui-egui` and the
 `slicecraft` app).
 
 ### Dependency licence exceptions

@@ -11,8 +11,8 @@ the architecture document, not to a quieter line here.
 
 ## Import and model handling
 
-- **3MF** — not read (ZIP + model XML + units + transforms). Refused with "not
-  implemented yet".
+- **3MF** — read (ZIP and ZIP64 packages, units, build items, components with
+  transforms; one model per build item). Colours, materials and slice data are ignored.
 - **STEP / IGES** — not planned; 3MF and mesh repair cover the same need.
 - **Multi-object files** — one object per file; an OBJ with several groups becomes one
   object.
@@ -23,7 +23,7 @@ the architecture document, not to a quieter line here.
   chains with gaps under 1 mm) and reports what it drops.
 - **Placement** — no lay-flat, no grouping, no split or merge. Arrange is a row
   packer, not a nesting algorithm.
-- **No model export.**
+- **Model export** — STL (binary), OBJ and 3MF of the visible models as placed.
 
 ## Geometry
 
