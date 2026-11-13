@@ -37,7 +37,7 @@ the extrusion model, the estimates and support removal, this is not a release �
 | 20 mm cube, defaults | 99 layers, 1.17 m filament, ≈ 14 min (no acceleration) | measured, uncalibrated |
 | Filament vs an independent area estimate | within ±10% on the 20 mm cube | measured (`engine::tests::cube_filament_matches_hand_estimate`) |
 | 20k-triangle torus, release build | sliced in ≈ 0.4 s | measured on one Windows machine |
-| Side by side with Simplify3D, same settings | 10 real jobs: layers equal, filament within 0.3–3.6 %, 4–14 % less time by one estimator, retractions −6 % to +53 % (median +4 %) ([R10](docs/research/10-s3d-comparison.md)) | measured, not printed |
+| Side by side with Simplify3D, same settings | 10 real jobs: layers equal, filament −3.6 % to +1.9 %, 4–13 % less time by one estimator, retractions −8 % to +53 % (median +4 %) ([R10](docs/research/10-s3d-comparison.md)) | measured, not printed |
 | Feature parity with the target | every capability and its status is in [research/02-feature-inventory.md](docs/research/02-feature-inventory.md) | — |
 | Remaining to beta | real-print calibration and fixes: ≈ 20–60 h | estimated |
 | Remaining to 1.0 | packaging, wasm, fuzzing, UI polish: ≈ 80–160 h | estimated |

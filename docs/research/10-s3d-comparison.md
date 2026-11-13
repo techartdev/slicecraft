@@ -26,14 +26,14 @@ operator's customers' jobs.
 |---|---|---|---|---|
 | 1 | 7 = 7 | 5789 → 5756 (−0.6 %) | 194 → 297 | 2388 → 2284 (−4.4 %) |
 | 2 | 7 = 7 | 6271 → 6228 (−0.7 %) | 280 → 351 | 2639 → 2509 (−4.9 %) |
-| 3 | 7 = 7 | 3403 → 3375 (−0.8 %) | 448 → 516 | 1674 → 1542 (−7.9 %) |
+| 3 | 7 = 7 | 3403 → 3378 (−0.7 %) | 448 → 515 | 1674 → 1540 (−8.0 %) |
 | 4 | 7 = 7 | 4252 → 4225 (−0.6 %) | 572 → 561 | 2067 → 1931 (−6.6 %) |
-| 5 | 107 = 107 | 2186 → 2177 (−0.4 %) | 1146 → 1185 | 1408 → 1292 (−8.2 %) |
-| 6 | 90 = 90 | 2835 → 2794 (−1.4 %) | 936 → 950 | 1584 → 1410 (−11.0 %) |
-| 7 | 7 = 7 | 2953 → 2917 (−1.2 %) | 1023 → 959 | 1624 → 1472 (−9.4 %) |
+| 5 | 107 = 107 | 2186 → 2181 (−0.2 %) | 1146 → 1197 | 1408 → 1294 (−8.1 %) |
+| 6 | 90 = 90 | 2835 → 2800 (−1.2 %) | 936 → 958 | 1584 → 1413 (−10.8 %) |
+| 7 | 7 = 7 | 2953 → 2934 (−0.6 %) | 1023 → 953 | 1624 → 1479 (−8.9 %) |
 | 8 | 8 = 8 | 4652 → 4483 (−3.6 %) | 127 → 140 | 1939 → 1774 (−8.5 %) |
-| 9 | 6 = 6 | 3004 → 2995 (−0.3 %) | 1768 → 1682 | 2026 → 1739 (−14.2 %) |
-| 10 | 7 = 7 | 2744 → 2711 (−1.2 %) | 409 → 395 | 1407 → 1275 (−9.4 %) |
+| 9 | 6 = 6 | 3004 → 3062 (+1.9 %) | 1768 → 1634 | 2026 → 1762 (−13.0 %) |
+| 10 | 7 = 7 | 2744 → 2715 (−1.1 %) | 409 → 397 | 1407 → 1276 (−9.3 %) |
 
 Earlier (R5, R6): on a 350-layer crown with support, support filament 676 vs 682 mm,
 outer-wall filament 1641 vs 1642 mm, retractions 2606 vs 4384.
@@ -82,9 +82,15 @@ must have something within 1 mm below it (bridges excepted).
 
 ## Evidence and inference
 
-- **Evidence:** layer counts equal on every job; filament within 0.3–3.6 %; by the
-  same estimator SliceCraft's paths take 4–14 % less time; retractions 6 % fewer to
-  53 % more (fewer on 4 of 10 jobs, median about +4 %).
+- **Evidence:** layer counts equal on every job; filament from 3.6 % less to 1.9 %
+  more; by the same estimator SliceCraft's paths take 4–13 % less time; retractions
+  8 % fewer to 53 % more (fewer on 4 of 10 jobs, median about +4 %).
+- **Thin walls (crown with support, 350 layers):** outer walls equal (1641 vs
+  1641 mm of filament); walls plus gap fill within 4 % (4191 vs 4370) after gaps wider
+  than a line are filled across instead of with one line down the middle (they were
+  10 % short); support about 11 % heavier, with 40 % fewer retractions. Printing gap
+  fill together with its outline's walls was tried twice and raised retractions, so
+  it was left out.
 - **Inference:** equal filament with equal settings means the extrusion model and
   the fill areas agree. The time difference comes from fewer and shorter travels; it
   is an estimate, not a measured print. More retractions on lettering come mainly from

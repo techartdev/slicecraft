@@ -527,6 +527,16 @@ pub fn fill_narrow_with(
             v1 = v1.max(v);
         }
         let across = v1 - v0;
+        // a gap wider than a line is filled across, line by line, so its whole
+        // width gets plastic; one line down its middle would leave it hollow
+        let perimeter: f64 =
+            ring.iter().zip(ring.iter().cycle().skip(1)).map(|(a, b)| a.distance(*b)).sum();
+        let mean_width = if perimeter > 0.0 { 2.0 * poly.area() / perimeter } else { 0.0 };
+        if mean_width > 1.2 * width {
+            let lines = crate::paths::line_infill(&one, width, angle + PI / 2.0, kind)?;
+            out.extend(crate::paths::zigzag(lines, &one, width * 3.0));
+            continue;
+        }
         let lines = if across <= max_single.max(width) {
             1
         } else {
@@ -546,6 +556,33 @@ pub fn fill_narrow_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_gap_wider_than_a_line_is_filled_across() {
+        // 10 mm long, 0.9 mm wide: twice a 0.45 mm line; one line down the
+        // middle would leave half of it empty
+        let strip = Region::from_loops(&[vec![
+            Point2::new(0.0, 0.0),
+            Point2::new(10.0, 0.0),
+            Point2::new(10.0, 0.9),
+            Point2::new(0.0, 0.9),
+        ]])
+        .unwrap_or_default();
+        let paths = fill_narrow_with(&strip, 0.45, 0.9, PathKind::GapFill).unwrap_or_default();
+        let length: f64 = paths.iter().map(ToolPath::length).sum();
+        // about area / width = 20 mm of line
+        assert!(length > 15.0, "{length} mm of line for a 9 mm² gap");
+        // a strip one line wide still gets a single line along it
+        let thin = Region::from_loops(&[vec![
+            Point2::new(0.0, 0.0),
+            Point2::new(10.0, 0.0),
+            Point2::new(10.0, 0.45),
+            Point2::new(0.0, 0.45),
+        ]])
+        .unwrap_or_default();
+        let one = fill_narrow_with(&thin, 0.45, 0.9, PathKind::GapFill).unwrap_or_default();
+        assert_eq!(one.len(), 1);
+    }
 
     fn square(s: f64) -> Region {
         Region::from_loops(&[vec![
