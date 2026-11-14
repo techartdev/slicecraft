@@ -36,7 +36,7 @@ command that the window, a scriptable command line and AI agents (over MCP) shar
 | ![Infill of a cube](docs/images/cube-infill.jpg) | |
 | Stepping through a job: walls, infill and the nozzle | |
 
-The vase in the screenshots is *Spiral vase* by JJ76, used under CC BY (see
+The vase in the screenshots is *Spiral vase* by JJ76, used under CC BY 4.0 (see
 [ATTRIBUTION.md](ATTRIBUTION.md)).
 
 ## What it does
