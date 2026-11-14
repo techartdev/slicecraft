@@ -747,23 +747,21 @@ fn summary_cards(app: &mut SliceCraftApp, ui: &mut Ui) {
     let s = &app.session.document().settings;
     let g = out.stats.gcode;
     let area = std::f64::consts::PI * s.filament_diameter.powi(2) / 4.0;
-    // extent of the toolpaths, and extruded length by feature
-    let mut lo = Vec3::new(f64::INFINITY, f64::INFINITY, f64::INFINITY);
-    let mut hi = Vec3::new(f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
-    let mut by_kind: BTreeMap<&'static str, (f64, Color32)> = BTreeMap::new();
-    if let Some((_, layers)) = &app.preview_cache {
-        for seg in layers.iter().flat_map(|l| l.segs.iter()) {
-            if let SegKind::Path(k) = seg.kind {
-                for p in [seg.a, seg.b] {
-                    lo = Vec3::new(lo.x.min(p.x), lo.y.min(p.y), lo.z.min(p.z));
-                    hi = Vec3::new(hi.x.max(p.x), hi.y.max(p.y), hi.z.max(p.z));
-                }
-                let e = by_kind.entry(k.label()).or_insert((0.0, scene::kind_color(k)));
-                e.0 += (seg.b - seg.a).length();
-            }
-        }
+    // extent of the toolpaths, and extruded length by feature: measured once
+    // per slice, not every frame
+    let key = app.preview_cache.as_ref().map(|(k, _)| *k);
+    let fresh = match (&app.summary_cache, key) {
+        (Some(c), Some(k)) => c.key != k,
+        (None, Some(_)) => true,
+        _ => false,
+    };
+    if fresh && let Some((k, layers)) = &app.preview_cache {
+        app.summary_cache = Some(measure(*k, layers));
     }
-    let size = if lo.x.is_finite() { hi - lo } else { Vec3::ZERO };
+    let (size, hi, by_kind) = match &app.summary_cache {
+        Some(c) if Some(c.key) == key => (c.size, c.top, c.by_kind.clone()),
+        _ => (Vec3::ZERO, Vec3::ZERO, BTreeMap::new()),
+    };
     let layers = out.layers.len();
     let warnings = out.stats.warnings.clone();
     let models = app.session.document().objects.iter().filter(|o| o.visible).count();
@@ -864,6 +862,32 @@ fn summary_cards(app: &mut SliceCraftApp, ui: &mut Ui) {
                 });
         });
     });
+}
+
+/// Facts about a slice's toolpaths for the summary, measured once.
+pub struct Measured {
+    pub key: usize,
+    pub size: Vec3,
+    pub top: Vec3,
+    pub by_kind: BTreeMap<&'static str, (f64, Color32)>,
+}
+
+fn measure(key: usize, layers: &[scene::PreviewLayer]) -> Measured {
+    let mut lo = Vec3::new(f64::INFINITY, f64::INFINITY, f64::INFINITY);
+    let mut hi = Vec3::new(f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
+    let mut by_kind: BTreeMap<&'static str, (f64, Color32)> = BTreeMap::new();
+    for seg in layers.iter().flat_map(|l| l.segs.iter()) {
+        if let SegKind::Path(k) = seg.kind {
+            for p in [seg.a, seg.b] {
+                lo = Vec3::new(lo.x.min(p.x), lo.y.min(p.y), lo.z.min(p.z));
+                hi = Vec3::new(hi.x.max(p.x), hi.y.max(p.y), hi.z.max(p.z));
+            }
+            let e = by_kind.entry(k.label()).or_insert((0.0, scene::kind_color(k)));
+            e.0 += (seg.b - seg.a).length();
+        }
+    }
+    let size = if lo.x.is_finite() { hi - lo } else { Vec3::ZERO };
+    Measured { key, size, top: if hi.z.is_finite() { hi } else { Vec3::ZERO }, by_kind }
 }
 
 /// Bottom bar in preview mode: playback and the layer range.

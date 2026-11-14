@@ -4,6 +4,7 @@
 use crate::app::{Mode, SliceCraftApp, Tool};
 use crate::camera::{Frame, ViewPreset, Viewport};
 use crate::gizmo::{self, Gizmo, GizmoDrag, Handle};
+use crate::gpu;
 use crate::i18n::tr;
 use crate::icons::{self, Icon};
 use crate::scene::{self, Builder, Coloring, ModelStyle, PreviewStyle};
@@ -42,6 +43,85 @@ fn pick(app: &SliceCraftApp, f: &Frame, p: Pos2) -> Option<usize> {
         }
     }
     best.map(|(_, i)| i)
+}
+
+/// Draw the bed, models and toolpaths on the graphics card, under
+/// everything else. False when the processor has to draw them instead: no
+/// graphics card, turned off in Preferences, or the card refused the work
+/// (which turns it off for the session, with a note).
+fn draw_on_gpu(app: &mut SliceCraftApp, ui: &Ui, frame: &Frame, rect: Rect) -> bool {
+    if !app.prefs.gpu_view || rect.width() < 2.0 || rect.height() < 2.0 {
+        return false;
+    }
+    let Some(gpu) = app.gpu.as_mut() else { return false };
+    let doc = app.session.document();
+    let none = std::collections::BTreeSet::new();
+    let no_support: Vec<scene::Prism> = Vec::new();
+    let support = match (&app.support_view, app.show_support) {
+        (Some((_, prisms)), true) => prisms,
+        _ => &no_support,
+    };
+    let models = app.geometry.as_ref().and_then(|(revision, geometry)| match app.mode {
+        Mode::Prepare if !app.prefs.wireframe => Some(gpu::Models {
+            geometry,
+            revision: *revision,
+            selected: &app.selected,
+            support,
+            cut_z: app.section,
+            ghost: false,
+        }),
+        Mode::Preview if app.preview.ghost_model => Some(gpu::Models {
+            geometry,
+            revision: *revision,
+            selected: &none,
+            support: &[],
+            cut_z: None,
+            ghost: true,
+        }),
+        _ => None,
+    });
+    let p = &app.preview;
+    let paths = match (app.mode, &app.preview_cache) {
+        (Mode::Preview, Some((key, layers))) => Some(gpu::Paths {
+            layers,
+            key: *key,
+            settings: &doc.settings,
+            first_layer: match p.only_n {
+                Some(n) => p.last_layer.saturating_sub(n.saturating_sub(1)),
+                None => p.first_layer,
+            },
+            last_layer: p.last_layer,
+            moves_on_last: if p.by_line { Some(p.line_cursor) } else { None },
+            coloring: p.coloring,
+            filter: p.filter,
+            show_travel: p.show_travel,
+        }),
+        _ => None,
+    };
+    let scene = gpu::Scene {
+        frame,
+        size: rect.size(),
+        pixels_per_point: ui.ctx().pixels_per_point(),
+        dark: app.prefs.dark,
+        bed: (doc.bed.width, doc.bed.depth, doc.bed.height),
+        round_bed: doc.settings.bed_shape == slicecraft_doc::BedShape::Circle,
+        bed_style: app.prefs.bed,
+        models,
+        paths,
+    };
+    match gpu.render(&scene) {
+        Ok(id) => {
+            let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+            ui.painter_at(rect).image(id, rect, uv, Color32::WHITE);
+            true
+        }
+        Err(e) => {
+            app.gpu = None;
+            app.error(format!("{} {e}", tr("The 3D view moved to the processor:")));
+            app.gpu_note = Some(e);
+            false
+        }
+    }
 }
 
 /// The handles of the selected model, when the active tool has handles.
@@ -281,13 +361,22 @@ pub fn viewport(app: &mut SliceCraftApp, ui: &mut Ui) {
         app.fit_view();
     }
 
-    // draw
+    // draw: on the graphics card when it can, else on the processor
     let painter = ui.painter_at(rect);
-    crate::theme::paint_backdrop(&painter, rect, app.prefs.dark);
+    let on_gpu = draw_on_gpu(app, ui, &frame, rect);
     let bed = app.session.document().bed.clone();
     let mut b = Builder::default();
-    scene::bed(&mut b, &frame, (bed.width, bed.depth, bed.height), app.prefs.bed, app.prefs.dark);
-    if app.session.document().settings.bed_shape == slicecraft_doc::BedShape::Circle {
+    if !on_gpu {
+        crate::theme::paint_backdrop(&painter, rect, app.prefs.dark);
+        scene::bed(
+            &mut b,
+            &frame,
+            (bed.width, bed.depth, bed.height),
+            app.prefs.bed,
+            app.prefs.dark,
+        );
+    }
+    if !on_gpu && app.session.document().settings.bed_shape == slicecraft_doc::BedShape::Circle {
         let r = bed.width / 2.0;
         let n = 96;
         for k in 0..n {
@@ -306,7 +395,25 @@ pub fn viewport(app: &mut SliceCraftApp, ui: &mut Ui) {
     let mut dial_label: Option<(Pos2, f64)> = None;
     match app.mode {
         Mode::Preview => {
-            if let Some((_, layers)) = &app.preview_cache {
+            if let Some((_, layers)) = &app.preview_cache
+                && on_gpu
+            {
+                let p = &app.preview;
+                let cursor = if p.by_line { Some(p.line_cursor) } else { None };
+                if let Some((h, retractions)) = scene::nozzle_at(layers, p.last_layer, cursor) {
+                    head = Some(h);
+                    if p.show_retractions {
+                        for r in retractions {
+                            if let Some(q) = frame.project(*r) {
+                                b.dot(Pos2::new(q.x as f32, q.y as f32), 3.5, scene::RETRACTION);
+                            }
+                        }
+                    }
+                    if p.show_toolhead {
+                        scene::toolhead(&mut b, &frame, h);
+                    }
+                }
+            } else if let Some((_, layers)) = &app.preview_cache {
                 if app.preview.ghost_model
                     && let Some((_, geo)) = &app.geometry
                 {
@@ -357,14 +464,29 @@ pub fn viewport(app: &mut SliceCraftApp, ui: &mut Ui) {
                 _ => &no_support,
             };
             if let Some((_, geo)) = &app.geometry {
-                let style = ModelStyle {
-                    selected: &app.selected,
-                    support,
-                    alpha: 1.0,
-                    cut_z: app.section,
-                    wireframe: app.prefs.wireframe,
-                };
-                scene::models(&mut b, &frame, geo, style);
+                if on_gpu {
+                    if app.prefs.wireframe {
+                        let style = ModelStyle {
+                            selected: &app.selected,
+                            support: &[],
+                            alpha: 1.0,
+                            cut_z: app.section,
+                            wireframe: true,
+                        };
+                        scene::models(&mut b, &frame, geo, style);
+                    } else if let Some(cut) = app.section {
+                        scene::section_outline(&mut b, &frame, geo, cut);
+                    }
+                } else {
+                    let style = ModelStyle {
+                        selected: &app.selected,
+                        support,
+                        alpha: 1.0,
+                        cut_z: app.section,
+                        wireframe: app.prefs.wireframe,
+                    };
+                    scene::models(&mut b, &frame, geo, style);
+                }
             }
             let doc = app.session.document();
             let top = doc.bounds();

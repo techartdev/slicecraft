@@ -552,6 +552,41 @@ pub fn models(out: &mut Builder, f: &Frame, geo: &ModelGeometry, style: ModelSty
     }
 }
 
+/// The outline a section view cuts through the visible models, for the GPU
+/// view (which clips the models itself).
+pub fn section_outline(out: &mut Builder, f: &Frame, geo: &ModelGeometry, cut: f64) {
+    for o in geo.objects.iter().filter(|o| o.visible) {
+        if o.bounds.is_empty() || o.bounds.min().z > cut || o.bounds.max().z < cut {
+            continue;
+        }
+        for (v, _) in &o.triangles {
+            let lo = v[0].z.min(v[1].z).min(v[2].z);
+            let hi = v[0].z.max(v[1].z).max(v[2].z);
+            if lo > cut || hi <= cut {
+                continue;
+            }
+            if let (_, Some((a, b))) = clip_below(v, cut)
+                && let Some((pa, pb)) = f.project_segment(a, b)
+            {
+                out.line(pos(pa), pos(pb), 2.5, SECTION_OUTLINE);
+            }
+        }
+    }
+}
+
+/// Where the nozzle is after the moves shown on `last` (all of them, or the
+/// first `moves_on_last`), and the retraction marks of that layer.
+pub fn nozzle_at(
+    layers: &[PreviewLayer],
+    last: usize,
+    moves_on_last: Option<usize>,
+) -> Option<(Vec3, &[Vec3])> {
+    let layer = layers.get(last.min(layers.len().checked_sub(1)?))?;
+    let n = moves_on_last.unwrap_or(usize::MAX).min(layer.segs.len());
+    let head = n.checked_sub(1).and_then(|i| layer.segs.get(i)).map(|s| s.b)?;
+    Some((head, &layer.retractions))
+}
+
 /// The colour of the outline a section view cuts through the models.
 pub const SECTION_OUTLINE: Color32 = Color32::from_rgb(0xff, 0xd8, 0x4a);
 

@@ -202,6 +202,46 @@ impl OrbitCamera {
 }
 
 impl Frame {
+    /// The same projection as [`Frame::project`], as a clip-space matrix for
+    /// the GPU (column-major, for WGSL). `width` and `height` are the view's
+    /// size in the units `project` returns. Depth is reversed: nearer is
+    /// larger, 1 at the near plane, towards 0 far away.
+    pub fn clip_matrix(&self, width: f64, height: f64) -> [f32; 16] {
+        let (hw, hh) = ((width / 2.0).max(1e-6), (height / 2.0).max(1e-6));
+        let (r, u, fw, e) = (self.right, self.up, self.forward, self.eye);
+        // rows of the matrix: clip = M · (x, y, z, 1)
+        let rows: [[f64; 4]; 4] = match self.ortho {
+            Some(k) => {
+                let (sx, sy) = (k / hw, k / hh);
+                let far = ORTHO_BACKOFF * 4.0;
+                [
+                    [r.x * sx, r.y * sx, r.z * sx, -r.dot(e) * sx],
+                    [u.x * sy, u.y * sy, u.z * sy, -u.dot(e) * sy],
+                    [-fw.x / far, -fw.y / far, -fw.z / far, 1.0 + fw.dot(e) / far],
+                    [0.0, 0.0, 0.0, 1.0],
+                ]
+            }
+            None => {
+                let (sx, sy) = (self.focal / hw, self.focal / hh);
+                [
+                    [r.x * sx, r.y * sx, r.z * sx, -r.dot(e) * sx],
+                    [u.x * sy, u.y * sy, u.z * sy, -u.dot(e) * sy],
+                    [0.0, 0.0, 0.0, NEAR],
+                    [fw.x, fw.y, fw.z, -fw.dot(e)],
+                ]
+            }
+        };
+        let mut m = [0.0f32; 16];
+        for (row, values) in rows.iter().enumerate() {
+            for (col, v) in values.iter().enumerate() {
+                if let Some(slot) = m.get_mut(col * 4 + row) {
+                    *slot = *v as f32;
+                }
+            }
+        }
+        m
+    }
+
     /// The camera's right, up and forward directions.
     pub fn axes(&self) -> (Vec3, Vec3, Vec3) {
         (self.right, self.up, self.forward)
@@ -312,6 +352,46 @@ impl Frame {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Screen position of `p` through `clip_matrix`, as `project` gives it.
+    fn through_matrix(f: &Frame, vp: Viewport, p: Vec3) -> (f64, f64, f64) {
+        let m = f.clip_matrix(vp.width, vp.height);
+        let at = |row: usize, col: usize| f64::from(m.get(col * 4 + row).copied().unwrap_or(0.0));
+        let c: Vec<f64> =
+            (0..4).map(|r| at(r, 0) * p.x + at(r, 1) * p.y + at(r, 2) * p.z + at(r, 3)).collect();
+        let (x, y, z) = (c[0] / c[3], c[1] / c[3], c[2] / c[3]);
+        (vp.left + vp.width / 2.0 * (1.0 + x), vp.top + vp.height / 2.0 * (1.0 - y), z)
+    }
+
+    #[test]
+    fn the_gpu_matrix_projects_like_the_cpu() {
+        let vp = Viewport { left: 10.0, top: 20.0, width: 900.0, height: 600.0 };
+        for ortho in [false, true] {
+            let mut cam = OrbitCamera::for_bed(220.0, 220.0, 250.0);
+            cam.ortho = ortho;
+            cam.orbit(0.3, -0.2);
+            let f = cam.frame(vp);
+            for p in [
+                Vec3::new(110.0, 110.0, 0.0),
+                Vec3::new(10.0, 200.0, 30.0),
+                Vec3::new(200.0, 15.0, 120.0),
+            ] {
+                let Some(cpu) = f.project(p) else { continue };
+                let (x, y, z) = through_matrix(&f, vp, p);
+                assert!(
+                    (x - cpu.x).abs() < 0.05 && (y - cpu.y).abs() < 0.05,
+                    "{ortho}: {x},{y} vs {cpu:?}"
+                );
+                assert!(z > 0.0 && z <= 1.0, "depth {z}");
+            }
+            // nearer points get larger depth values (reversed depth)
+            let near = f.eye() + f.forward.scale(50.0);
+            let far = f.eye() + f.forward.scale(500.0);
+            let (_, _, zn) = through_matrix(&f, vp, near);
+            let (_, _, zf) = through_matrix(&f, vp, far);
+            assert!(zn > zf, "{ortho}: {zn} {zf}");
+        }
+    }
 
     const VP: Viewport = Viewport { left: 0.0, top: 0.0, width: 800.0, height: 600.0 };
 

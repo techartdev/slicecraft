@@ -947,6 +947,12 @@ const BG: &[(&str, &str)] = &[
         "плъзнете цветно квадратче, за да разтегнете в една посока, или белия ъгъл, за да мащабирате равномерно · плъзнете празно място, за да завъртите изгледа",
     ),
     ("Section view: models are cut at Z", "Сечение: моделите са разрязани при Z"),
+    // the 3D view on the graphics card
+    ("Graphics card:", "Видеокарта:"),
+    ("Not on the graphics card:", "Не е на видеокартата:"),
+    ("No graphics card in use.", "Не се използва видеокарта."),
+    ("Draw the 3D view on the graphics card", "3D изгледът се рисува от видеокартата"),
+    ("The 3D view moved to the processor:", "3D изгледът премина към процесора:"),
 ];
 
 #[cfg(test)]

@@ -33,6 +33,7 @@ below.
 | `miniz_oxide` 0.8 (+ `adler2`) | `io`: inflating 3MF packages (already in the window's tree) | MIT OR Zlib OR Apache-2.0, taken as MIT (`adler2`: 0BSD OR MIT OR Apache-2.0, taken as MIT) |
 | `serial2` 0.2 (+ `libc` on Unix, `windows-sys` on Windows) | `io`: printer connection over a serial port | BSD-2-Clause OR Apache-2.0 (deps MIT OR Apache-2.0) |
 | `zune-jpeg` 0.5 (+ `zune-core`) | `ui-egui`: decoding print-camera snapshots (already in the window's tree) | MIT OR Apache-2.0 OR Zlib, taken as MIT |
+| `eframe` `wgpu` feature (+ `wgpu` 29, `naga`, `egui-wgpu` and their backends) | `ui-egui`: the 3D view on the graphics card | MIT OR Apache-2.0 (deps MIT/Apache-2.0, ISC, CC0-1.0, BSD-2-Clause; `foldhash` 0.1 Zlib, see exceptions) |
 | `skrifa` 0.42 | `ui-egui`: checking that a system font parses before the window uses it (already in the window's tree, through egui) | MIT OR Apache-2.0 |
 
 Everything below the window (`geom` … `engine`, `mcp`, the CLI) depends on
@@ -51,6 +52,7 @@ its own copy). Measured with `cargo metadata` over every target platform.
 | `Unicode-3.0` | `icu_*` 2.4, `litemap`, `potential_utf`, `tinystr`, `writeable`, `yoke`, `zerofrom`, `zerotrie`, `zerovec` (+ derives) | `url` → `webbrowser` → `egui-winit`'s `links` feature, forced on by `eframe` | only by dropping `eframe` |
 | `BSL-1.0` | `clipboard-win` 5.4, `error-code` 3.4 (Windows only) | `arboard` → `egui-winit`'s `clipboard` feature, forced on by `eframe` | only by dropping `eframe` |
 | `Zlib` | `foldhash` 0.2, `slotmap` 1.1 | `epaint` (via `hashbrown`), `glow` | no, for egui 0.35 |
+| `Zlib` | `foldhash` 0.1 | `wgpu` 29 (via `hashbrown` 0.15), for the GPU 3D view; approved by the operator 2026-11-14 | only by drawing the 3D view on the processor |
 
 Where a crate offers a choice that includes an allowlisted licence
 (`MIT OR Zlib`, `Apache-2.0 OR GPL-2.0-only`, `Unlicense OR MIT`, `0BSD OR MIT`,

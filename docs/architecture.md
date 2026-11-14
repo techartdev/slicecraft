@@ -101,7 +101,7 @@ session revision; a slice is served only for the revision it was taken at, and a
 
 ## The window
 
-`ui-egui` is an eframe app (glow backend), split into modules:
+`ui-egui` is an eframe app (wgpu backend, OpenGL when wgpu cannot start), split into modules:
 
 | Module | What it holds |
 |---|---|
@@ -109,6 +109,7 @@ session revision; a slice is served only for the revision it was taken at, and a
 | `theme` | the look: dark and light palettes, type sizes and spacing, the interface font, and shared pieces (cards, the primary button, segmented choices, axis chips, figures, tags, floating-bar frames, centred windows) |
 | `menus` | menu bar (File, Edit, View, Model, Repair, Supports, Slice, Machine, Help) and the toolbar (file, model, support and mesh actions on the left; mode switch, export and Slice on the right); built from `COMMANDS`, planned items disabled or explained |
 | `panels` | columns of cards with the main action pinned at the foot. Prepare: models (visibility, tags, multi-select, context menu), profile (preset, quick settings, load/save/zones), support; placement (position, size, rotation, actions, mesh check). Preview: summary figures, extruded length by feature, notes, display options, export; playback and layer range |
+| `gpu` | the 3D view on the graphics card (wgpu, safe Rust): its own MSAA and depth target shown to egui as a texture; lit model meshes, every extrusion a lit bead built from one template, travel lines, a shader-drawn bed grid; geometry uploaded once per slice, layers and kinds chosen by draw range and uniforms; each frame inside an error scope, falling back to the CPU `scene` drawing (also used without a usable adapter, or when turned off in Preferences); `gpu.wgsl` holds the shaders |
 | `gizmo` | handles on the selected model (move arrows and plane, rotation rings with a degree dial, scale squares and an even-scale corner), the view cube, the floating panel with each tool's exact values, mirror with feedback |
 | `viewport` | orbit, pan, zoom, picking, the select/move/rotate/scale tools, section view; floating bars (framing and display toggles on top, placement tools at the left, the active tool's panel beside them), the view cube in the corner, an empty-plate prompt, overlays (legend of the kinds the job prints, with toggles; layer badge and slider; nozzle position) |
 | `scene` | CPU projection into egui meshes: bed, grid, volume, axes, shaded depth-sorted models, toolpaths with travel, retractions and nozzle, colouring by feature, speed or height |

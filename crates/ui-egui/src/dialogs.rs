@@ -886,7 +886,15 @@ fn preferences_window(app: &mut SliceCraftApp, ctx: &egui::Context) {
                         .color(theme::of(ui).dim),
                     );
                 });
+                let gpu_line = match (&app.gpu, &app.gpu_note) {
+                    (Some(g), _) => format!("{} {}", tr("Graphics card:"), g.describe()),
+                    (None, Some(n)) => format!("{} {n}", tr("Not on the graphics card:")),
+                    (None, None) => tr("No graphics card in use.").to_string(),
+                };
+                let p = &mut app.prefs;
                 theme::card(left, "3D view", |ui| {
+                    ui.checkbox(&mut p.gpu_view, tr("Draw the 3D view on the graphics card"));
+                    ui.label(RichText::new(gpu_line).size(12.0).color(theme::of(ui).dim));
                     ui.checkbox(&mut p.bed.grid, tr("Bed grid"));
                     ui.checkbox(&mut p.bed.volume, tr("Build volume outline"));
                     ui.checkbox(&mut p.bed.axes, tr("Axes at the origin"));

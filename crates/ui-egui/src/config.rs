@@ -124,6 +124,7 @@ pub fn prefs_to_text(p: &Preferences, recent: &[PathBuf]) -> String {
     line("camera_url", profile::quote(&p.camera_url));
     line("ortho", p.ortho.to_string());
     line("wireframe", p.wireframe.to_string());
+    line("gpu_view", p.gpu_view.to_string());
     line("inch_check", p.inch_check.to_string());
     line(
         "import_rotate",
@@ -184,6 +185,7 @@ pub fn prefs_from_text(text: &str) -> (Preferences, Vec<PathBuf>, Vec<String>) {
                 }
             }
             "wireframe" => flag(&mut p.wireframe),
+            "gpu_view" => flag(&mut p.gpu_view),
             "inch_check" => flag(&mut p.inch_check),
             "import_rotate" => {
                 let n: Vec<f64> = v.split_whitespace().filter_map(|x| x.parse().ok()).collect();

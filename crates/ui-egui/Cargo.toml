@@ -14,7 +14,7 @@ slicecraft-geom.workspace = true
 slicecraft-io.workspace = true
 slicecraft-render.workspace = true
 # Licences: see ATTRIBUTION.md "Dependency licence exceptions" before changing.
-eframe = { version = "0.35", default-features = false, features = ["accesskit", "default_fonts", "glow", "wayland", "x11"] }
+eframe = { version = "0.35", default-features = false, features = ["accesskit", "default_fonts", "glow", "wgpu", "wayland", "x11"] }
 rfd = { version = "0.17", default-features = true }
 zune-jpeg = "0.5"
 # the parser egui itself uses; checks a system font before egui reads it

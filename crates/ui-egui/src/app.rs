@@ -226,6 +226,8 @@ pub struct Preferences {
     pub ortho: bool,
     /// Models drawn as triangle edges.
     pub wireframe: bool,
+    /// Draw the 3D view on the graphics card (off: on the processor).
+    pub gpu_view: bool,
     /// Scale a model under 10 mm across by 25.4 on import (it is likely in inches).
     pub inch_check: bool,
     /// Turn every imported model by these angles (degrees, X Y Z) ...
@@ -250,6 +252,7 @@ impl Default for Preferences {
             keys: crate::keys::Shortcuts::default(),
             ortho: false,
             wireframe: false,
+            gpu_view: true,
             inch_check: false,
             import_rotate: [0.0; 3],
             import_scale: 1.0,
@@ -271,6 +274,12 @@ pub struct SliceCraftApp {
     pending_export: Option<PathBuf>,
     pub(crate) geometry: Option<(u64, ModelGeometry)>,
     pub(crate) preview_cache: Option<(usize, Vec<PreviewLayer>)>,
+    /// The 3D view on the graphics card, when the window has one.
+    pub(crate) gpu: Option<crate::gpu::Gpu>,
+    /// Why the graphics card is not drawing the 3D view, when it is not.
+    pub(crate) gpu_note: Option<String>,
+    /// The preview summary's measurements of the current slice.
+    pub(crate) summary_cache: Option<crate::panels::Measured>,
     /// Which feature kinds the previewed job contains, in `PathKind::ALL` order.
     pub(crate) kinds_present: Vec<bool>,
     pub(crate) preview: PreviewState,
@@ -324,6 +333,9 @@ impl SliceCraftApp {
             pending_export: None,
             geometry: None,
             preview_cache: None,
+            gpu: None,
+            gpu_note: None,
+            summary_cache: None,
             kinds_present: Vec::new(),
             preview: PreviewState::default(),
             prefs: Preferences::default(),
