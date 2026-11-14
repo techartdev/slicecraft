@@ -273,6 +273,19 @@ impl Region {
         })
     }
 
+    /// Everything inside an outer outline, holes filled. Polygons that lay
+    /// in a hole merge into the one around them.
+    pub fn without_holes(&self) -> Result<Self, GeomError> {
+        let filled = Region {
+            polygons: self
+                .polygons
+                .iter()
+                .map(|p| Polygon { outer: p.outer.clone(), holes: Vec::new() })
+                .collect(),
+        };
+        filled.union(&Region::new())
+    }
+
     /// Drop polygons whose area is below `min_area` mm².
     pub fn without_slivers(mut self, min_area: f64) -> Self {
         self.polygons.retain(|p| p.area() >= min_area);
@@ -342,6 +355,24 @@ fn segments_cross(a: Point2, b: Point2, c: Point2, d: Point2) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn filling_holes_keeps_the_outside() {
+        let sq = |x0: f64, x1: f64| {
+            vec![Point2::new(x0, x0), Point2::new(x1, x0), Point2::new(x1, x1), Point2::new(x0, x1)]
+        };
+        let mut hole = sq(2.0, 8.0);
+        hole.reverse();
+        // a ring with an island in its hole
+        let r = Region::from_loops(&[sq(0.0, 10.0), hole, sq(4.0, 6.0)]);
+        assert!(r.is_ok());
+        let Ok(r) = r else { return };
+        assert_eq!(r.polygons.len(), 2);
+        let Ok(filled) = r.without_holes() else { return };
+        assert_eq!(filled.polygons.len(), 1);
+        assert!(filled.polygons.iter().all(|p| p.holes.is_empty()));
+        assert!((filled.area() - 100.0).abs() < 1e-6, "{}", filled.area());
+    }
 
     #[test]
     fn fill_modes_treat_nested_loops_differently() {

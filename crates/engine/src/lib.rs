@@ -2473,6 +2473,56 @@ mesh = AAAA
     }
 
     #[test]
+    fn vase_mode_keeps_every_outline_of_a_layer() {
+        // two towers side by side: every layer has two outlines; dropping one
+        // of them leaves a whole tower out of the shell
+        let Some(a) = cube(10.0) else { return };
+        let bytes = stl_of(&a);
+        let Some(mut s) = session_with(Some(a)) else { return };
+        let second = Command::Import { name: "b".into(), bytes, extension: Some("stl".into()) };
+        assert!(s.execute(second).is_ok());
+        assert!(s.execute(Command::Arrange).is_ok());
+        let p = PrintSettings { vase_mode: true, ..s.document().settings.clone() };
+        assert!(s.execute(Command::Profile(Box::new(p))).is_ok());
+        assert!(matches!(s.execute(Command::Slice), Ok(Outcome::Sliced { .. })));
+        let Some(out) = s.slice_result() else { return };
+        let walls = out
+            .layers
+            .get(30)
+            .map_or(0, |l| l.paths.iter().filter(|p| p.kind == PathKind::OuterPerimeter).count());
+        assert_eq!(walls, 2);
+        assert!(
+            out.stats.warnings.iter().any(|w| w.contains("vase mode")),
+            "{:?}",
+            out.stats.warnings
+        );
+        // those layers are flat: every wall move of a two-wall layer stays at its height
+        let rising =
+            out.gcode.lines().filter(|l| l.starts_with("G1 X") && l.contains(" Z")).count();
+        assert_eq!(rising, 0, "no spiral where two outlines share a layer");
+    }
+
+    #[test]
+    fn vase_mode_spirals_the_outside_of_a_walled_model() {
+        // a tube: every layer is a ring, outside and inside; vase mode
+        // follows the outside only, as one spiral
+        let Some(mut s) = session_with(hollow_box(30.0, 10.0)) else { return };
+        let p = PrintSettings { vase_mode: true, ..s.document().settings.clone() };
+        assert!(s.execute(Command::Profile(Box::new(p))).is_ok());
+        assert!(matches!(s.execute(Command::Slice), Ok(Outcome::Sliced { .. })));
+        let Some(out) = s.slice_result() else { return };
+        let walls = out
+            .layers
+            .get(30)
+            .map_or(0, |l| l.paths.iter().filter(|p| p.kind == PathKind::OuterPerimeter).count());
+        assert_eq!(walls, 1);
+        assert!(!out.stats.warnings.iter().any(|w| w.contains("vase mode")));
+        assert!(
+            out.gcode.lines().filter(|l| l.starts_with("G1 X") && l.contains(" Z")).count() > 100
+        );
+    }
+
+    #[test]
     fn combined_infill_and_size_compensation() {
         let Some(mut s) = session_with(hollow_box(30.0, 10.0)) else { return };
         let base = s.document().settings.clone();

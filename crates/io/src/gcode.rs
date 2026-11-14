@@ -600,9 +600,13 @@ impl<'a> GcodeWriter<'a> {
         t
     }
 
-    /// True when this layer is printed as part of the spiral (vase mode).
+    /// True when this layer is printed as part of the spiral (vase mode):
+    /// above the bottom, and with a single wall to follow. A layer with
+    /// several outlines prints them as plain walls at the layer's height.
     fn spiral(&self, layer: &LayerPaths) -> bool {
-        self.settings.vase_mode && layer.index > self.settings.solid_layers_bottom as usize
+        self.settings.vase_mode
+            && layer.index > self.settings.solid_layers_bottom as usize
+            && layer.paths.iter().filter(|p| p.kind == PathKind::OuterPerimeter).count() == 1
     }
 
     /// Move to `z` for a new layer: retract, lift, reset E.

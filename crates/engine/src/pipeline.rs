@@ -541,7 +541,11 @@ fn layer_regions(
     let dropped_chains: usize = sections.iter().map(|(_, d, _)| d).sum();
     let mut open_lines = Vec::with_capacity(sections.len());
     let mut regions: Vec<Region> = Vec::with_capacity(sections.len());
-    for (r, _, o) in sections {
+    for (i, (r, _, o)) in sections.into_iter().enumerate() {
+        // vase mode prints the outside of each layer as one wall: the inner
+        // surface of a model with walls is not a second wall
+        let r =
+            if s.vase_mode && i >= s.solid_layers_bottom as usize { r.without_holes()? } else { r };
         regions.push(r);
         open_lines.push(o);
     }
@@ -1557,6 +1561,7 @@ fn slice_layers(doc: &Document, observer: &mut dyn SliceObserver) -> Result<Laye
     let (hx, hy) = s.homing_corner.point(doc.bed.width, doc.bed.depth);
     let mut at = Point2::new(hx, hy);
     let mut layers = Vec::with_capacity(n);
+    let mut vase_split_layers = 0usize;
     for (i, (slot, (sh, infill))) in slots.iter().zip(shelled.into_iter().zip(infilled)).enumerate()
     {
         observer.progress(Stage::Gcode, i, n);
@@ -1591,11 +1596,13 @@ fn slice_layers(doc: &Document, observer: &mut dyn SliceObserver) -> Result<Laye
             model.extend(infill);
         }
         if s.vase_mode && i >= s.solid_layers_bottom as usize {
-            let wall = model
-                .into_iter()
-                .filter(|p| p.kind == PathKind::OuterPerimeter)
-                .max_by(|a, b| a.points.len().cmp(&b.points.len()));
-            model = wall.into_iter().collect();
+            // one wall per outline. The spiral can follow one outline only;
+            // a layer with several (islands, holes) prints each as a plain
+            // wall at the layer's height, so the shell has no gaps
+            model.retain(|p| p.kind == PathKind::OuterPerimeter);
+            if model.len() > 1 {
+                vase_split_layers += 1;
+            }
             pre.retain(|g| g.iter().all(|p| p.kind != PathKind::Support));
         }
         let islands: Vec<Vec<Vec<ToolPath>>> = match s.island_order {
@@ -1807,6 +1814,11 @@ fn slice_layers(doc: &Document, observer: &mut dyn SliceObserver) -> Result<Laye
     if dropped_chains > 0 {
         warnings.push(format!(
             "{dropped_chains} open outline(s) were dropped: the model has holes or broken faces"
+        ));
+    }
+    if vase_split_layers > 0 {
+        warnings.push(format!(
+            "vase mode: {vase_split_layers} layer(s) have more than one outline; each outline is printed as a plain wall there, and the spiral resumes where there is one outline again"
         ));
     }
     if layers.iter().all(|l| l.paths.is_empty()) {
