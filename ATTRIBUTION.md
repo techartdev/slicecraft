@@ -5,7 +5,10 @@ author, source and licence. `cargo xtask assets` (planned) fails when a file und
 `assets/` has no row.
 
 SliceCraft currently ships **no file assets**: icons are drawn in code, fonts are not
-bundled (they come from `storytold/craft-fonts` at build time, never as a dependency),
+bundled (they come from `storytold/craft-fonts` at build time, never as a dependency;
+the window reads the operating system's own interface font at run time when one is
+installed, such as Segoe UI, Noto Sans or DejaVu Sans, and otherwise uses egui's
+built-in fonts; no font file is copied into the program or the repository),
 and test models are generated in code (`slicecraft_render::fixtures`) or are original
 geometry (`examples/cube.stl`).
 
@@ -30,6 +33,7 @@ below.
 | `miniz_oxide` 0.8 (+ `adler2`) | `io`: inflating 3MF packages (already in the window's tree) | MIT OR Zlib OR Apache-2.0, taken as MIT (`adler2`: 0BSD OR MIT OR Apache-2.0, taken as MIT) |
 | `serial2` 0.2 (+ `libc` on Unix, `windows-sys` on Windows) | `io`: printer connection over a serial port | BSD-2-Clause OR Apache-2.0 (deps MIT OR Apache-2.0) |
 | `zune-jpeg` 0.5 (+ `zune-core`) | `ui-egui`: decoding print-camera snapshots (already in the window's tree) | MIT OR Apache-2.0 OR Zlib, taken as MIT |
+| `skrifa` 0.42 | `ui-egui`: checking that a system font parses before the window uses it (already in the window's tree, through egui) | MIT OR Apache-2.0 |
 
 Everything below the window (`geom` … `engine`, `mcp`, the CLI) depends on
 `i_overlay`, `roxmltree`, `miniz_oxide` and `serial2` only. The exceptions are confined to the window (`ui-egui` and the

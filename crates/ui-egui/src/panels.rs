@@ -1,11 +1,16 @@
 //! The side panels, the preview controls and the status bar.
+//!
+//! Each panel is a column of cards (see `theme`), with its main action pinned
+//! to the bottom so it never scrolls away.
 
-use crate::app::{Mode, STAGES, SliceCraftApp};
+use crate::app::{Mode, STAGES, SliceCraftApp, Tool};
 use crate::i18n::tr;
+use crate::icons::{self, Icon};
 use crate::scene::{self, Coloring, SegKind};
-use eframe::egui::{self, Color32, RichText, Sense, Ui};
+use crate::theme;
+use eframe::egui::{self, Color32, RichText, Sense, Ui, vec2};
 use slicecraft_doc::profile::presets;
-use slicecraft_doc::{Axis, ModelRole, Transform};
+use slicecraft_doc::{Axis, ModelRole, SupportPlacement};
 use slicecraft_engine::{Command, Stage};
 use slicecraft_geom::Vec3;
 use slicecraft_io::format_duration;
@@ -13,58 +18,161 @@ use slicecraft_render::PathKind;
 use std::collections::BTreeMap;
 use std::sync::atomic::Ordering;
 
-const WARN: Color32 = Color32::from_rgb(0xff, 0x7a, 0x70);
+/// Width of the value column in panel grids.
+const VALUE_W: f32 = 120.0;
 
-fn heading(ui: &mut Ui, text: &str) {
-    ui.add_space(4.0);
-    ui.label(RichText::new(tr(text)).heading().size(17.0));
-    ui.add_space(2.0);
+/// Pin `bottom` to the foot of the panel and scroll `body` above it.
+fn with_footer(
+    ui: &mut Ui,
+    id: &str,
+    app: &mut SliceCraftApp,
+    body: impl FnOnce(&mut SliceCraftApp, &mut Ui),
+    bottom: impl FnOnce(&mut SliceCraftApp, &mut Ui),
+) {
+    egui::Panel::bottom(egui::Id::new(id))
+        .frame(egui::Frame::new().inner_margin(egui::Margin {
+            top: 10,
+            bottom: 4,
+            left: 0,
+            right: 0,
+        }))
+        .show_separator_line(false)
+        .resizable(false)
+        .show(ui, |ui| bottom(app, ui));
+    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        ui.add_space(2.0);
+        body(app, ui);
+    });
 }
 
-/// Left panel in prepare mode: models, the profile and the slice button.
+/// Left panel in prepare mode: models, the profile, support and the slice button.
 pub fn models_panel(app: &mut SliceCraftApp, ui: &mut Ui) {
     let ctx = ui.ctx().clone();
-    heading(ui, "Models");
+    let has_models = !app.session.document().objects.is_empty();
+    with_footer(
+        ui,
+        "prepare-footer",
+        app,
+        |app, ui| {
+            models_card(app, ui);
+            profile_card(app, ui);
+            support_card(app, ui);
+        },
+        |app, ui| {
+            if app.job.is_some() {
+                if theme::secondary(ui, tr("Cancel slicing"), true, 40.0).clicked() {
+                    app.cancel_slice();
+                }
+            } else if theme::primary(ui, tr("Slice and preview"), has_models, vec2(0.0, 42.0))
+                .on_hover_text(tr("Ctrl+R"))
+                .clicked()
+            {
+                app.start_slice(&ctx);
+            }
+        },
+    );
+}
+
+/// Short coloured notes after a model's name.
+type Tags = Vec<(String, Color32)>;
+
+/// One model in the list: visibility, name, tags. Returns the row's response
+/// and whether the eye was clicked.
+fn model_row(
+    ui: &mut Ui,
+    name: &str,
+    tags: &[(String, Color32)],
+    visible: bool,
+    selected: bool,
+) -> (egui::Response, bool) {
+    let p = theme::of(ui);
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::click());
+    let bg = if selected {
+        p.accent.gamma_multiply(0.28)
+    } else if resp.hovered() {
+        p.hover
+    } else {
+        Color32::TRANSPARENT
+    };
+    ui.painter().rect_filled(rect, 6, bg);
+    if selected {
+        let bar = egui::Rect::from_min_size(rect.min, vec2(3.0, rect.height()));
+        ui.painter().rect_filled(bar, 2, p.accent);
+    }
+    let mut eye = false;
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(rect.shrink2(vec2(6.0, 2.0)))
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        |ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            let icon = if visible { Icon::Eye } else { Icon::EyeOff };
+            if icons::sized(ui, icon, tr("Include when slicing"), true, false, 22.0).clicked() {
+                eye = true;
+            }
+            let colour = if visible { p.text } else { p.dim };
+            ui.add(
+                egui::Label::new(RichText::new(name).color(colour)).truncate().selectable(false),
+            );
+            for (t, c) in tags {
+                theme::tag(ui, t, *c);
+            }
+        },
+    );
+    (resp, eye)
+}
+
+fn models_card(app: &mut SliceCraftApp, ui: &mut Ui) {
     let doc = app.session.document();
     let outside = doc.outside_bed();
-    let rows: Vec<(String, bool, bool)> = doc
+    let p = theme::of(ui);
+    let rows: Vec<(String, Tags, bool)> = doc
         .objects
         .iter()
         .map(|o| {
-            let mut name = o.name.clone();
+            let mut tags = Vec::new();
             match o.role {
                 ModelRole::Print => {}
-                ModelRole::Support => name.push_str("  · support"),
-                ModelRole::Cutter => name.push_str("  · cutter"),
+                ModelRole::Support => tags.push((tr("support").to_string(), p.dim)),
+                ModelRole::Cutter => tags.push((tr("cutter").to_string(), scene::MODEL_CUTTER)),
             }
             if let Some(g) = o.group {
-                name.push_str(&format!("  · group {g}"));
+                tags.push((format!("{} {g}", tr("group")), p.accent_hover));
             }
-            (name, o.visible, outside.contains(&o.name))
+            if outside.contains(&o.name) {
+                tags.push((tr("off the bed").to_string(), p.warn));
+            }
+            (o.name.clone(), tags, o.visible)
         })
         .collect();
-    egui::Frame::group(ui.style()).show(ui, |ui| {
-        ui.set_min_height(140.0);
-        ui.set_width(ui.available_width());
-        if rows.is_empty() {
-            ui.weak(tr("No models. Import or drop STL/OBJ files."));
-        }
-        egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
-            for (i, (name, visible, off)) in rows.iter().enumerate() {
-                ui.horizontal(|ui| {
-                    let mut v = *visible;
-                    if ui.checkbox(&mut v, "").on_hover_text(tr("Include when slicing")).changed() {
-                        app.run(Command::SetVisible { index: i, visible: v });
-                    }
-                    let mut text = RichText::new(name);
-                    if *off {
-                        text = text.color(WARN);
-                    }
-                    if !visible {
-                        text = text.weak();
-                    }
-                    let resp = ui.selectable_label(app.selected.contains(&i), text);
-                    if resp.clicked() {
+    let count = rows.len();
+    let title =
+        if count == 0 { tr("Models").to_string() } else { format!("{} ({count})", tr("Models")) };
+    let (mut arrange, mut import) = (false, false);
+    theme::card_with(
+        ui,
+        &title,
+        |ui| {
+            arrange = icons::sized(ui, Icon::Arrange, tr("Arrange models"), count > 0, false, 26.0)
+                .clicked();
+            import = icons::sized(ui, Icon::Plus, tr("Import models (Ctrl+O)"), true, false, 26.0)
+                .clicked();
+        },
+        |ui| {
+            if rows.is_empty() {
+                ui.add_space(4.0);
+                theme::dim(ui, tr("No models. Import or drop STL/OBJ files."));
+                ui.add_space(4.0);
+                return;
+            }
+            ui.spacing_mut().item_spacing.y = 2.0;
+            egui::ScrollArea::vertical().id_salt("model-list").max_height(240.0).show(ui, |ui| {
+                for (i, (name, tags, visible)) in rows.iter().enumerate() {
+                    let (resp, eye) =
+                        model_row(ui, name, tags, *visible, app.selected.contains(&i));
+                    if eye {
+                        app.run(Command::SetVisible { index: i, visible: !visible });
+                    } else if resp.clicked() {
                         let multi = ui.input(|inp| inp.modifiers.command || inp.modifiers.shift);
                         app.click_select(i, multi);
                     }
@@ -76,7 +184,7 @@ pub fn models_panel(app: &mut SliceCraftApp, ui: &mut Ui) {
                         for (axis, label) in
                             [(Axis::X, "Mirror X"), (Axis::Y, "Mirror Y"), (Axis::Z, "Mirror Z")]
                         {
-                            if ui.button(label).clicked() {
+                            if ui.button(tr(label)).clicked() {
                                 app.mirror_selected(axis);
                             }
                         }
@@ -91,31 +199,25 @@ pub fn models_panel(app: &mut SliceCraftApp, ui: &mut Ui) {
                             app.remove_selected();
                         }
                     });
-                });
-            }
-        });
-    });
-    ui.horizontal(|ui| {
-        if ui.button(tr("Import…")).clicked() {
-            app.open_import_dialog();
-        }
-        if ui.add_enabled(!app.selected.is_empty(), egui::Button::new(tr("Remove"))).clicked() {
-            app.remove_selected();
-        }
-        if ui.add_enabled(!rows.is_empty(), egui::Button::new(tr("Arrange"))).clicked() {
-            app.run(Command::Arrange);
-        }
-    });
+                }
+            });
+        },
+    );
+    if arrange {
+        app.run(Command::Arrange);
+    }
+    if import {
+        app.open_import_dialog();
+    }
+}
 
-    ui.add_space(8.0);
-    heading(ui, "Print profile");
+fn profile_card(app: &mut SliceCraftApp, ui: &mut Ui) {
     let current = app.session.profile_name().to_string();
-    egui::Frame::group(ui.style()).show(ui, |ui| {
-        ui.set_width(ui.available_width());
+    theme::card(ui, "Print profile", |ui| {
         let mut chosen = None;
         egui::ComboBox::from_id_salt("preset")
             .selected_text(&current)
-            .width(ui.available_width() - 8.0)
+            .width(ui.available_width())
             .show_ui(ui, |ui| {
                 for p in presets() {
                     if ui.selectable_label(p.name == current, &p.name).clicked() {
@@ -126,128 +228,41 @@ pub fn models_panel(app: &mut SliceCraftApp, ui: &mut Ui) {
         if let Some(p) = chosen {
             app.apply_profile(p.settings, Some(p.name));
         }
+        ui.add_space(4.0);
         quick_settings(app, ui);
+        ui.add_space(6.0);
+        let w = ui.available_width();
+        if ui
+            .add(egui::Button::new(tr("All settings…")).min_size(vec2(w, 28.0)))
+            .on_hover_text(tr("Ctrl+P"))
+            .clicked()
+        {
+            app.open_settings();
+        }
         ui.horizontal(|ui| {
-            if ui.button(tr("All settings…")).on_hover_text(tr("Ctrl+P")).clicked() {
-                app.open_settings();
-            }
-            if ui.button(tr("Load…")).clicked() {
+            let third = (ui.available_width() - 2.0 * ui.spacing().item_spacing.x) / 3.0;
+            if ui.add(egui::Button::new(tr("Load…")).min_size(vec2(third, 26.0))).clicked() {
                 app.load_profile_dialog();
             }
-            if ui.button(tr("Save…")).clicked() {
+            if ui.add(egui::Button::new(tr("Save…")).min_size(vec2(third, 26.0))).clicked() {
                 app.save_profile_dialog();
             }
-        });
-        ui.horizontal(|ui| {
             let zones = app.session.document().zones.len();
             let label = if zones == 0 {
-                "Setting zones…".to_string()
+                tr("Zones…").to_string()
             } else {
-                format!("Setting zones ({zones})…")
+                format!("{} ({zones})", tr("Zones"))
             };
             if ui
-                .button(label)
-                .on_hover_text(
+                .add(egui::Button::new(label).min_size(vec2(third, 26.0)))
+                .on_hover_text(tr(
                     "Change settings above a height, or give some models their own settings",
-                )
+                ))
                 .clicked()
             {
                 app.dialogs.zones = Some(Default::default());
             }
         });
-    });
-
-    support_section(app, ui);
-
-    ui.add_space(8.0);
-    let has_models = !rows.is_empty();
-    ui.vertical_centered_justified(|ui| {
-        if app.job.is_some() {
-            if ui
-                .add(egui::Button::new(tr("Cancel slicing")).min_size(egui::vec2(0.0, 34.0)))
-                .clicked()
-            {
-                app.cancel_slice();
-            }
-        } else {
-            let b = egui::Button::new(RichText::new(tr("Slice and preview")).strong().size(16.0))
-                .min_size(egui::vec2(0.0, 36.0));
-            if ui.add_enabled(has_models, b).on_hover_text(tr("Ctrl+R")).clicked() {
-                app.start_slice(&ctx);
-            }
-        }
-    });
-}
-
-/// Support preview and the boxes that add or block support.
-fn support_section(app: &mut SliceCraftApp, ui: &mut Ui) {
-    use crate::app::Tool;
-    use slicecraft_doc::SupportEditKind;
-    ui.add_space(6.0);
-    ui.heading("Support");
-    egui::Frame::group(ui.style()).show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        let mut show = app.show_support;
-        if ui.checkbox(&mut show, tr("Show before slicing")).changed() {
-            app.set_show_support(show);
-        }
-        if app.show_support {
-            let busy = app.support_job.is_some();
-            match (&app.support_note, busy) {
-                (_, true) => ui.weak(tr("Working out support…")),
-                (Some(n), false) => ui.weak(n.as_str()),
-                (None, false) => ui.weak(""),
-            };
-        }
-        ui.horizontal(|ui| {
-            let add = app.tool == Tool::SupportAdd;
-            if ui
-                .selectable_label(add, tr("+ Add area"))
-                .on_hover_text(
-                    "Drag a box on the bed: every surface facing down inside it gets support",
-                )
-                .clicked()
-            {
-                app.tool = if add { Tool::Select } else { Tool::SupportAdd };
-                app.set_show_support(true);
-            }
-            let block = app.tool == Tool::SupportBlock;
-            if ui
-                .selectable_label(block, tr("− Block area"))
-                .on_hover_text(tr("Drag a box on the bed: no support inside it"))
-                .clicked()
-            {
-                app.tool = if block { Tool::Select } else { Tool::SupportBlock };
-                app.set_show_support(true);
-            }
-        });
-        let edits = app.session.document().support_edits.clone();
-        let mut remove = None;
-        for (i, e) in edits.iter().enumerate() {
-            ui.horizontal(|ui| {
-                let (label, colour) = match e.kind {
-                    SupportEditKind::Add => ("add", egui::Color32::from_rgb(0x4c, 0xc0, 0x6a)),
-                    SupportEditKind::Block => ("block", egui::Color32::from_rgb(0xe0, 0x50, 0x50)),
-                };
-                ui.colored_label(colour, label);
-                ui.weak(format!(
-                    "{:.0}×{:.0} mm at {:.0}, {:.0}",
-                    e.x1 - e.x0,
-                    e.y1 - e.y0,
-                    e.x0,
-                    e.y0
-                ));
-                if ui.small_button(tr("×")).on_hover_text(tr("Remove this box")).clicked() {
-                    remove = Some(i);
-                }
-            });
-        }
-        if let Some(index) = remove {
-            app.run(Command::RemoveSupportEdit { index });
-        }
-        if !edits.is_empty() && ui.small_button(tr("Clear all boxes")).clicked() {
-            app.run(Command::ClearSupportEdits);
-        }
     });
 }
 
@@ -255,44 +270,44 @@ fn support_section(app: &mut SliceCraftApp, ui: &mut Ui) {
 fn quick_settings(app: &mut SliceCraftApp, ui: &mut Ui) {
     let mut s = app.session.document().settings.clone();
     let before = s.clone();
-    egui::Grid::new("quick").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
-        ui.label(tr("Layer height"));
-        ui.add(
+    egui::Grid::new("quick").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
+        theme::field(ui, "Layer height");
+        ui.add_sized(
+            [VALUE_W, 24.0],
             egui::DragValue::new(&mut s.layer_height).speed(0.01).range(0.05..=1.0).suffix(" mm"),
         );
         ui.end_row();
-        ui.label(tr("Infill"));
-        ui.add(egui::Slider::new(&mut s.infill_percentage, 0.0..=100.0).suffix(" %"));
-        ui.end_row();
-        ui.label(tr("Perimeters"));
-        ui.add(egui::DragValue::new(&mut s.perimeter_count).range(0..=20));
-        ui.end_row();
-        ui.label(tr("Nozzle / bed"));
-        ui.horizontal(|ui| {
-            ui.add(egui::DragValue::new(&mut s.nozzle_temperature).range(0.0..=350.0).suffix("°"));
-            ui.add(egui::DragValue::new(&mut s.bed_temperature).range(0.0..=130.0).suffix("°"));
+        theme::field(ui, "Infill");
+        ui.scope(|ui| {
+            ui.spacing_mut().slider_width = VALUE_W - 10.0;
+            ui.add(
+                egui::Slider::new(&mut s.infill_percentage, 0.0..=100.0)
+                    .suffix(" %")
+                    .max_decimals(0),
+            );
         });
         ui.end_row();
-        ui.label(tr("Adhesion"));
+        theme::field(ui, "Perimeters");
+        ui.add_sized([VALUE_W, 24.0], egui::DragValue::new(&mut s.perimeter_count).range(0..=20));
+        ui.end_row();
+        theme::field(ui, "Nozzle");
+        ui.add_sized(
+            [VALUE_W, 24.0],
+            egui::DragValue::new(&mut s.nozzle_temperature).range(0.0..=350.0).suffix(" °C"),
+        );
+        ui.end_row();
+        theme::field(ui, "Bed");
+        ui.add_sized(
+            [VALUE_W, 24.0],
+            egui::DragValue::new(&mut s.bed_temperature).range(0.0..=130.0).suffix(" °C"),
+        );
+        ui.end_row();
+        theme::field(ui, "Adhesion");
         ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
             ui.checkbox(&mut s.skirt_enabled, tr("skirt"));
             ui.checkbox(&mut s.brim_enabled, tr("brim"));
             ui.checkbox(&mut s.raft_enabled, tr("raft"));
-        });
-        ui.end_row();
-        ui.label(tr("Support"));
-        ui.horizontal(|ui| {
-            ui.checkbox(&mut s.support_enabled, tr("generate"));
-            ui.add_enabled_ui(s.support_enabled, |ui| {
-                let mut bed_only = s.support_placement == slicecraft_doc::SupportPlacement::BedOnly;
-                if ui.checkbox(&mut bed_only, tr("from bed only")).changed() {
-                    s.support_placement = if bed_only {
-                        slicecraft_doc::SupportPlacement::BedOnly
-                    } else {
-                        slicecraft_doc::SupportPlacement::Everywhere
-                    };
-                }
-            });
         });
         ui.end_row();
     });
@@ -312,19 +327,137 @@ fn quick_settings(app: &mut SliceCraftApp, ui: &mut Ui) {
     }
 }
 
+/// Support: whether to generate it, the preview, and the boxes that add or
+/// block it.
+fn support_card(app: &mut SliceCraftApp, ui: &mut Ui) {
+    use slicecraft_doc::SupportEditKind;
+    let mut s = app.session.document().settings.clone();
+    let before = s.clone();
+    theme::card(ui, "Support", |ui| {
+        ui.checkbox(&mut s.support_enabled, tr("Generate support"));
+        ui.add_enabled_ui(s.support_enabled, |ui| {
+            let mut bed_only = s.support_placement == SupportPlacement::BedOnly;
+            if ui.checkbox(&mut bed_only, tr("Only from the bed")).changed() {
+                s.support_placement =
+                    if bed_only { SupportPlacement::BedOnly } else { SupportPlacement::Everywhere };
+            }
+        });
+        let mut show = app.show_support;
+        if ui.checkbox(&mut show, tr("Show before slicing")).changed() {
+            app.set_show_support(show);
+        }
+        if app.show_support {
+            let busy = app.support_job.is_some();
+            match (&app.support_note, busy) {
+                (_, true) => theme::dim(ui, tr("Working out support…")),
+                (Some(n), false) => theme::dim(ui, n.as_str()),
+                (None, false) => theme::dim(ui, ""),
+            };
+        }
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            let half = (ui.available_width() - ui.spacing().item_spacing.x) / 2.0;
+            let add = app.tool == Tool::SupportAdd;
+            if ui
+                .add(egui::Button::new(tr("+ Add area")).selected(add).min_size(vec2(half, 28.0)))
+                .on_hover_text(tr(
+                    "Drag a box on the bed: every surface facing down inside it gets support",
+                ))
+                .clicked()
+            {
+                app.tool = if add { Tool::Select } else { Tool::SupportAdd };
+                app.set_show_support(true);
+            }
+            let block = app.tool == Tool::SupportBlock;
+            if ui
+                .add(
+                    egui::Button::new(tr("− Block area"))
+                        .selected(block)
+                        .min_size(vec2(half, 28.0)),
+                )
+                .on_hover_text(tr("Drag a box on the bed: no support inside it"))
+                .clicked()
+            {
+                app.tool = if block { Tool::Select } else { Tool::SupportBlock };
+                app.set_show_support(true);
+            }
+        });
+        let edits = app.session.document().support_edits.clone();
+        let mut remove = None;
+        let p = theme::of(ui);
+        for (i, e) in edits.iter().enumerate() {
+            ui.horizontal(|ui| {
+                let (label, colour) = match e.kind {
+                    SupportEditKind::Add => (tr("add"), p.ok),
+                    SupportEditKind::Block => (tr("block"), p.warn),
+                };
+                theme::tag(ui, label, colour);
+                theme::dim(
+                    ui,
+                    format!("{:.0}×{:.0} mm at {:.0}, {:.0}", e.x1 - e.x0, e.y1 - e.y0, e.x0, e.y0),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button("×").on_hover_text(tr("Remove this box")).clicked() {
+                        remove = Some(i);
+                    }
+                });
+            });
+        }
+        if let Some(index) = remove {
+            app.run(Command::RemoveSupportEdit { index });
+        }
+        if !edits.is_empty() && ui.small_button(tr("Clear all boxes")).clicked() {
+            app.run(Command::ClearSupportEdits);
+        }
+    });
+    if s != before {
+        app.apply_profile(s, None);
+    }
+}
+
+/// A number field in the placement grids.
+fn number(
+    ui: &mut Ui,
+    value: &mut f64,
+    speed: f64,
+    range: std::ops::RangeInclusive<f64>,
+    suffix: &str,
+) -> bool {
+    ui.add_sized(
+        [VALUE_W - 20.0, 24.0],
+        egui::DragValue::new(value).speed(speed).range(range).suffix(suffix),
+    )
+    .changed()
+}
+
 /// Right panel in prepare mode: exact placement of the selection.
 pub fn transform_panel(app: &mut SliceCraftApp, ui: &mut Ui) {
-    heading(ui, "Model placement");
+    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        ui.add_space(2.0);
+        placement(app, ui);
+    });
+}
+
+fn placement(app: &mut SliceCraftApp, ui: &mut Ui) {
     let count = app.selected.len();
     if count == 0 {
-        ui.weak(tr("Select a model in the list or the 3D view."));
-        ui.add_space(6.0);
-        ui.weak(tr("Q select · W move · E rotate · R scale"));
+        theme::card(ui, "Placement", |ui| {
+            theme::dim(ui, tr("Select a model in the list or the 3D view."));
+            ui.add_space(6.0);
+            for (k, what) in [("Q", "select"), ("W", "move"), ("E", "rotate"), ("R", "scale")] {
+                ui.horizontal(|ui| {
+                    theme::key(ui, k);
+                    theme::dim(ui, tr(what));
+                });
+            }
+        });
         return;
     }
     if count > 1 {
-        ui.label(format!("{count} models selected"));
-        multi_actions(app, ui);
+        theme::card(ui, "Placement", |ui| {
+            ui.label(format!("{count} {}", tr("models selected")));
+        });
+        actions_card(app, ui);
         return;
     }
     let Some(i) = app.primary() else { return };
@@ -337,75 +470,80 @@ pub fn transform_panel(app: &mut SliceCraftApp, ui: &mut Ui) {
     let before = t;
     let bed = app.session.document().bed.clone();
     let off_bed = app.session.document().outside_bed().contains(&name);
+    let p = theme::of(ui);
 
-    egui::Frame::group(ui.style()).show(ui, |ui| {
+    theme::card_frame(ui).show(ui, |ui| {
         ui.set_width(ui.available_width());
-        ui.label(RichText::new(&name).strong());
-        ui.weak(format!(
-            "{tris} triangles · {:.1} × {:.1} × {:.1} mm on the bed",
-            placed.x, placed.y, placed.z
-        ));
+        ui.add(egui::Label::new(RichText::new(&name).font(theme::strong(16.0))).truncate());
+        theme::dim(ui, format!("{:.1} × {:.1} × {:.1} mm", placed.x, placed.y, placed.z));
+        theme::dim(ui, format!("{tris} {}", tr("triangles")));
         if off_bed {
-            ui.colored_label(WARN, "Outside the build volume");
+            ui.colored_label(p.warn, tr("Outside the build volume"));
         }
     });
+    ui.add_space(8.0);
 
-    ui.add_space(4.0);
-    ui.label(RichText::new(tr("Position")).strong());
-    egui::Grid::new("pos").num_columns(3).show(ui, |ui| {
-        ui.label(tr("X"));
-        ui.add(
-            egui::DragValue::new(&mut t.translate.x)
-                .speed(0.5)
-                .range(-bed.width..=2.0 * bed.width)
-                .suffix(" mm"),
-        );
-        ui.end_row();
-        ui.label(tr("Y"));
-        ui.add(
-            egui::DragValue::new(&mut t.translate.y)
-                .speed(0.5)
-                .range(-bed.depth..=2.0 * bed.depth)
-                .suffix(" mm"),
-        );
-        ui.end_row();
-        ui.label(tr("Reference"));
-        ui.weak(tr("model centre, on the bed"));
-        ui.end_row();
+    theme::card(ui, "Position", |ui| {
+        egui::Grid::new("pos").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
+            theme::axis_chip(ui, 0);
+            number(ui, &mut t.translate.x, 0.5, -bed.width..=2.0 * bed.width, " mm");
+            ui.end_row();
+            theme::axis_chip(ui, 1);
+            number(ui, &mut t.translate.y, 0.5, -bed.depth..=2.0 * bed.depth, " mm");
+            ui.end_row();
+        });
+        theme::dim(ui, tr("model centre, on the bed"));
     });
 
-    ui.add_space(4.0);
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(tr("Size")).strong());
-        ui.checkbox(&mut app.uniform_scale, tr("uniform"));
-    });
     let mut size =
         Vec3::new(original.x * t.scale.x, original.y * t.scale.y, original.z * t.scale.z);
     let mut pct = t.scale.scale(100.0);
     let mut changed_axis: Option<(usize, f64)> = None;
-    egui::Grid::new("scale").num_columns(3).show(ui, |ui| {
-        ui.label("");
-        ui.weak(tr("mm"));
-        ui.weak(tr("%"));
-        ui.end_row();
-        for (k, axis) in ["X", "Y", "Z"].iter().enumerate() {
-            ui.label(*axis);
-            let (sz, p, orig) = match k {
-                0 => (&mut size.x, &mut pct.x, original.x),
-                1 => (&mut size.y, &mut pct.y, original.y),
-                _ => (&mut size.z, &mut pct.z, original.z),
-            };
-            if ui.add(egui::DragValue::new(sz).speed(0.5).range(0.01..=10_000.0)).changed()
-                && orig > 0.0
-            {
-                changed_axis = Some((k, *sz / orig));
-            }
-            if ui.add(egui::DragValue::new(p).speed(1.0).range(0.1..=100_000.0)).changed() {
-                changed_axis = Some((k, *p / 100.0));
-            }
-            ui.end_row();
-        }
-    });
+    let mut uniform = app.uniform_scale;
+    theme::card_with(
+        ui,
+        "Size",
+        |ui| {
+            ui.checkbox(&mut uniform, tr("uniform"));
+        },
+        |ui| {
+            egui::Grid::new("scale").num_columns(3).spacing([10.0, 6.0]).show(ui, |ui| {
+                for k in 0..3 {
+                    theme::axis_chip(ui, k);
+                    let (sz, pc, orig) = match k {
+                        0 => (&mut size.x, &mut pct.x, original.x),
+                        1 => (&mut size.y, &mut pct.y, original.y),
+                        _ => (&mut size.z, &mut pct.z, original.z),
+                    };
+                    let w = (ui.available_width() - 10.0) / 2.0;
+                    if ui
+                        .add_sized(
+                            [w.clamp(60.0, 100.0), 24.0],
+                            egui::DragValue::new(sz)
+                                .speed(0.5)
+                                .range(0.01..=10_000.0)
+                                .suffix(" mm"),
+                        )
+                        .changed()
+                        && orig > 0.0
+                    {
+                        changed_axis = Some((k, *sz / orig));
+                    }
+                    if ui
+                        .add_sized(
+                            [w.clamp(56.0, 80.0), 24.0],
+                            egui::DragValue::new(pc).speed(1.0).range(0.1..=100_000.0).suffix(" %"),
+                        )
+                        .changed()
+                    {
+                        changed_axis = Some((k, *pc / 100.0));
+                    }
+                    ui.end_row();
+                }
+            });
+        },
+    );
+    app.uniform_scale = uniform;
     if let Some((k, factor)) = changed_axis
         && factor.is_finite()
         && factor > 0.0
@@ -427,107 +565,180 @@ pub fn transform_panel(app: &mut SliceCraftApp, ui: &mut Ui) {
         }
     }
 
-    ui.add_space(4.0);
-    ui.label(RichText::new(tr("Rotation")).strong());
-    egui::Grid::new("rot").num_columns(3).show(ui, |ui| {
-        for (k, axis) in ["X", "Y", "Z"].iter().enumerate() {
-            ui.label(*axis);
-            let r = match k {
-                0 => &mut t.rotate.x,
-                1 => &mut t.rotate.y,
-                _ => &mut t.rotate.z,
-            };
-            ui.add(egui::DragValue::new(r).speed(1.0).range(-360.0..=360.0).suffix("°"));
-            ui.horizontal(|ui| {
-                if ui.small_button(tr("−90")).clicked() {
-                    *r = (*r - 90.0) % 360.0;
-                }
-                if ui.small_button(tr("+90")).clicked() {
-                    *r = (*r + 90.0) % 360.0;
-                }
-            });
-            ui.end_row();
-        }
+    theme::card(ui, "Rotation", |ui| {
+        egui::Grid::new("rot").num_columns(3).spacing([10.0, 6.0]).show(ui, |ui| {
+            for k in 0..3 {
+                theme::axis_chip(ui, k);
+                let r = match k {
+                    0 => &mut t.rotate.x,
+                    1 => &mut t.rotate.y,
+                    _ => &mut t.rotate.z,
+                };
+                number(ui, r, 1.0, -360.0..=360.0, "°");
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    if ui.small_button("−90").clicked() {
+                        *r = (*r - 90.0) % 360.0;
+                    }
+                    if ui.small_button("+90").clicked() {
+                        *r = (*r + 90.0) % 360.0;
+                    }
+                });
+                ui.end_row();
+            }
+        });
     });
     if t != before && t.is_valid() {
         app.place(i, t);
     }
 
-    ui.add_space(6.0);
-    multi_actions(app, ui);
+    actions_card(app, ui);
 
     if let Some((_, geo)) = &app.geometry
         && let Some(g) = geo.objects.get(i)
     {
-        ui.add_space(6.0);
-        ui.label(RichText::new(tr("Mesh check")).strong());
         let r = g.report;
-        if r.is_watertight() {
-            ui.label(format!("Closed and manifold · {:.1} cm³", r.volume / 1000.0));
-        } else {
-            ui.colored_label(
-                WARN,
-                format!("{} open edges, {} non-manifold edges", r.open_edges, r.non_manifold_edges),
-            );
-            if ui
-                .small_button(tr("Repair"))
-                .on_hover_text(tr("Weld, fix normals and close holes"))
-                .clicked()
-            {
-                app.run(Command::RepairMesh { index: i, fill: true });
+        let mut repair = false;
+        theme::card(ui, "Mesh check", |ui| {
+            if r.is_watertight() {
+                ui.horizontal(|ui| {
+                    theme::tag(ui, tr("OK"), p.ok);
+                    ui.label(format!(
+                        "{} · {:.1} cm³",
+                        tr("Closed and manifold"),
+                        r.volume / 1000.0
+                    ));
+                });
+            } else {
+                ui.colored_label(
+                    p.warn,
+                    format!(
+                        "{} {}, {} {}",
+                        r.open_edges,
+                        tr("open edges"),
+                        r.non_manifold_edges,
+                        tr("non-manifold edges")
+                    ),
+                );
+                repair = ui
+                    .button(tr("Repair"))
+                    .on_hover_text(tr("Weld, fix normals and close holes"))
+                    .clicked();
             }
+        });
+        if repair {
+            app.run(Command::RepairMesh { index: i, fill: true });
         }
     }
 }
 
-fn multi_actions(app: &mut SliceCraftApp, ui: &mut Ui) {
-    ui.horizontal_wrapped(|ui| {
-        if ui.button(tr("Centre")).clicked() {
-            app.center_selected();
-        }
-        if ui.button(tr("Duplicate")).clicked() {
-            app.duplicate_selected();
-        }
-        if ui.button(tr("Reset")).on_hover_text(tr("Reset rotation and scale")).clicked() {
-            app.reset_selected();
-        }
-        if ui.button(tr("Remove")).clicked() {
+/// Actions on the selection, as a grid of equal buttons.
+fn actions_card(app: &mut SliceCraftApp, ui: &mut Ui) {
+    theme::card(ui, "Arrange", |ui| {
+        let gap = ui.spacing().item_spacing.x;
+        let half = (ui.available_width() - gap) / 2.0;
+        let b = |text: &str| egui::Button::new(tr(text)).min_size(vec2(half, 28.0));
+        ui.horizontal(|ui| {
+            if ui.add(b("Centre")).clicked() {
+                app.center_selected();
+            }
+            if ui.add(b("Duplicate")).clicked() {
+                app.duplicate_selected();
+            }
+        });
+        ui.horizontal(|ui| {
+            if ui
+                .add(b("Lay flat"))
+                .on_hover_text(tr("Put the largest flat face on the bed"))
+                .clicked()
+            {
+                app.for_selected(|index| Command::LayFlat { index });
+            }
+            if ui.add(b("Reset")).on_hover_text(tr("Reset rotation and scale")).clicked() {
+                app.reset_selected();
+            }
+        });
+        ui.horizontal(|ui| {
+            theme::field(ui, "Mirror");
+            for (k, axis) in [Axis::X, Axis::Y, Axis::Z].into_iter().enumerate() {
+                let letter = ["X", "Y", "Z"].get(k).copied().unwrap_or("?");
+                let colour = theme::AXES.get(k).copied().unwrap_or(Color32::GRAY);
+                if ui
+                    .add(
+                        egui::Button::new(RichText::new(letter).color(colour).strong())
+                            .min_size(vec2(34.0, 26.0)),
+                    )
+                    .clicked()
+                {
+                    app.mirror_selected(axis);
+                }
+            }
+        });
+        ui.add_space(2.0);
+        let p = theme::of(ui);
+        let w = ui.available_width();
+        if ui
+            .add(
+                egui::Button::new(RichText::new(tr("Remove")).color(p.warn))
+                    .min_size(vec2(w, 28.0)),
+            )
+            .clicked()
+        {
             app.remove_selected();
         }
     });
-    ui.horizontal_wrapped(|ui| {
-        ui.label(tr("Mirror"));
-        for (axis, l) in [(Axis::X, "X"), (Axis::Y, "Y"), (Axis::Z, "Z")] {
-            if ui.small_button(l).clicked() {
-                app.mirror_selected(axis);
-            }
-        }
-        if ui
-            .small_button(tr("Lay flat"))
-            .on_hover_text(tr("Put the largest flat face on the bed"))
-            .clicked()
-        {
-            app.for_selected(|index| Command::LayFlat { index });
-        }
-    });
-    let _ = Transform::default();
 }
 
 /// Left panel in preview mode: what the job costs, and what to show.
 pub fn summary_panel(app: &mut SliceCraftApp, ui: &mut Ui) {
     let ctx = ui.ctx().clone();
-    heading(ui, "Build summary");
+    with_footer(ui, "preview-footer", app, summary_cards, |app, ui| {
+        let ok = app.session.slice_result().is_some();
+        if theme::primary(ui, tr("Export G-code…"), ok, vec2(0.0, 42.0))
+            .on_hover_text(tr("Ctrl+E"))
+            .clicked()
+        {
+            app.export(&ctx);
+        }
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            let half = (ui.available_width() - ui.spacing().item_spacing.x) / 2.0;
+            let print = egui::Button::new(tr("Print…")).min_size(vec2(half, 28.0));
+            egui::containers::menu::MenuButton::from_button(print).ui(ui, |ui| {
+                if ui.button(tr("Over USB…")).clicked() {
+                    app.dialogs.machine = true;
+                    ui.close();
+                }
+                if ui.button(tr("To a network printer…")).clicked() {
+                    app.net.open = true;
+                    ui.close();
+                }
+            });
+            if ui
+                .add(egui::Button::new(tr("Back to models")).min_size(vec2(half, 28.0)))
+                .on_hover_text(tr("Esc"))
+                .clicked()
+            {
+                app.mode = Mode::Prepare;
+            }
+        });
+    });
+}
+
+fn summary_cards(app: &mut SliceCraftApp, ui: &mut Ui) {
     let Some(out) = app.session.slice_result() else {
-        ui.weak(tr("Slice to see the summary."));
+        theme::card(ui, "Build summary", |ui| {
+            theme::dim(ui, tr("Slice to see the summary."));
+        });
         return;
     };
     let s = &app.session.document().settings;
     let g = out.stats.gcode;
     let area = std::f64::consts::PI * s.filament_diameter.powi(2) / 4.0;
-    // extent of the toolpaths
+    // extent of the toolpaths, and extruded length by feature
     let mut lo = Vec3::new(f64::INFINITY, f64::INFINITY, f64::INFINITY);
     let mut hi = Vec3::new(f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
-    let mut by_kind: BTreeMap<&'static str, f64> = BTreeMap::new();
+    let mut by_kind: BTreeMap<&'static str, (f64, Color32)> = BTreeMap::new();
     if let Some((_, layers)) = &app.preview_cache {
         for seg in layers.iter().flat_map(|l| l.segs.iter()) {
             if let SegKind::Path(k) = seg.kind {
@@ -535,99 +746,111 @@ pub fn summary_panel(app: &mut SliceCraftApp, ui: &mut Ui) {
                     lo = Vec3::new(lo.x.min(p.x), lo.y.min(p.y), lo.z.min(p.z));
                     hi = Vec3::new(hi.x.max(p.x), hi.y.max(p.y), hi.z.max(p.z));
                 }
-                *by_kind.entry(k.label()).or_insert(0.0) += (seg.b - seg.a).length();
+                let e = by_kind.entry(k.label()).or_insert((0.0, scene::kind_color(k)));
+                e.0 += (seg.b - seg.a).length();
             }
         }
     }
     let size = if lo.x.is_finite() { hi - lo } else { Vec3::ZERO };
-    egui::Frame::group(ui.style()).show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        egui::Grid::new("summary").num_columns(2).striped(true).show(ui, |ui| {
+    let layers = out.layers.len();
+    let warnings = out.stats.warnings.clone();
+    let models = app.session.document().objects.iter().filter(|o| o.visible).count();
+
+    theme::card(ui, "Build summary", |ui| {
+        let gap = ui.spacing().item_spacing.x;
+        let half = (ui.available_width() - gap) / 2.0;
+        ui.horizontal(|ui| {
+            theme::figure(ui, "Print time", &format_duration(g.estimated_seconds), half);
+            theme::figure(ui, "Filament", &format!("{:.2} m", g.filament_mm / 1000.0), half);
+        });
+        ui.horizontal(|ui| {
+            theme::figure(ui, "Weight", &format!("{:.1} g", g.filament_grams), half);
+            theme::figure(ui, "Cost", &format!("{:.2}", g.filament_cost), half);
+        });
+        ui.add_space(6.0);
+        egui::Grid::new("summary").num_columns(2).spacing([12.0, 4.0]).show(ui, |ui| {
             let mut row = |k: &str, v: String| {
-                ui.label(k);
+                theme::field(ui, k);
                 ui.label(v);
                 ui.end_row();
             };
-            row("Print time", format_duration(g.estimated_seconds));
-            row("Filament", format!("{:.2} m", g.filament_mm / 1000.0));
+            row("Size", format!("{:.1} × {:.1} × {:.1} mm", size.x, size.y, hi.z.max(0.0)));
             row("Volume", format!("{:.2} cm³", g.filament_mm * area / 1000.0));
-            row("Weight", format!("{:.1} g", g.filament_grams));
-            row("Cost", format!("{:.2}", g.filament_cost));
-            row("Size X", format!("{:.2} mm", size.x));
-            row("Size Y", format!("{:.2} mm", size.y));
-            row("Size Z", format!("{:.2} mm", hi.z.max(0.0)));
-            row("Layers", out.layers.len().to_string());
-            row(
-                "Models",
-                app.session.document().objects.iter().filter(|o| o.visible).count().to_string(),
-            );
+            row("Layers", layers.to_string());
+            row("Models", models.to_string());
             row("Retractions", g.retractions.to_string());
             row("Travel", format!("{:.1} m", g.travel_mm / 1000.0));
         });
-        ui.weak(tr("Weight uses the profile's filament density."));
-    });
-    egui::CollapsingHeader::new("Extruded length by feature").default_open(false).show(ui, |ui| {
-        egui::Grid::new("byfeature").num_columns(2).show(ui, |ui| {
-            for (k, v) in &by_kind {
-                ui.label(*k);
-                ui.label(format!("{:.2} m", v / 1000.0));
-                ui.end_row();
-            }
-        });
-    });
-    if !out.stats.warnings.is_empty() {
-        egui::CollapsingHeader::new(RichText::new(tr("Notes")).color(WARN))
-            .default_open(true)
-            .show(ui, |ui| {
-                for w in &out.stats.warnings {
-                    ui.label(w);
-                }
-            });
-    }
-
-    ui.add_space(6.0);
-    heading(ui, "Show");
-    let p = &mut app.preview;
-    ui.checkbox(&mut p.show_travel, tr("Travel moves"));
-    ui.checkbox(&mut p.show_retractions, tr("Retractions"));
-    ui.checkbox(&mut p.show_toolhead, tr("Nozzle"));
-    ui.checkbox(&mut p.ghost_model, tr("Model outline"));
-    ui.horizontal(|ui| {
-        ui.label(tr("Colour by"));
-        egui::ComboBox::from_id_salt("coloring").selected_text(tr(p.coloring.label())).show_ui(
-            ui,
-            |ui| {
-                for c in Coloring::ALL {
-                    ui.selectable_value(&mut p.coloring, c, tr(c.label()));
-                }
-            },
+        ui.add_space(2.0);
+        ui.label(
+            RichText::new(tr("Weight uses the profile's filament density."))
+                .size(12.0)
+                .color(theme::of(ui).dim),
         );
     });
 
-    ui.add_space(10.0);
-    ui.vertical_centered_justified(|ui| {
-        if ui
-            .add(
-                egui::Button::new(RichText::new(tr("Export G-code…")).strong())
-                    .min_size(egui::vec2(0.0, 32.0)),
-            )
-            .clicked()
-        {
-            app.export(&ctx);
-        }
-        ui.menu_button(tr("Print on a printer…"), |ui| {
-            if ui.button(tr("Over USB…")).clicked() {
-                app.dialogs.machine = true;
-                ui.close();
-            }
-            if ui.button(tr("To a network printer…")).clicked() {
-                app.net.open = true;
-                ui.close();
+    if !by_kind.is_empty() {
+        let total: f64 = by_kind.values().map(|(v, _)| *v).sum::<f64>().max(1e-9);
+        let mut rows: Vec<(&str, f64, Color32)> =
+            by_kind.iter().map(|(k, (v, c))| (*k, *v, *c)).collect();
+        rows.sort_by(|a, b| b.1.total_cmp(&a.1));
+        theme::card(ui, "By feature", |ui| {
+            let p = theme::of(ui);
+            for (k, v, c) in rows {
+                ui.horizontal(|ui| {
+                    let (sw, _) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
+                    ui.painter().rect_filled(sw, 3, c);
+                    ui.label(tr(k));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            RichText::new(format!("{:.2} m", v / 1000.0)).color(p.dim).size(12.0),
+                        );
+                    });
+                });
+                let (bar, _) =
+                    ui.allocate_exact_size(vec2(ui.available_width(), 4.0), Sense::hover());
+                ui.painter().rect_filled(bar, 2, p.input);
+                let mut fill = bar;
+                fill.set_width((bar.width() * (v / total) as f32).max(2.0));
+                ui.painter().rect_filled(fill, 2, c);
             }
         });
-        if ui.button(tr("Back to models")).on_hover_text(tr("Esc")).clicked() {
-            app.mode = Mode::Prepare;
-        }
+    }
+
+    if !warnings.is_empty() {
+        let warn = theme::of(ui).warn;
+        theme::card(ui, "Notes", |ui| {
+            for w in &warnings {
+                ui.horizontal_wrapped(|ui| {
+                    ui.colored_label(warn, "•");
+                    ui.label(w);
+                });
+            }
+        });
+    }
+
+    theme::card(ui, "Display", |ui| {
+        let p = &mut app.preview;
+        egui::Grid::new("show").num_columns(2).spacing([12.0, 4.0]).show(ui, |ui| {
+            ui.checkbox(&mut p.show_travel, tr("Travel moves"));
+            ui.checkbox(&mut p.show_retractions, tr("Retractions"));
+            ui.end_row();
+            ui.checkbox(&mut p.show_toolhead, tr("Nozzle"));
+            ui.checkbox(&mut p.ghost_model, tr("Model outline"));
+            ui.end_row();
+        });
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            theme::field(ui, "Colour by");
+            egui::ComboBox::from_id_salt("coloring")
+                .selected_text(tr(p.coloring.label()))
+                .width(ui.available_width())
+                .show_ui(ui, |ui| {
+                    for c in Coloring::ALL {
+                        ui.selectable_value(&mut p.coloring, c, tr(c.label()));
+                    }
+                });
+        });
     });
 }
 
@@ -637,34 +860,43 @@ pub fn preview_controls(app: &mut SliceCraftApp, ui: &mut Ui) {
     let max = layers.len().saturating_sub(1);
     let moves = layers.get(app.preview.last_layer).map_or(0, |l| l.segs.len());
     let p = &mut app.preview;
-    ui.add_space(3.0);
+    ui.add_space(4.0);
     ui.horizontal(|ui| {
-        if ui
-            .button(if p.playing { "⏸ Pause" } else { "▶ Play" })
-            .on_hover_text(tr("Space"))
-            .clicked()
-        {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        let (icon, tip) = if p.playing {
+            (Icon::Pause, tr("Pause (Space)"))
+        } else {
+            (Icon::Play, tr("Play (Space)"))
+        };
+        if icons::button(ui, icon, tip, true, p.playing).clicked() {
             p.playing = !p.playing;
             if p.playing && p.last_layer >= max && !p.by_line {
                 p.last_layer = p.first_layer;
             }
         }
-        if ui.button(tr("⏮")).on_hover_text(tr("Previous layer")).clicked() {
+        if icons::button(ui, Icon::StepBack, tr("Previous layer"), true, false).clicked() {
             p.last_layer = p.last_layer.saturating_sub(1);
             p.line_cursor = 0;
         }
-        if ui.button(tr("⏭")).on_hover_text(tr("Next layer")).clicked() {
+        if icons::button(ui, Icon::StepForward, tr("Next layer"), true, false).clicked() {
             p.last_layer = (p.last_layer + 1).min(max);
             p.line_cursor = 0;
         }
-        ui.add(egui::Slider::new(&mut p.speed, 1.0..=200.0).logarithmic(true).text("speed"));
-        ui.separator();
-        ui.label(tr("Step by"));
-        ui.selectable_value(&mut p.by_line, false, "layer");
-        if ui.selectable_value(&mut p.by_line, true, "move").clicked() {
+        ui.add_space(6.0);
+        theme::field(ui, "Speed");
+        ui.add(egui::Slider::new(&mut p.speed, 1.0..=200.0).logarithmic(true).max_decimals(0));
+        theme::divider(ui);
+        theme::field(ui, "Step by");
+        let mut by_line = p.by_line;
+        if theme::segmented(
+            ui,
+            &mut by_line,
+            &[(false, tr("layer"), true), (true, tr("move"), true)],
+        ) {
+            p.by_line = by_line;
             p.line_cursor = 0;
         }
-        ui.separator();
+        theme::divider(ui);
         let mut only = p.only_n.is_some();
         if ui.checkbox(&mut only, tr("Only the last")).changed() {
             p.only_n = if only { Some(1) } else { None };
@@ -674,37 +906,41 @@ pub fn preview_controls(app: &mut SliceCraftApp, ui: &mut Ui) {
             ui.label(tr("layers"));
         }
     });
-    ui.horizontal(|ui| {
-        let w = (ui.available_width() - 160.0).max(120.0);
-        ui.spacing_mut().slider_width = w;
-        ui.label(tr("From "));
-        ui.add(
-            egui::Slider::new(&mut p.first_layer, 0..=max)
-                .custom_formatter(|v, _| format!("{}", v as usize + 1)),
-        );
-    });
-    ui.horizontal(|ui| {
-        let w = (ui.available_width() - 160.0).max(120.0);
-        ui.spacing_mut().slider_width = w;
-        ui.label(tr("To     "));
-        if ui
-            .add(
-                egui::Slider::new(&mut p.last_layer, 0..=max)
+    ui.add_space(2.0);
+    let w = (ui.available_width() - 190.0).max(120.0);
+    egui::Grid::new("layer-range").num_columns(2).spacing([10.0, 4.0]).show(ui, |ui| {
+        theme::field(ui, "From layer");
+        ui.scope(|ui| {
+            ui.spacing_mut().slider_width = w;
+            ui.add(
+                egui::Slider::new(&mut p.first_layer, 0..=max)
                     .custom_formatter(|v, _| format!("{}", v as usize + 1)),
-            )
-            .changed()
-        {
-            p.line_cursor = 0;
+            );
+        });
+        ui.end_row();
+        theme::field(ui, "To layer");
+        ui.scope(|ui| {
+            ui.spacing_mut().slider_width = w;
+            if ui
+                .add(
+                    egui::Slider::new(&mut p.last_layer, 0..=max)
+                        .custom_formatter(|v, _| format!("{}", v as usize + 1)),
+                )
+                .changed()
+            {
+                p.line_cursor = 0;
+            }
+        });
+        ui.end_row();
+        if p.by_line {
+            theme::field(ui, "Move");
+            ui.scope(|ui| {
+                ui.spacing_mut().slider_width = w;
+                ui.add(egui::Slider::new(&mut p.line_cursor, 0..=moves));
+            });
+            ui.end_row();
         }
     });
-    if p.by_line {
-        ui.horizontal(|ui| {
-            let w = (ui.available_width() - 160.0).max(120.0);
-            ui.spacing_mut().slider_width = w;
-            ui.label(tr("Move  "));
-            ui.add(egui::Slider::new(&mut p.line_cursor, 0..=moves));
-        });
-    }
     if p.first_layer > p.last_layer {
         p.first_layer = p.last_layer;
     }
@@ -712,6 +948,7 @@ pub fn preview_controls(app: &mut SliceCraftApp, ui: &mut Ui) {
 }
 
 pub fn status_bar(app: &mut SliceCraftApp, ui: &mut Ui) {
+    let p = theme::of(ui);
     ui.horizontal(|ui| {
         if let Some(job) = &app.job {
             let stage = STAGES
@@ -725,77 +962,105 @@ pub fn status_bar(app: &mut SliceCraftApp, ui: &mut Ui) {
             ui.add(
                 egui::ProgressBar::new(frac.clamp(0.0, 1.0))
                     .desired_width(220.0)
-                    .text(stage.label()),
+                    .desired_height(16.0)
+                    .fill(p.accent)
+                    .corner_radius(8)
+                    .text(tr(stage.label())),
             );
         }
-        let color = if app.status_is_error { WARN } else { ui.visuals().text_color() };
+        let color = if app.status_is_error { p.warn } else { p.text };
         let status = app.status.clone();
         ui.add(
-            egui::Label::new(RichText::new(status).color(color)).truncate().sense(Sense::hover()),
+            egui::Label::new(RichText::new(status).size(13.0).color(color))
+                .truncate()
+                .sense(Sense::hover()),
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let doc = app.session.document();
-            ui.weak(format!(
-                "{} · bed {:.0}×{:.0}×{:.0} mm · {} model(s)",
-                app.session.profile_name(),
-                doc.bed.width,
-                doc.bed.depth,
-                doc.bed.height,
-                doc.objects.len()
-            ));
+            let info = |ui: &mut Ui, text: String| {
+                ui.label(RichText::new(text).size(12.0).color(p.dim));
+            };
+            info(ui, format!("{} {}", tr("Models:"), doc.objects.len()));
+            theme::divider(ui);
+            info(
+                ui,
+                format!(
+                    "{} {:.0}×{:.0}×{:.0} mm",
+                    tr("bed"),
+                    doc.bed.width,
+                    doc.bed.depth,
+                    doc.bed.height
+                ),
+            );
+            theme::divider(ui);
+            info(ui, app.session.profile_name().to_string());
         });
     });
 }
 
-/// Legend colours and labels for the current colouring, for the viewport overlay.
-pub fn legend(app: &SliceCraftApp) -> Vec<(Color32, String)> {
+/// Legend rows for the current colouring, for the viewport overlay: colour,
+/// label, and for feature colouring the index of the kind's show/hide switch.
+/// Kinds the job does not contain are left out.
+pub fn legend(app: &SliceCraftApp) -> Vec<(Color32, String, Option<usize>)> {
+    let plain = |v: Vec<(Color32, String)>| v.into_iter().map(|(c, l)| (c, l, None)).collect();
     match app.preview.coloring {
         Coloring::Feature => {
-            let mut v: Vec<(Color32, String)> = PathKind::ALL
+            let mut v: Vec<(Color32, String, Option<usize>)> = PathKind::ALL
                 .iter()
-                .map(|k| (scene::kind_color(*k), k.label().to_string()))
+                .enumerate()
+                .filter(|(i, _)| app.kinds_present.get(*i).copied().unwrap_or(true))
+                .map(|(i, k)| (scene::kind_color(*k), tr(k.label()).to_string(), Some(i)))
                 .collect();
             if app.preview.show_travel {
-                v.push((scene::TRAVEL, "travel".into()));
+                v.push((scene::TRAVEL, tr("travel").into(), None));
             }
             v
         }
         Coloring::Speed => {
             let (lo, hi) =
                 app.preview_cache.as_ref().map_or((0.0, 1.0), |(_, l)| scene::speed_range(l));
-            (0..5)
-                .map(|k| {
-                    let t = f64::from(k) / 4.0;
-                    (scene::ramp(t), format!("{:.0} mm/s", f64::from(lo) + t * f64::from(hi - lo)))
-                })
-                .collect()
+            plain(
+                (0..5)
+                    .map(|k| {
+                        let t = f64::from(k) / 4.0;
+                        let v = f64::from(lo) + t * f64::from(hi - lo);
+                        (scene::ramp(t), format!("{v:.0} mm/s"))
+                    })
+                    .collect(),
+            )
         }
         Coloring::Height => {
             let top = app.preview_cache.as_ref().and_then(|(_, l)| l.last()).map_or(0.0, |l| l.z);
-            (0..5)
-                .map(|k| {
-                    let t = f64::from(k) / 4.0;
-                    (scene::ramp(t), format!("{:.1} mm", t * top))
-                })
-                .collect()
+            plain(
+                (0..5)
+                    .map(|k| {
+                        let t = f64::from(k) / 4.0;
+                        (scene::ramp(t), format!("{:.1} mm", t * top))
+                    })
+                    .collect(),
+            )
         }
-        Coloring::Tool => app
-            .preview_cache
-            .as_ref()
-            .map(|(_, l)| scene::tools_used(l))
-            .unwrap_or_default()
-            .into_iter()
-            .map(|t| (scene::tool_color(t), format!("tool {t}")))
-            .collect(),
+        Coloring::Tool => plain(
+            app.preview_cache
+                .as_ref()
+                .map(|(_, l)| scene::tools_used(l))
+                .unwrap_or_default()
+                .into_iter()
+                .map(|t| (scene::tool_color(t), format!("{} {t}", tr("tool"))))
+                .collect(),
+        ),
         Coloring::Flow => {
             let (lo, hi) =
                 app.preview_cache.as_ref().map_or((0.0, 1.0), |(_, l)| scene::flow_range(l));
-            (0..5)
-                .map(|k| {
-                    let t = f64::from(k) / 4.0;
-                    (scene::ramp(t), format!("{:.1} mm³/s", f64::from(lo) + t * f64::from(hi - lo)))
-                })
-                .collect()
+            plain(
+                (0..5)
+                    .map(|k| {
+                        let t = f64::from(k) / 4.0;
+                        let v = f64::from(lo) + t * f64::from(hi - lo);
+                        (scene::ramp(t), format!("{v:.1} mm³/s"))
+                    })
+                    .collect(),
+            )
         }
     }
 }

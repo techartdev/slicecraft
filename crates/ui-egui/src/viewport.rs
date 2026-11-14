@@ -2,8 +2,11 @@
 //! and the overlays drawn on top of it.
 
 use crate::app::{Mode, SliceCraftApp, Tool};
-use crate::camera::{Frame, Viewport};
+use crate::camera::{Frame, ViewPreset, Viewport};
+use crate::i18n::tr;
+use crate::icons::{self, Icon};
 use crate::scene::{self, Builder, Coloring, ModelStyle, PreviewStyle};
+use crate::theme;
 use eframe::egui::{self, Align2, Color32, FontId, PointerButton, Pos2, Rect, Sense, Ui};
 use slicecraft_doc::{SupportEdit, SupportEditKind, Transform};
 use slicecraft_engine::Command;
@@ -231,15 +234,10 @@ pub fn viewport(app: &mut SliceCraftApp, ui: &mut Ui) {
 
     // draw
     let painter = ui.painter_at(rect);
-    let bg = if app.prefs.dark {
-        Color32::from_rgb(0x1b, 0x1d, 0x21)
-    } else {
-        Color32::from_rgb(0xd8, 0xdc, 0xe2)
-    };
-    painter.rect_filled(rect, 0.0, bg);
+    crate::theme::paint_backdrop(&painter, rect, app.prefs.dark);
     let bed = app.session.document().bed.clone();
     let mut b = Builder::default();
-    scene::bed(&mut b, &frame, bed.width, bed.depth, bed.height, app.prefs.bed);
+    scene::bed(&mut b, &frame, (bed.width, bed.depth, bed.height), app.prefs.bed, app.prefs.dark);
     if app.session.document().settings.bed_shape == slicecraft_doc::BedShape::Circle {
         let r = bed.width / 2.0;
         let n = 96;
@@ -334,18 +332,135 @@ pub fn viewport(app: &mut SliceCraftApp, ui: &mut Ui) {
     overlays(app, ui, rect, head);
 }
 
+/// A badge of text in a corner of the view.
+fn badge(ui: &mut Ui, at: Pos2, align: Align2, text: &str) {
+    let p = theme::of(ui);
+    let font = FontId::proportional(13.0);
+    let galley = ui.ctx().fonts_mut(|f| f.layout_no_wrap(text.to_string(), font, p.text));
+    let size = galley.size() + egui::vec2(16.0, 8.0);
+    let r = align.anchor_size(at, size);
+    let painter = ui.painter();
+    painter.rect_filled(r, 8, p.card.gamma_multiply(0.92));
+    painter.rect_stroke(r, 8, egui::Stroke::new(1.0, p.border), egui::StrokeKind::Inside);
+    painter.galley(r.min + egui::vec2(8.0, 4.0), galley, p.text);
+}
+
+/// The floating bar of camera views at the top of the 3D view.
+fn view_bar(app: &mut SliceCraftApp, ui: &mut Ui, rect: Rect) {
+    let width = 11.0 * 30.0 + 2.0 * 9.0 + 8.0;
+    let at = egui::pos2(rect.center().x - width / 2.0, rect.top() + 10.0);
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(Rect::from_min_size(at, egui::vec2(width + 20.0, 44.0)))
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        |ui| {
+            theme::overlay_frame(ui).show(ui, |ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                for (v, icon) in [
+                    (ViewPreset::Iso, Icon::ViewIso),
+                    (ViewPreset::Front, Icon::ViewFront),
+                    (ViewPreset::Back, Icon::ViewBack),
+                    (ViewPreset::Left, Icon::ViewLeft),
+                    (ViewPreset::Right, Icon::ViewRight),
+                    (ViewPreset::Top, Icon::ViewTop),
+                    (ViewPreset::Bottom, Icon::ViewBottom),
+                ] {
+                    let tip = format!("{} ({})", tr(v.label()), tr("view"));
+                    if icons::sized(ui, icon, &tip, true, false, 28.0).clicked() {
+                        app.view(v);
+                    }
+                }
+                theme::divider(ui);
+                if icons::sized(ui, Icon::Fit, tr("Fit models (F)"), true, false, 28.0).clicked() {
+                    app.fit_view();
+                }
+                theme::divider(ui);
+                if icons::sized(ui, Icon::Grid, tr("Bed grid"), true, app.prefs.bed.grid, 28.0)
+                    .clicked()
+                {
+                    app.prefs.bed.grid = !app.prefs.bed.grid;
+                }
+                let cut = app.section.is_some();
+                if icons::sized(ui, Icon::Section, tr("Section view"), true, cut, 28.0).clicked() {
+                    app.section = if cut { None } else { Some(10.0) };
+                }
+                let wire = app.prefs.wireframe;
+                if icons::sized(
+                    ui,
+                    Icon::Wireframe,
+                    tr("Draw models as wireframes"),
+                    true,
+                    wire,
+                    28.0,
+                )
+                .clicked()
+                {
+                    app.prefs.wireframe = !wire;
+                }
+            });
+        },
+    );
+}
+
+/// The floating bar of placement tools at the left of the 3D view.
+fn tool_bar(app: &mut SliceCraftApp, ui: &mut Ui, rect: Rect) {
+    let height = 4.0 * 34.0 + 10.0;
+    let at = egui::pos2(rect.left() + 10.0, rect.center().y - height / 2.0);
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(Rect::from_min_size(at, egui::vec2(48.0, height + 10.0)))
+            .layout(egui::Layout::top_down(egui::Align::Center)),
+        |ui| {
+            theme::overlay_frame(ui).show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 2.0;
+                for (tool, icon, tip) in [
+                    (Tool::Select, Icon::Select, "Select (Q)"),
+                    (Tool::Move, Icon::Move, "Move (W)"),
+                    (Tool::Rotate, Icon::Rotate, "Rotate (E)"),
+                    (Tool::Scale, Icon::Scale, "Scale (R)"),
+                ] {
+                    if icons::button(ui, icon, tr(tip), true, app.tool == tool).clicked() {
+                        app.tool = tool;
+                    }
+                }
+            });
+        },
+    );
+}
+
+/// What an empty plate shows: where models come from.
+fn empty_plate(app: &mut SliceCraftApp, ui: &mut Ui, rect: Rect) {
+    let size = egui::vec2(360.0, 150.0);
+    let r = Rect::from_center_size(rect.center(), size);
+    ui.scope_builder(egui::UiBuilder::new().max_rect(r), |ui| {
+        theme::overlay_frame(ui).inner_margin(egui::Margin::same(18)).show(ui, |ui| {
+            ui.set_width(size.x - 36.0);
+            ui.vertical_centered(|ui| {
+                ui.label(theme::title_text(ui, "Nothing on the plate yet"));
+                ui.add_space(2.0);
+                theme::dim(ui, tr("Drop STL, OBJ or 3MF files here, or import them."));
+                ui.add_space(10.0);
+                if theme::primary(ui, tr("Import models…"), true, egui::vec2(200.0, 34.0)).clicked()
+                {
+                    app.open_import_dialog();
+                }
+            });
+        });
+    });
+}
+
 fn overlays(app: &mut SliceCraftApp, ui: &mut Ui, rect: Rect, head: Option<Vec3>) {
+    let p = theme::of(ui);
     let painter = ui.painter_at(rect);
-    let faint = Color32::from_rgb(0x9a, 0xa0, 0xa8);
-    if app.session.document().objects.is_empty() && app.mode == Mode::Prepare {
-        painter.text(
-            rect.center(),
-            Align2::CENTER_CENTER,
-            "Drop STL or OBJ files here, or use Import",
-            FontId::proportional(18.0),
-            faint,
-        );
+    let faint = p.dim;
+    view_bar(app, ui, rect);
+    if app.mode == Mode::Prepare {
+        tool_bar(app, ui, rect);
+        if app.session.document().objects.is_empty() {
+            empty_plate(app, ui, rect);
+        }
     }
+
     let hint = match (app.mode, app.tool) {
         (Mode::Prepare, Tool::Select) => {
             "drag: orbit · right-drag: pan · wheel: zoom · click: select · shift-drag: move"
@@ -370,7 +485,7 @@ fn overlays(app: &mut SliceCraftApp, ui: &mut Ui, rect: Rect, head: Option<Vec3>
     painter.text(
         rect.left_bottom() + egui::vec2(10.0, -8.0),
         Align2::LEFT_BOTTOM,
-        hint,
+        tr(hint),
         FontId::proportional(12.0),
         faint,
     );
@@ -391,13 +506,8 @@ fn overlays(app: &mut SliceCraftApp, ui: &mut Ui, rect: Rect, head: Option<Vec3>
             ui.spacing_mut().slider_width = r.height();
             ui.add(egui::Slider::new(z, 0.0..=top.max(0.1)).vertical().show_value(false));
         });
-        painter.text(
-            Pos2::new(rect.right() - 12.0, rect.top() + 14.0),
-            Align2::RIGHT_TOP,
-            format!("section at z {:.2} mm", *z),
-            FontId::proportional(14.0),
-            Color32::WHITE,
-        );
+        let label = format!("{} {:.2} mm", tr("Section at Z"), *z);
+        badge(ui, Pos2::new(rect.right() - 12.0, rect.top() + 12.0), Align2::RIGHT_TOP, &label);
     }
 
     if app.mode != Mode::Preview {
@@ -406,13 +516,9 @@ fn overlays(app: &mut SliceCraftApp, ui: &mut Ui, rect: Rect, head: Option<Vec3>
     let Some((_, layers)) = &app.preview_cache else { return };
     let max = layers.len().saturating_sub(1);
     let z = layers.get(app.preview.last_layer).map_or(0.0, |l| l.z);
-    painter.text(
-        Pos2::new(rect.right() - 12.0, rect.top() + 14.0),
-        Align2::RIGHT_TOP,
-        format!("layer {} / {}   z {:.2} mm", app.preview.last_layer + 1, max + 1, z),
-        FontId::proportional(14.0),
-        Color32::WHITE,
-    );
+    let label =
+        format!("{} {} / {}   ·   Z {:.2} mm", tr("Layer"), app.preview.last_layer + 1, max + 1, z);
+    badge(ui, Pos2::new(rect.right() - 12.0, rect.top() + 12.0), Align2::RIGHT_TOP, &label);
     let r = Rect::from_min_max(
         Pos2::new(rect.right() - 54.0, rect.top() + 40.0),
         Pos2::new(rect.right() - 14.0, rect.bottom() - 60.0),
@@ -436,7 +542,7 @@ fn overlays(app: &mut SliceCraftApp, ui: &mut Ui, rect: Rect, head: Option<Vec3>
         painter.text(
             rect.left_bottom() + egui::vec2(10.0, -26.0),
             Align2::LEFT_BOTTOM,
-            format!("nozzle  X {:.3}  Y {:.3}  Z {:.3}", h.x, h.y, h.z),
+            format!("{}  X {:.3}  Y {:.3}  Z {:.3}", tr("nozzle"), h.x, h.y, h.z),
             FontId::monospace(12.0),
             faint,
         );
@@ -447,17 +553,17 @@ fn overlays(app: &mut SliceCraftApp, ui: &mut Ui, rect: Rect, head: Option<Vec3>
     let at = rect.left_top() + egui::vec2(10.0, 10.0);
     ui.scope_builder(
         egui::UiBuilder::new()
-            .max_rect(Rect::from_min_size(at, egui::vec2(200.0, 260.0)))
+            .max_rect(Rect::from_min_size(at, egui::vec2(210.0, 420.0)))
             .layout(egui::Layout::top_down(egui::Align::Min)),
         |ui| {
-            egui::Frame::popup(ui.style()).show(ui, |ui| {
-                ui.label(egui::RichText::new(app.preview.coloring.label()).strong());
-                for (k, (color, label)) in legend.iter().enumerate() {
+            theme::overlay_frame(ui).inner_margin(egui::Margin::same(10)).show(ui, |ui| {
+                ui.label(theme::title_text(ui, app.preview.coloring.label()));
+                for (color, label, switch) in &legend {
                     ui.horizontal(|ui| {
                         let (sw, _) =
                             ui.allocate_exact_size(egui::vec2(12.0, 12.0), Sense::hover());
                         ui.painter().rect_filled(sw, 2.0, *color);
-                        match (by_feature, app.preview.filter.0.get_mut(k)) {
+                        match (by_feature, switch.and_then(|k| app.preview.filter.0.get_mut(k))) {
                             (true, Some(on)) => {
                                 ui.checkbox(on, label.as_str());
                             }

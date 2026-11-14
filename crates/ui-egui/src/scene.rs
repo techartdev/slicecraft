@@ -27,11 +27,26 @@ pub const MODEL_SUPPORT: Color32 = Color32::from_rgb(0xb8, 0xb8, 0xb0);
 pub const MODEL_CUTTER: Color32 = Color32::from_rgb(0xc0, 0x60, 0xc8);
 pub const TRAVEL: Color32 = Color32::from_rgb(0x9a, 0xa4, 0xb4);
 pub const RETRACTION: Color32 = Color32::from_rgb(0xff, 0x4f, 0x8b);
-const BED: Color32 = Color32::from_rgb(0x2b, 0x2e, 0x33);
-const GRID_MINOR: Color32 = Color32::from_rgb(0x3a, 0x3e, 0x45);
-const GRID_MAJOR: Color32 = Color32::from_rgb(0x50, 0x55, 0x5e);
-const BED_EDGE: Color32 = Color32::from_rgb(0x8a, 0x90, 0x9a);
-const VOLUME: Color32 = Color32::from_rgba_premultiplied(0x40, 0x44, 0x4a, 0x60);
+/// The bed's colours: plate, minor grid, major grid, edge, build volume.
+fn bed_colours(dark: bool) -> [Color32; 5] {
+    if dark {
+        [
+            Color32::from_rgb(0x2b, 0x2e, 0x33),
+            Color32::from_rgb(0x3a, 0x3e, 0x45),
+            Color32::from_rgb(0x50, 0x55, 0x5e),
+            Color32::from_rgb(0x8a, 0x90, 0x9a),
+            Color32::from_rgba_premultiplied(0x40, 0x44, 0x4a, 0x60),
+        ]
+    } else {
+        [
+            Color32::from_rgb(0xf4, 0xf5, 0xf7),
+            Color32::from_rgb(0xdc, 0xe0, 0xe6),
+            Color32::from_rgb(0xbd, 0xc4, 0xce),
+            Color32::from_rgb(0x7d, 0x86, 0x92),
+            Color32::from_rgba_premultiplied(0x50, 0x58, 0x64, 0x50),
+        ]
+    }
+}
 
 /// Feature colours, shared by the view and its legend.
 pub fn kind_color(kind: PathKind) -> Color32 {
@@ -159,7 +174,14 @@ impl Default for BedStyle {
 }
 
 /// The bed plate, its grid and the build volume outline.
-pub fn bed(out: &mut Builder, f: &Frame, width: f64, depth: f64, height: f64, style: BedStyle) {
+pub fn bed(
+    out: &mut Builder,
+    f: &Frame,
+    (width, depth, height): (f64, f64, f64),
+    style: BedStyle,
+    dark: bool,
+) {
+    let [plate, grid_minor, grid_major, edge, volume] = bed_colours(dark);
     let c = [
         Vec3::new(0.0, 0.0, 0.0),
         Vec3::new(width, 0.0, 0.0),
@@ -181,8 +203,8 @@ pub fn bed(out: &mut Builder, f: &Frame, width: f64, depth: f64, height: f64, st
                 f.project(Vec3::new(x0, y1, 0.0)),
             ];
             if let [Some(a), Some(b), Some(cc), Some(d)] = q {
-                out.tri(pos(a), pos(b), pos(cc), BED);
-                out.tri(pos(a), pos(cc), pos(d), BED);
+                out.tri(pos(a), pos(b), pos(cc), plate);
+                out.tri(pos(a), pos(cc), pos(d), plate);
             }
         }
     }
@@ -192,22 +214,22 @@ pub fn bed(out: &mut Builder, f: &Frame, width: f64, depth: f64, height: f64, st
         let lines_y = (depth / step).floor() as usize;
         for k in 1..=lines_x.min(2000) {
             let x = k as f64 * step;
-            let col = if k % 5 == 0 { GRID_MAJOR } else { GRID_MINOR };
+            let col = if k % 5 == 0 { grid_major } else { grid_minor };
             out.world_line(f, Vec3::new(x, 0.0, 0.0), Vec3::new(x, depth, 0.0), 1.0, col);
         }
         for k in 1..=lines_y.min(2000) {
             let y = k as f64 * step;
-            let col = if k % 5 == 0 { GRID_MAJOR } else { GRID_MINOR };
+            let col = if k % 5 == 0 { grid_major } else { grid_minor };
             out.world_line(f, Vec3::new(0.0, y, 0.0), Vec3::new(width, y, 0.0), 1.0, col);
         }
     }
     for k in 0..4 {
         if let (Some(&a), Some(&b)) = (c.get(k), c.get((k + 1) % 4)) {
-            out.world_line(f, a, b, 1.5, BED_EDGE);
+            out.world_line(f, a, b, 1.5, edge);
             if style.volume {
                 let up = Vec3::new(0.0, 0.0, height);
-                out.world_line(f, a + up, b + up, 1.0, VOLUME);
-                out.world_line(f, a, a + up, 1.0, VOLUME);
+                out.world_line(f, a + up, b + up, 1.0, volume);
+                out.world_line(f, a, a + up, 1.0, volume);
             }
         }
     }
@@ -730,6 +752,20 @@ pub fn flow_range(layers: &[PreviewLayer]) -> (f32, f32) {
 }
 
 /// The tools a slice uses, ascending.
+/// For each kind in `PathKind::ALL`, whether any move of the job has it.
+pub fn kinds_used(layers: &[PreviewLayer]) -> Vec<bool> {
+    let mut used = vec![false; PathKind::ALL.len()];
+    for s in layers.iter().flat_map(|l| l.segs.iter()) {
+        if let SegKind::Path(k) = s.kind
+            && let Some(i) = PathKind::ALL.iter().position(|x| *x == k)
+            && let Some(u) = used.get_mut(i)
+        {
+            *u = true;
+        }
+    }
+    used
+}
+
 pub fn tools_used(layers: &[PreviewLayer]) -> Vec<u8> {
     let mut t: Vec<u8> = layers
         .iter()
@@ -918,6 +954,17 @@ mod tests {
             inside_travel: Vec::new(),
             travel_via: Vec::new(),
         }]
+    }
+
+    #[test]
+    fn only_the_kinds_a_job_prints_are_listed() {
+        let layers = build_preview(&two_paths(), &PrintSettings::default());
+        let used = kinds_used(&layers);
+        assert_eq!(used.len(), PathKind::ALL.len());
+        let on: Vec<PathKind> =
+            PathKind::ALL.iter().zip(&used).filter(|(_, u)| **u).map(|(k, _)| *k).collect();
+        assert_eq!(on, vec![PathKind::OuterPerimeter, PathKind::SparseInfill]);
+        assert!(kinds_used(&[]).iter().all(|u| !u));
     }
 
     #[test]

@@ -271,6 +271,8 @@ pub struct SliceCraftApp {
     pending_export: Option<PathBuf>,
     pub(crate) geometry: Option<(u64, ModelGeometry)>,
     pub(crate) preview_cache: Option<(usize, Vec<PreviewLayer>)>,
+    /// Which feature kinds the previewed job contains, in `PathKind::ALL` order.
+    pub(crate) kinds_present: Vec<bool>,
     pub(crate) preview: PreviewState,
     pub(crate) prefs: Preferences,
     pub(crate) dialogs: Dialogs,
@@ -322,6 +324,7 @@ impl SliceCraftApp {
             pending_export: None,
             geometry: None,
             preview_cache: None,
+            kinds_present: Vec::new(),
             preview: PreviewState::default(),
             prefs: Preferences::default(),
             dialogs: Dialogs::default(),
@@ -1231,6 +1234,7 @@ impl SliceCraftApp {
                 if self.preview_cache.as_ref().is_none_or(|(k, _)| *k != key) {
                     let layers =
                         scene::build_preview(&out.layers, &self.session.document().settings);
+                    self.kinds_present = scene::kinds_used(&layers);
                     self.preview_cache = Some((key, layers));
                 }
             }
@@ -1284,7 +1288,9 @@ impl SliceCraftApp {
         if self.confirm.is_some() || self.dialogs.capture.is_some() {
             return;
         }
-        let typing = ctx.memory(|m| m.focused().is_some());
+        // only a text field takes keys; a focused button or list must not
+        // swallow shortcuts
+        let typing = ctx.text_edit_focused();
         let blocked = typing || self.dialogs.any_open();
         let (cmd, shift) = ctx.input(|i| (i.modifiers.command, i.modifiers.shift));
         let pressed = |k: Key| ctx.input(|i| i.key_pressed(k));
@@ -1325,6 +1331,21 @@ impl SliceCraftApp {
                 Action::FitView => self.fit_view(),
             }
         }
+        // Escape closes the top window even while windows block other keys
+        if pressed(Key::Escape) && !typing && !egui::Popup::is_any_open(ctx) {
+            if self.dialogs.any_open() {
+                let had_prefs = self.dialogs.preferences;
+                self.dialogs.close_top();
+                // preferences are saved when their window closes, by Esc too
+                if had_prefs && !self.dialogs.preferences {
+                    self.persist();
+                }
+            } else if self.mode == Mode::Preview {
+                self.mode = Mode::Prepare;
+            } else {
+                self.selected.clear();
+            }
+        }
         if blocked {
             return;
         }
@@ -1334,13 +1355,6 @@ impl SliceCraftApp {
         }
         if self.mode == Mode::Prepare && !cmd && pressed(Key::Backspace) {
             self.remove_selected();
-        }
-        if pressed(Key::Escape) {
-            if self.mode == Mode::Preview {
-                self.mode = Mode::Prepare;
-            } else {
-                self.selected.clear();
-            }
         }
         if !cmd {
             for (k, v) in [
@@ -1404,11 +1418,7 @@ impl SliceCraftApp {
 
     fn apply_theme(&mut self, ctx: &egui::Context) {
         if self.applied_dark != Some(self.prefs.dark) {
-            ctx.set_visuals(if self.prefs.dark {
-                egui::Visuals::dark()
-            } else {
-                egui::Visuals::light()
-            });
+            crate::theme::apply(ctx, self.prefs.dark);
             self.applied_dark = Some(self.prefs.dark);
         }
     }
@@ -1429,23 +1439,41 @@ impl eframe::App for SliceCraftApp {
         crate::network::poll(self, &ctx);
         self.advance_playback(&ctx);
 
-        egui::Panel::top("menu").show(ui, |ui| crate::menus::menu_bar(self, ui));
-        egui::Panel::top("toolbar").show(ui, |ui| crate::menus::toolbar(self, ui));
-        egui::Panel::bottom("status").show(ui, |ui| crate::panels::status_bar(self, ui));
+        let pal = crate::theme::palette(self.prefs.dark);
+        let bar = |x: i8, y: i8| {
+            egui::Frame::new().fill(pal.panel).inner_margin(egui::Margin::symmetric(x, y))
+        };
+        egui::Panel::top("menu")
+            .frame(bar(8, 3))
+            .show_separator_line(false)
+            .show(ui, |ui| crate::menus::menu_bar(self, ui));
+        egui::Panel::top("toolbar")
+            .frame(bar(10, 6))
+            .show(ui, |ui| crate::menus::toolbar(self, ui));
+        egui::Panel::bottom("status")
+            .frame(bar(12, 4))
+            .show(ui, |ui| crate::panels::status_bar(self, ui));
         if self.mode == Mode::Preview {
             egui::Panel::bottom("preview-controls")
+                .frame(bar(14, 6))
                 .show(ui, |ui| crate::panels::preview_controls(self, ui));
         }
-        egui::Panel::left("left").resizable(true).default_size(270.0).show(ui, |ui| {
-            match self.mode {
+        egui::Panel::left("left")
+            .resizable(true)
+            .default_size(310.0)
+            .size_range(270.0..=460.0)
+            .frame(bar(12, 10))
+            .show(ui, |ui| match self.mode {
                 Mode::Prepare => crate::panels::models_panel(self, ui),
                 Mode::Preview => crate::panels::summary_panel(self, ui),
-            }
-        });
-        if self.mode == Mode::Prepare {
-            egui::Panel::right("right").resizable(true).default_size(290.0).show(ui, |ui| {
-                crate::panels::transform_panel(self, ui);
             });
+        if self.mode == Mode::Prepare {
+            egui::Panel::right("right")
+                .resizable(true)
+                .default_size(290.0)
+                .size_range(250.0..=420.0)
+                .frame(bar(12, 10))
+                .show(ui, |ui| crate::panels::transform_panel(self, ui));
         }
         egui::CentralPanel::no_frame().show(ui, |ui| crate::viewport::viewport(self, ui));
         crate::dialogs::show(self, &ctx);

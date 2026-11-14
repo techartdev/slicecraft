@@ -3,6 +3,7 @@
 //! (placeholder), shortcuts, feature status and about.
 
 use crate::app::SliceCraftApp;
+use crate::theme;
 use eframe::egui::{self, Color32, RichText, Ui};
 use slicecraft_doc::PrintSettings;
 use slicecraft_doc::profile::presets;
@@ -54,6 +55,27 @@ impl Dialogs {
             || self.planned.is_some()
             || self.import_report.is_some()
             || self.zones.is_some()
+            || self.compare.is_some()
+    }
+
+    /// Close one window, the kind most likely on top: small notes first, the
+    /// profile editor last. Closing the editor this way discards its draft,
+    /// as Cancel does.
+    pub fn close_top(&mut self) {
+        if self.planned.take().is_some()
+            || std::mem::take(&mut self.about)
+            || std::mem::take(&mut self.features)
+            || std::mem::take(&mut self.shortcuts)
+            || self.compare.take().is_some()
+            || self.import_report.take().is_some()
+            || std::mem::take(&mut self.analysis)
+            || std::mem::take(&mut self.preferences)
+            || self.zones.take().is_some()
+            || std::mem::take(&mut self.machine)
+        {
+            return;
+        }
+        self.settings = None;
     }
 }
 
@@ -67,6 +89,9 @@ pub struct SettingsEditor {
     pub search: String,
     pub error: Option<String>,
     pub only_changed: bool,
+    /// True until the window has been drawn once; the search box then takes
+    /// the keyboard, so typing finds a setting straight away.
+    pub fresh: bool,
 }
 
 impl SettingsEditor {
@@ -79,6 +104,7 @@ impl SettingsEditor {
             search: String::new(),
             error: None,
             only_changed: false,
+            fresh: true,
         }
     }
 }
@@ -113,7 +139,7 @@ fn zones_window(app: &mut SliceCraftApp, ctx: &egui::Context) {
     let top = slicecraft_geom::MAX_COORD;
     let mut open = true;
     let mut command: Option<Command> = None;
-    egui::Window::new(crate::i18n::tr("Setting zones")).open(&mut open).default_width(640.0).show(ctx, |ui| {
+    crate::theme::window(ctx, crate::i18n::tr("Setting zones")).open(&mut open).default_width(640.0).show(ctx, |ui| {
         ui.label(crate::i18n::tr("Change settings above a height, or for some models only. Zones apply in order; later ones win."));
         ui.add_space(4.0);
         ui.horizontal_top(|ui| {
@@ -247,7 +273,7 @@ fn import_report_window(app: &mut SliceCraftApp, ctx: &egui::Context) {
     let mut open = true;
     let mut edit = false;
     let mut close = false;
-    egui::Window::new(crate::i18n::tr("Profile import"))
+    crate::theme::window(ctx, crate::i18n::tr("Profile import"))
         .open(&mut open)
         .collapsible(false)
         .default_width(460.0)
@@ -316,7 +342,7 @@ fn import_report_window(app: &mut SliceCraftApp, ctx: &egui::Context) {
 fn confirm_window(app: &mut SliceCraftApp, ctx: &egui::Context) {
     let Some(action) = app.confirm.clone() else { return };
     let mut choice = None;
-    egui::Window::new(crate::i18n::tr("Unsaved changes"))
+    crate::theme::window(ctx, crate::i18n::tr("Unsaved changes"))
         .collapsible(false)
         .resizable(false)
         .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
@@ -349,13 +375,28 @@ fn confirm_window(app: &mut SliceCraftApp, ctx: &egui::Context) {
     }
 }
 
-/// One setting's editor widget. Returns a new value when it was changed.
+/// Width of the value column in the profile editor.
+const FIELD_W: f32 = 180.0;
+
+/// One setting's editor widget, `width` wide (text gets the whole row).
+/// Returns a new value when it was changed.
 fn setting_widget(ui: &mut Ui, spec: &SettingSpec, value: &SettingValue) -> Option<SettingValue> {
+    setting_widget_w(ui, spec, value, FIELD_W)
+}
+
+fn setting_widget_w(
+    ui: &mut Ui,
+    spec: &SettingSpec,
+    value: &SettingValue,
+    width: f32,
+) -> Option<SettingValue> {
+    let size = [width, 24.0];
     match (spec.kind, value) {
         (SettingKind::Float { min, max, step, unit }, SettingValue::Float(v)) => {
             let mut x = *v;
             let suffix = if unit.is_empty() { String::new() } else { format!(" {unit}") };
-            let r = ui.add(
+            let r = ui.add_sized(
+                size,
                 egui::DragValue::new(&mut x)
                     .range(min..=max)
                     .speed(step)
@@ -367,21 +408,28 @@ fn setting_widget(ui: &mut Ui, spec: &SettingSpec, value: &SettingValue) -> Opti
         (SettingKind::Int { min, max, unit }, SettingValue::Int(v)) => {
             let mut x = *v;
             let suffix = if unit.is_empty() { String::new() } else { format!(" {unit}") };
-            let r = ui.add(egui::DragValue::new(&mut x).range(min..=max).suffix(suffix));
+            let r =
+                ui.add_sized(size, egui::DragValue::new(&mut x).range(min..=max).suffix(suffix));
             r.changed().then_some(SettingValue::Int(x))
         }
         (SettingKind::Bool, SettingValue::Bool(v)) => {
             let mut x = *v;
-            ui.checkbox(&mut x, "").changed().then_some(SettingValue::Bool(x))
+            let text = if x { crate::i18n::tr("on") } else { crate::i18n::tr("off") };
+            ui.checkbox(&mut x, RichText::new(text).color(theme::of(ui).dim))
+                .changed()
+                .then_some(SettingValue::Bool(x))
         }
         (SettingKind::Choice(opts), SettingValue::Choice(i)) => {
             let mut x = *i;
             let shown = crate::i18n::tr(opts.get(x).copied().unwrap_or("?"));
-            egui::ComboBox::from_id_salt(spec.key).selected_text(shown).show_ui(ui, |ui| {
-                for (k, o) in opts.iter().enumerate() {
-                    ui.selectable_value(&mut x, k, crate::i18n::tr(o));
-                }
-            });
+            egui::ComboBox::from_id_salt(spec.key).selected_text(shown).width(width).show_ui(
+                ui,
+                |ui| {
+                    for (k, o) in opts.iter().enumerate() {
+                        ui.selectable_value(&mut x, k, crate::i18n::tr(o));
+                    }
+                },
+            );
             (x != *i).then_some(SettingValue::Choice(x))
         }
         (SettingKind::Text, SettingValue::Text(t)) => {
@@ -401,6 +449,8 @@ fn setting_widget(ui: &mut Ui, spec: &SettingSpec, value: &SettingValue) -> Opti
     }
 }
 
+/// The settings of one tab (or of a search), section by section, each
+/// section a card of label / value rows.
 fn setting_rows(ui: &mut Ui, ed: &mut SettingsEditor, specs: &[&'static SettingSpec]) {
     // keep each section together, in the order sections first appear
     let mut order: Vec<&str> = Vec::new();
@@ -409,63 +459,76 @@ fn setting_rows(ui: &mut Ui, ed: &mut SettingsEditor, specs: &[&'static SettingS
             order.push(s.section);
         }
     }
-    let mut specs: Vec<&'static SettingSpec> = specs.to_vec();
-    specs.sort_by_key(|s| order.iter().position(|o| *o == s.section).unwrap_or(usize::MAX));
-    let mut section = "";
-    for spec in specs {
-        if spec.section != section {
-            section = spec.section;
-            ui.add_space(6.0);
-            ui.label(RichText::new(crate::i18n::tr(section)).strong());
-            ui.separator();
-        }
-        let Some(value) = ed.draft.get(spec.key) else { continue };
-        let changed = ed.original.get(spec.key).as_ref() != Some(&value);
-        let is_default = value == spec.default.value();
-        let text_kind = matches!(spec.kind, SettingKind::Text);
-        ui.horizontal(|ui| {
-            let mut label = RichText::new(crate::i18n::tr(spec.label));
-            if changed {
-                label = label.color(CHANGED);
-            }
-            let help = format!("{}\n\nkey: {}", spec.help, spec.key);
-            ui.allocate_ui_with_layout(
-                egui::vec2(210.0, 18.0),
-                egui::Layout::left_to_right(egui::Align::Center),
-                |ui| {
-                    ui.set_min_width(210.0);
-                    ui.add(egui::Label::new(label).truncate()).on_hover_text(help);
-                },
-            );
-            if !text_kind && let Some(v) = setting_widget(ui, spec, &value) {
-                match ed.draft.set(spec.key, v) {
-                    Ok(()) => ed.error = None,
-                    Err(e) => ed.error = Some(e.to_string()),
+    let p = theme::of(ui);
+    for section in order {
+        let rows: Vec<&'static SettingSpec> =
+            specs.iter().copied().filter(|s| s.section == section).collect();
+        theme::card(ui, section, |ui| {
+            let label_w = (ui.available_width() - FIELD_W - 70.0).clamp(140.0, 320.0);
+            for spec in rows {
+                let Some(value) = ed.draft.get(spec.key) else { continue };
+                let changed = ed.original.get(spec.key).as_ref() != Some(&value);
+                let is_default = value == spec.default.value();
+                let text_kind = matches!(spec.kind, SettingKind::Text);
+                let help = format!("{}\n\nkey: {}", spec.help, spec.key);
+                ui.horizontal(|ui| {
+                    let colour = if changed { CHANGED } else { p.text };
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(label_w, 24.0),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            ui.set_min_width(label_w);
+                            if changed {
+                                let (dot, _) = ui.allocate_exact_size(
+                                    egui::vec2(6.0, 6.0),
+                                    egui::Sense::hover(),
+                                );
+                                ui.painter().circle_filled(dot.center(), 3.0, CHANGED);
+                            }
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(crate::i18n::tr(spec.label)).color(colour),
+                                )
+                                .truncate(),
+                            )
+                            .on_hover_text(help);
+                        },
+                    );
+                    if !text_kind && let Some(v) = setting_widget(ui, spec, &value) {
+                        match ed.draft.set(spec.key, v) {
+                            Ok(()) => ed.error = None,
+                            Err(e) => ed.error = Some(e.to_string()),
+                        }
+                    }
+                    if !spec.implemented() {
+                        theme::tag(ui, crate::i18n::tr("planned"), PLANNED).on_hover_text(
+                            crate::i18n::tr("Saved with the profile, not used by the slicer yet"),
+                        );
+                    }
+                    if !is_default
+                        && ui
+                            .small_button("↺")
+                            .on_hover_text(crate::i18n::tr("Back to the default"))
+                            .clicked()
+                        && let Err(e) = ed.draft.set(spec.key, spec.default.value())
+                    {
+                        ed.error = Some(e.to_string());
+                    }
+                });
+                if text_kind
+                    && let Some(v) = setting_widget(ui, spec, &value)
+                    && let Err(e) = ed.draft.set(spec.key, v)
+                {
+                    ed.error = Some(e.to_string());
                 }
             }
-            if !spec.implemented() {
-                ui.label(RichText::new(crate::i18n::tr("planned")).small().color(PLANNED))
-                    .on_hover_text(crate::i18n::tr(
-                        "Saved with the profile, not used by the slicer yet",
-                    ));
-            }
-            if !is_default
-                && ui
-                    .small_button(crate::i18n::tr("↺"))
-                    .on_hover_text(crate::i18n::tr("Back to the default"))
-                    .clicked()
-                && let Err(e) = ed.draft.set(spec.key, spec.default.value())
-            {
-                ed.error = Some(e.to_string());
-            }
         });
-        if text_kind
-            && let Some(v) = setting_widget(ui, spec, &value)
-            && let Err(e) = ed.draft.set(spec.key, v)
-        {
-            ed.error = Some(e.to_string());
-        }
     }
+}
+
+/// How many settings of `tab` differ from the profile as it was opened.
+fn changed_in(ed: &SettingsEditor, tab: Tab) -> usize {
+    tab_settings(tab).filter(|s| ed.draft.get(s.key) != ed.original.get(s.key)).count()
 }
 
 fn settings_window(app: &mut SliceCraftApp, ctx: &egui::Context) {
@@ -475,56 +538,203 @@ fn settings_window(app: &mut SliceCraftApp, ctx: &egui::Context) {
     let mut close = false;
     let mut load = false;
     let mut save = false;
-    egui::Window::new(crate::i18n::tr("Print settings"))
+    let screen = ctx.content_rect();
+    let size =
+        egui::vec2((screen.width() - 80.0).min(1000.0), (screen.height() - 120.0).min(720.0));
+    crate::theme::window(ctx, crate::i18n::tr("Print settings"))
         .open(&mut open)
-        .default_size([820.0, 620.0])
+        .default_size(size)
+        .min_size([720.0, 440.0])
         .resizable(true)
-        .collapsible(false)
         .show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(crate::i18n::tr("Profile"));
-                ui.add(egui::TextEdit::singleline(&mut ed.name).desired_width(220.0));
-                egui::ComboBox::from_id_salt("start-from")
-                    .selected_text("Start from preset…")
-                    .show_ui(ui, |ui| {
-                        for p in presets() {
-                            if ui.selectable_label(false, &p.name).clicked() {
-                                ed.name = p.name.clone();
-                                ed.draft = p.settings;
+            let p = theme::of(ui);
+            egui::Panel::top("settings-head")
+                .frame(
+                    egui::Frame::new()
+                        .inner_margin(egui::Margin { bottom: 8, ..Default::default() }),
+                )
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        theme::field(ui, "Profile");
+                        ui.add(egui::TextEdit::singleline(&mut ed.name).desired_width(240.0));
+                        egui::ComboBox::from_id_salt("start-from")
+                            .selected_text(crate::i18n::tr("Start from preset…"))
+                            .width(170.0)
+                            .show_ui(ui, |ui| {
+                                for p in presets() {
+                                    if ui.selectable_label(false, &p.name).clicked() {
+                                        ed.name = p.name.clone();
+                                        ed.draft = p.settings;
+                                    }
+                                }
+                            });
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.checkbox(&mut ed.only_changed, crate::i18n::tr("changed only"));
+                            let find = ui.add(
+                                egui::TextEdit::singleline(&mut ed.search)
+                                    .hint_text(crate::i18n::tr("Find a setting…"))
+                                    .desired_width(220.0),
+                            );
+                            if ed.fresh {
+                                find.request_focus();
+                                ed.fresh = false;
+                            }
+                        });
+                    });
+                });
+            egui::Panel::bottom("settings-foot")
+                .frame(
+                    egui::Frame::new().inner_margin(egui::Margin { top: 8, ..Default::default() }),
+                )
+                .show(ui, |ui| {
+                    if let Some(e) = &ed.error {
+                        ui.colored_label(WARN, e);
+                    } else {
+                        ui.horizontal(|ui| {
+                            let (dot, _) =
+                                ui.allocate_exact_size(egui::vec2(6.0, 6.0), egui::Sense::hover());
+                            ui.painter().circle_filled(dot.center(), 3.0, CHANGED);
+                            ui.label(
+                                RichText::new(crate::i18n::tr("changed since opening"))
+                                    .size(12.0)
+                                    .color(p.dim),
+                            );
+                            ui.add_space(8.0);
+                            ui.label(
+                                RichText::new(crate::i18n::tr("Hover a name for its help."))
+                                    .size(12.0)
+                                    .color(p.dim),
+                            );
+                        });
+                    }
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        if ui.button(crate::i18n::tr("Restore defaults")).clicked() {
+                            ed.draft = PrintSettings::default();
+                        }
+                        if ui.button(crate::i18n::tr("Load…")).clicked() {
+                            load = true;
+                        }
+                        if ui.button(crate::i18n::tr("Save as…")).clicked() {
+                            save = true;
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if theme::primary(
+                                ui,
+                                crate::i18n::tr("OK"),
+                                true,
+                                egui::vec2(96.0, 30.0),
+                            )
+                            .clicked()
+                            {
+                                apply = true;
+                                close = true;
+                            }
+                            if ui
+                                .add(
+                                    egui::Button::new(crate::i18n::tr("Apply"))
+                                        .min_size(egui::vec2(80.0, 30.0)),
+                                )
+                                .clicked()
+                            {
+                                apply = true;
+                            }
+                            if ui
+                                .add(
+                                    egui::Button::new(crate::i18n::tr("Cancel"))
+                                        .min_size(egui::vec2(80.0, 30.0)),
+                                )
+                                .clicked()
+                            {
+                                close = true;
+                            }
+                        });
+                    });
+                });
+            egui::Panel::left("settings-nav")
+                .resizable(false)
+                .exact_size(186.0)
+                .frame(
+                    egui::Frame::new()
+                        .inner_margin(egui::Margin { right: 12, ..Default::default() }),
+                )
+                .show(ui, |ui| {
+                    egui::ScrollArea::vertical().id_salt("settings-tabs").show(ui, |ui| {
+                        ui.spacing_mut().item_spacing.y = 2.0;
+                        for t in Tab::ALL {
+                            let selected = ed.tab == t && ed.search.is_empty();
+                            let n = changed_in(&ed, t);
+                            let (rect, resp) = ui.allocate_exact_size(
+                                egui::vec2(ui.available_width(), 32.0),
+                                egui::Sense::click(),
+                            );
+                            let bg = if selected {
+                                p.accent.gamma_multiply(0.28)
+                            } else if resp.hovered() {
+                                p.hover
+                            } else {
+                                Color32::TRANSPARENT
+                            };
+                            ui.painter().rect_filled(rect, 6, bg);
+                            if selected {
+                                let bar = egui::Rect::from_min_size(
+                                    rect.min,
+                                    egui::vec2(3.0, rect.height()),
+                                );
+                                ui.painter().rect_filled(bar, 2, p.accent);
+                            }
+                            let planned = tab_settings(t).all(|s| !s.implemented());
+                            let colour = if planned { PLANNED } else { p.text };
+                            let font = if selected {
+                                theme::strong(14.0)
+                            } else {
+                                egui::FontId::proportional(14.0)
+                            };
+                            ui.painter().text(
+                                rect.left_center() + egui::vec2(12.0, 0.0),
+                                egui::Align2::LEFT_CENTER,
+                                crate::i18n::tr(t.label()),
+                                font,
+                                colour,
+                            );
+                            if n > 0 {
+                                let c = rect.right_center() - egui::vec2(16.0, 0.0);
+                                ui.painter().circle_filled(c, 9.0, CHANGED.gamma_multiply(0.85));
+                                ui.painter().text(
+                                    c,
+                                    egui::Align2::CENTER_CENTER,
+                                    n.to_string(),
+                                    egui::FontId::proportional(11.0),
+                                    Color32::WHITE,
+                                );
+                            }
+                            let label = crate::i18n::tr(t.label()).to_string();
+                            resp.widget_info(|| {
+                                egui::WidgetInfo::selected(
+                                    egui::WidgetType::SelectableLabel,
+                                    true,
+                                    selected,
+                                    &label,
+                                )
+                            });
+                            if resp.clicked() {
+                                ed.tab = t;
+                                ed.search.clear();
                             }
                         }
                     });
-                ui.separator();
-                ui.label(crate::i18n::tr("Find"));
-                ui.add(
-                    egui::TextEdit::singleline(&mut ed.search)
-                        .hint_text("setting name")
-                        .desired_width(170.0),
-                );
-                ui.checkbox(&mut ed.only_changed, crate::i18n::tr("changed only"));
-            });
-            ui.separator();
-            ui.horizontal_wrapped(|ui| {
-                for t in Tab::ALL {
-                    let planned = tab_settings(t).all(|s| !s.implemented());
-                    let mut text = RichText::new(crate::i18n::tr(t.label()));
-                    if planned {
-                        text = text.color(PLANNED);
-                    }
-                    if ui.selectable_label(ed.tab == t && ed.search.is_empty(), text).clicked() {
-                        ed.tab = t;
-                        ed.search.clear();
-                    }
-                }
-            });
-            ui.separator();
+                });
             let query = ed.search.trim().to_lowercase();
             let specs: Vec<&'static SettingSpec> = if query.is_empty() {
                 tab_settings(ed.tab).collect()
             } else {
                 SETTINGS
                     .iter()
-                    .filter(|s| s.label.to_lowercase().contains(&query) || s.key.contains(&query))
+                    .filter(|s| {
+                        s.label.to_lowercase().contains(&query)
+                            || crate::i18n::tr(s.label).to_lowercase().contains(&query)
+                            || s.key.contains(&query)
+                    })
                     .collect()
             };
             let specs: Vec<&'static SettingSpec> = if ed.only_changed {
@@ -535,13 +745,12 @@ fn settings_window(app: &mut SliceCraftApp, ctx: &egui::Context) {
             } else {
                 specs
             };
-            let footer = 70.0;
-            egui::ScrollArea::vertical()
-                .max_height(ui.available_height() - footer)
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
+            egui::ScrollArea::vertical().id_salt("settings-body").auto_shrink([false, false]).show(
+                ui,
+                |ui| {
+                    ui.add_space(2.0);
                     if specs.is_empty() {
-                        ui.weak(crate::i18n::tr("No settings match."));
+                        theme::dim(ui, crate::i18n::tr("No settings match."));
                     }
                     if !query.is_empty() {
                         // group search results by tab
@@ -550,50 +759,19 @@ fn settings_window(app: &mut SliceCraftApp, ctx: &egui::Context) {
                                 specs.iter().copied().filter(|s| s.tab == t).collect();
                             if !in_tab.is_empty() {
                                 ui.label(
-                                    RichText::new(crate::i18n::tr(t.label())).heading().size(15.0),
+                                    RichText::new(crate::i18n::tr(t.label()))
+                                        .font(theme::strong(17.0)),
                                 );
+                                ui.add_space(4.0);
                                 setting_rows(ui, &mut ed, &in_tab);
-                                ui.add_space(8.0);
+                                ui.add_space(6.0);
                             }
                         }
                     } else {
                         setting_rows(ui, &mut ed, &specs);
                     }
-                });
-            ui.separator();
-            if let Some(e) = &ed.error {
-                ui.colored_label(WARN, e);
-            } else {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(crate::i18n::tr("blue")).color(CHANGED));
-                    ui.weak(crate::i18n::tr("= changed since opening ·"));
-                    ui.label(RichText::new(crate::i18n::tr("planned")).color(PLANNED));
-                    ui.weak(crate::i18n::tr("= kept in the profile, not used by the slicer yet"));
-                });
-            }
-            ui.horizontal(|ui| {
-                if ui.button(crate::i18n::tr("Restore defaults")).clicked() {
-                    ed.draft = PrintSettings::default();
-                }
-                if ui.button(crate::i18n::tr("Load…")).clicked() {
-                    load = true;
-                }
-                if ui.button(crate::i18n::tr("Save as…")).clicked() {
-                    save = true;
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button(crate::i18n::tr("OK")).clicked() {
-                        apply = true;
-                        close = true;
-                    }
-                    if ui.button(crate::i18n::tr("Apply")).clicked() {
-                        apply = true;
-                    }
-                    if ui.button(crate::i18n::tr("Cancel")).clicked() {
-                        close = true;
-                    }
-                });
-            });
+                },
+            );
         });
     if apply {
         match ed.draft.validate() {
@@ -628,66 +806,113 @@ fn settings_window(app: &mut SliceCraftApp, ctx: &egui::Context) {
 }
 
 fn preferences_window(app: &mut SliceCraftApp, ctx: &egui::Context) {
+    use crate::i18n::tr;
     let mut open = app.dialogs.preferences;
-    egui::Window::new(crate::i18n::tr("Preferences")).open(&mut open).resizable(false).collapsible(false).show(
-        ctx,
-        |ui| {
-            let p = &mut app.prefs;
-            ui.label(RichText::new(crate::i18n::tr("Display")).strong());
-            ui.checkbox(&mut p.dark, crate::i18n::tr("Dark theme"));
-            ui.checkbox(&mut p.bed.grid, crate::i18n::tr("Bed grid"));
-            ui.checkbox(&mut p.bed.volume, crate::i18n::tr("Build volume outline"));
-            ui.checkbox(&mut p.bed.axes, crate::i18n::tr("Axes at the origin"));
-            ui.add_space(6.0);
-            ui.label(RichText::new(crate::i18n::tr("Camera")).strong());
-            ui.checkbox(&mut p.invert_zoom, crate::i18n::tr("Invert wheel zoom"));
-            ui.add(egui::Slider::new(&mut p.orbit_sensitivity, 0.2..=3.0).text("orbit speed"));
-            ui.add_space(6.0);
-            ui.label(RichText::new(crate::i18n::tr("Workflow")).strong());
-            ui.checkbox(&mut p.preview_after_slice, crate::i18n::tr("Show the toolpaths after slicing"));
-            ui.checkbox(&mut p.fit_on_import, crate::i18n::tr("Fit the view to models after import"));
-            ui.add_space(6.0);
-            match crate::config::config_dir() {
-                Some(dir) => ui.weak(format!("Remembered in {}", dir.display())),
-                None => ui.weak(crate::i18n::tr("This system gives no settings folder; preferences last until the window closes.")),
-            };
-            if ui.button(crate::i18n::tr("Restore default preferences")).clicked() {
-                app.prefs = crate::app::Preferences::default();
-            }
-            ui.add_space(6.0);
-            ui.label(RichText::new(crate::i18n::tr("Import")).strong());
-            ui.checkbox(&mut app.prefs.inch_check, crate::i18n::tr("Scale models under 10 mm across by 25.4 (inches)"));
-            ui.horizontal(|ui| {
-                ui.label(crate::i18n::tr("Turn every import by"));
-                for (axis, v) in ["X", "Y", "Z"].iter().zip(app.prefs.import_rotate.iter_mut()) {
-                    ui.add(egui::DragValue::new(v).range(-360.0..=360.0).speed(1.0).prefix(format!("{axis} ")).suffix("°"));
-                }
-            });
-            ui.horizontal(|ui| {
-                ui.label(crate::i18n::tr("and scale it by"));
-                ui.add(egui::DragValue::new(&mut app.prefs.import_scale).range(0.001..=1000.0).speed(0.01));
-            });
-            ui.add_space(6.0);
-            ui.label(RichText::new(crate::i18n::tr("View")).strong());
-            ui.checkbox(&mut app.prefs.ortho, crate::i18n::tr("Orthographic camera"));
-            ui.checkbox(&mut app.prefs.wireframe, crate::i18n::tr("Draw models as wireframes"));
-            if ui.button(crate::i18n::tr("Keyboard shortcuts…")).clicked() {
-                app.dialogs.shortcuts = true;
-            }
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                ui.label(crate::i18n::tr("Language"));
-                let current = app.prefs.language;
-                egui::ComboBox::from_id_salt("language").selected_text(current.label()).show_ui(ui, |ui| {
-                    for l in crate::i18n::Language::ALL {
-                        ui.selectable_value(&mut app.prefs.language, l, l.label());
+    let mut shortcuts = false;
+    crate::theme::window(ctx, tr("Preferences"))
+        .open(&mut open)
+        .default_width(720.0)
+        .resizable(false)
+        .collapsible(false)
+        .show(ctx, |ui| {
+            ui.columns(2, |cols| {
+                let [left, right] = cols else { return };
+                let p = &mut app.prefs;
+                theme::card(left, "Appearance", |ui| {
+                    ui.horizontal(|ui| {
+                        theme::field(ui, "Theme");
+                        let mut dark = p.dark;
+                        if theme::segmented(
+                            ui,
+                            &mut dark,
+                            &[(true, tr("Dark"), true), (false, tr("Light"), true)],
+                        ) {
+                            p.dark = dark;
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        theme::field(ui, "Language");
+                        let current = p.language;
+                        egui::ComboBox::from_id_salt("language")
+                            .selected_text(current.label())
+                            .width(150.0)
+                            .show_ui(ui, |ui| {
+                                for l in crate::i18n::Language::ALL {
+                                    ui.selectable_value(&mut p.language, l, l.label());
+                                }
+                            });
+                        crate::i18n::set_language(p.language);
+                    });
+                    ui.label(
+                        RichText::new(tr(
+                            "Menus, panels and setting names follow the language; help text is in English.",
+                        ))
+                        .size(12.0)
+                        .color(theme::of(ui).dim),
+                    );
+                });
+                theme::card(left, "3D view", |ui| {
+                    ui.checkbox(&mut p.bed.grid, tr("Bed grid"));
+                    ui.checkbox(&mut p.bed.volume, tr("Build volume outline"));
+                    ui.checkbox(&mut p.bed.axes, tr("Axes at the origin"));
+                    ui.checkbox(&mut p.ortho, tr("Orthographic camera"));
+                    ui.checkbox(&mut p.wireframe, tr("Draw models as wireframes"));
+                    ui.checkbox(&mut p.invert_zoom, tr("Invert wheel zoom"));
+                    ui.horizontal(|ui| {
+                        theme::field(ui, "Orbit speed");
+                        ui.add(egui::Slider::new(&mut p.orbit_sensitivity, 0.2..=3.0));
+                    });
+                });
+                theme::card(right, "Workflow", |ui| {
+                    ui.checkbox(&mut p.preview_after_slice, tr("Show the toolpaths after slicing"));
+                    ui.checkbox(&mut p.fit_on_import, tr("Fit the view to models after import"));
+                    ui.add_space(2.0);
+                    if ui.button(tr("Keyboard shortcuts…")).clicked() {
+                        shortcuts = true;
                     }
                 });
-                crate::i18n::set_language(app.prefs.language);
+                theme::card(right, "Import", |ui| {
+                    ui.checkbox(
+                        &mut p.inch_check,
+                        tr("Scale models under 10 mm across by 25.4 (inches)"),
+                    );
+                    theme::field(ui, "Turn every import by");
+                    ui.horizontal(|ui| {
+                        for (k, v) in p.import_rotate.iter_mut().enumerate() {
+                            theme::axis_chip(ui, k);
+                            ui.add_sized(
+                                [56.0, 24.0],
+                                egui::DragValue::new(v).range(-360.0..=360.0).speed(1.0).suffix("°"),
+                            );
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        theme::field(ui, "and scale it by");
+                        ui.add_sized(
+                            [70.0, 24.0],
+                            egui::DragValue::new(&mut p.import_scale).range(0.001..=1000.0).speed(0.01),
+                        );
+                    });
+                });
             });
-            ui.weak(crate::i18n::tr("Menus, panels and setting names follow the language; help text is in English."));
-        },
-    );
+            ui.add_space(2.0);
+            ui.horizontal(|ui| {
+                let where_ = match crate::config::config_dir() {
+                    Some(dir) => format!("{} {}", tr("Remembered in"), dir.display()),
+                    None => tr("This system gives no settings folder; preferences last until the window closes.")
+                        .to_string(),
+                };
+                ui.label(RichText::new(where_).size(12.0).color(theme::of(ui).dim));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button(tr("Restore default preferences")).clicked() {
+                        app.prefs = crate::app::Preferences::default();
+                    }
+                });
+            });
+        });
+    if shortcuts {
+        app.dialogs.shortcuts = true;
+    }
     if app.dialogs.preferences && !open {
         app.persist();
     }
@@ -695,15 +920,18 @@ fn preferences_window(app: &mut SliceCraftApp, ctx: &egui::Context) {
 }
 
 fn machine_window(app: &mut SliceCraftApp, ctx: &egui::Context) {
+    use crate::i18n::tr;
     use slicecraft_engine::Command;
     let mut open = app.dialogs.machine;
     let connected = app.session.printer_port().map(str::to_string);
     let printers = app.session.printers();
     let mut run: Vec<Command> = Vec::new();
-    egui::Window::new(crate::i18n::tr("Machine control"))
+    theme::window(ctx, tr("Machine control"))
         .open(&mut open)
-        .default_width(520.0)
+        .default_width(820.0)
+        .resizable(false)
         .show(ctx, |ui| {
+            let p = theme::of(ui);
             let m = &mut app.machine;
             if !m.scanned {
                 m.scanned = true;
@@ -714,152 +942,230 @@ fn machine_window(app: &mut SliceCraftApp, ctx: &egui::Context) {
                     m.port = only.clone();
                 }
             }
-            ui.label(RichText::new(crate::i18n::tr("Connection")).strong());
-            ui.horizontal(|ui| {
-                egui::ComboBox::from_id_salt("port")
-                    .selected_text(if m.port.is_empty() { "port" } else { m.port.as_str() })
-                    .show_ui(ui, |ui| {
-                        for p in &m.ports {
-                            ui.selectable_value(&mut m.port, p.clone(), p);
-                        }
-                    });
-                if ui
-                    .small_button(crate::i18n::tr("↻"))
-                    .on_hover_text(crate::i18n::tr("Look for serial ports again"))
-                    .clicked()
-                {
-                    m.ports = slicecraft_io::printer::list_ports();
-                }
-                egui::ComboBox::from_id_salt("baud").selected_text(m.baud.to_string()).show_ui(
-                    ui,
-                    |ui| {
-                        for b in [250_000u32, 115_200, 57_600, 38_400, 19_200] {
-                            ui.selectable_value(&mut m.baud, b, b.to_string());
-                        }
-                    },
-                );
-                match &connected {
-                    Some(p) => {
-                        ui.colored_label(
-                            Color32::from_rgb(0x4c, 0xc0, 0x6a),
-                            format!("connected · {p}"),
-                        );
-                        if ui.button(crate::i18n::tr("Disconnect")).clicked() {
-                            run.push(Command::DisconnectPrinter);
-                        }
-                        let other = !m.port.is_empty() && printers.iter().all(|x| x.port != m.port);
-                        if ui
-                            .add_enabled(
-                                other,
-                                egui::Button::new(crate::i18n::tr("Connect another")),
-                            )
-                            .on_hover_text(crate::i18n::tr(
-                                "This printer keeps printing in the background",
-                            ))
-                            .clicked()
-                        {
-                            run.push(Command::ConnectPrinter {
-                                port: m.port.clone(),
-                                baud: m.baud,
-                            });
-                        }
+            // connection across the top
+            theme::card_with(
+                ui,
+                "Connection",
+                |ui| match &connected {
+                    Some(port) => {
+                        theme::tag(ui, &format!("{} · {port}", tr("connected")), p.ok);
                     }
                     None => {
-                        if ui
-                            .add_enabled(
-                                !m.port.is_empty(),
-                                egui::Button::new(crate::i18n::tr("Connect")),
-                            )
-                            .clicked()
-                        {
-                            run.push(Command::ConnectPrinter {
-                                port: m.port.clone(),
-                                baud: m.baud,
+                        theme::tag(ui, tr("not connected"), p.dim);
+                    }
+                },
+                |ui| {
+                    ui.horizontal(|ui| {
+                        theme::field(ui, "Port");
+                        egui::ComboBox::from_id_salt("port")
+                            .selected_text(if m.port.is_empty() {
+                                tr("choose…")
+                            } else {
+                                m.port.as_str()
+                            })
+                            .width(180.0)
+                            .show_ui(ui, |ui| {
+                                for port in &m.ports {
+                                    ui.selectable_value(&mut m.port, port.clone(), port);
+                                }
                             });
+                        if ui.button("↻").on_hover_text(tr("Look for serial ports again")).clicked()
+                        {
+                            m.ports = slicecraft_io::printer::list_ports();
                         }
-                    }
-                }
-            });
-            if printers.len() > 1 {
-                ui.add_space(4.0);
-                ui.label(RichText::new(crate::i18n::tr("Printers")).strong());
-                egui::Grid::new("printers").striped(true).num_columns(3).show(ui, |ui| {
-                    for pr in &printers {
-                        ui.label(&pr.port);
-                        match &pr.status {
-                            None => {
-                                ui.label(crate::i18n::tr("controlled here"));
-                            }
-                            Some(st) => {
-                                let what = match (st.progress, st.finished, &st.error) {
-                                    (_, _, Some(e)) => format!("error: {e}"),
-                                    (Some((d, n)), _, _) => {
-                                        format!(
-                                            "printing {:.0} %",
-                                            100.0 * d as f64 / n.max(1) as f64
-                                        )
+                        theme::field(ui, "Speed");
+                        egui::ComboBox::from_id_salt("baud")
+                            .selected_text(m.baud.to_string())
+                            .width(100.0)
+                            .show_ui(ui, |ui| {
+                                for b in [250_000u32, 115_200, 57_600, 38_400, 19_200] {
+                                    ui.selectable_value(&mut m.baud, b, b.to_string());
+                                }
+                            });
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            match &connected {
+                                Some(_) => {
+                                    if ui.button(tr("Disconnect")).clicked() {
+                                        run.push(Command::DisconnectPrinter);
                                     }
-                                    (None, true, _) => "finished".to_string(),
-                                    _ => "idle".to_string(),
-                                };
-                                ui.label(format!(
-                                    "{what} · {:.0} °C / {:.0} °C",
-                                    st.nozzle, st.bed
-                                ));
+                                    let other = !m.port.is_empty()
+                                        && printers.iter().all(|x| x.port != m.port);
+                                    if ui
+                                        .add_enabled(
+                                            other,
+                                            egui::Button::new(tr("Connect another")),
+                                        )
+                                        .on_hover_text(tr(
+                                            "This printer keeps printing in the background",
+                                        ))
+                                        .clicked()
+                                    {
+                                        run.push(Command::ConnectPrinter {
+                                            port: m.port.clone(),
+                                            baud: m.baud,
+                                        });
+                                    }
+                                }
+                                None => {
+                                    if theme::primary(
+                                        ui,
+                                        tr("Connect"),
+                                        !m.port.is_empty(),
+                                        egui::vec2(110.0, 28.0),
+                                    )
+                                    .clicked()
+                                    {
+                                        run.push(Command::ConnectPrinter {
+                                            port: m.port.clone(),
+                                            baud: m.baud,
+                                        });
+                                    }
+                                }
                             }
-                        }
-                        if !pr.active && ui.small_button(crate::i18n::tr("Control")).clicked() {
-                            run.push(Command::SwitchPrinter(pr.port.clone()));
-                        }
-                        ui.end_row();
+                        });
+                    });
+                    if printers.len() > 1 {
+                        ui.add_space(4.0);
+                        egui::Grid::new("printers").striped(true).num_columns(3).show(ui, |ui| {
+                            for pr in &printers {
+                                ui.label(&pr.port);
+                                match &pr.status {
+                                    None => {
+                                        ui.label(tr("controlled here"));
+                                    }
+                                    Some(st) => {
+                                        let what = match (st.progress, st.finished, &st.error) {
+                                            (_, _, Some(e)) => format!("error: {e}"),
+                                            (Some((d, n)), _, _) => format!(
+                                                "printing {:.0} %",
+                                                100.0 * d as f64 / n.max(1) as f64
+                                            ),
+                                            (None, true, _) => "finished".to_string(),
+                                            _ => "idle".to_string(),
+                                        };
+                                        ui.label(format!(
+                                            "{what} · {:.0} °C / {:.0} °C",
+                                            st.nozzle, st.bed
+                                        ));
+                                    }
+                                }
+                                if !pr.active && ui.small_button(tr("Control")).clicked() {
+                                    run.push(Command::SwitchPrinter(pr.port.clone()));
+                                }
+                                ui.end_row();
+                            }
+                        });
                     }
-                });
-            }
+                },
+            );
             let on = connected.is_some();
             ui.add_enabled_ui(on, |ui| {
-                ui.add_space(6.0);
-                ui.label(RichText::new(crate::i18n::tr("Temperatures")).strong());
-                egui::Grid::new("temps").num_columns(4).show(ui, |ui| {
-                    ui.label(crate::i18n::tr("Nozzle"));
-                    ui.label(format!("{:.1} / {:.0} °C", m.nozzle.0, m.nozzle.1));
-                    ui.add(
-                        egui::DragValue::new(&mut m.set_nozzle).range(0.0..=320.0).suffix(" °C"),
-                    );
-                    if ui.button(crate::i18n::tr("Set")).clicked() {
-                        run.push(Command::SendToPrinter(format!("M104 S{:.0}", m.set_nozzle)));
-                    }
-                    ui.end_row();
-                    ui.label(crate::i18n::tr("Bed"));
-                    ui.label(format!("{:.1} / {:.0} °C", m.bed.0, m.bed.1));
-                    ui.add(egui::DragValue::new(&mut m.set_bed).range(0.0..=130.0).suffix(" °C"));
-                    if ui.button(crate::i18n::tr("Set")).clicked() {
-                        run.push(Command::SendToPrinter(format!("M140 S{:.0}", m.set_bed)));
-                    }
-                    ui.end_row();
-                });
-                if ui.button(crate::i18n::tr("Heaters off")).clicked() {
-                    run.push(Command::SendToPrinter("M104 S0".into()));
-                    run.push(Command::SendToPrinter("M140 S0".into()));
-                }
-                ui.add_space(6.0);
-                ui.label(RichText::new(crate::i18n::tr("Move")).strong());
-                ui.horizontal(|ui| {
-                    ui.label(crate::i18n::tr("Step"));
-                    for d in [0.1, 1.0, 10.0, 50.0] {
-                        ui.selectable_value(&mut m.step, d, format!("{d} mm"));
-                    }
-                });
-                let step = m.step;
-                ui.horizontal(|ui| {
-                    for (label, axis, sign) in [
-                        ("X−", "X", -1.0),
-                        ("X+", "X", 1.0),
-                        ("Y−", "Y", -1.0),
-                        ("Y+", "Y", 1.0),
-                        ("Z−", "Z", -1.0),
-                        ("Z+", "Z", 1.0),
-                    ] {
-                        if ui.button(label).clicked() {
+                ui.columns(2, |cols| {
+                    let [left, right] = cols else { return };
+                    theme::card(left, "Temperatures", |ui| {
+                        egui::Grid::new("temps").num_columns(4).spacing([10.0, 6.0]).show(
+                            ui,
+                            |ui| {
+                                for (label, now, set, max, code) in [
+                                    ("Nozzle", m.nozzle, &mut m.set_nozzle, 320.0, "M104"),
+                                    ("Bed", m.bed, &mut m.set_bed, 130.0, "M140"),
+                                ] {
+                                    theme::field(ui, label);
+                                    ui.label(
+                                        RichText::new(format!("{:.1} °C", now.0))
+                                            .font(theme::strong(16.0)),
+                                    )
+                                    .on_hover_text(format!(
+                                        "{} {:.0} °C",
+                                        tr("target"),
+                                        now.1
+                                    ));
+                                    ui.add_sized(
+                                        [80.0, 24.0],
+                                        egui::DragValue::new(set).range(0.0..=max).suffix(" °C"),
+                                    );
+                                    if ui.button(tr("Set")).clicked() {
+                                        run.push(Command::SendToPrinter(format!(
+                                            "{code} S{:.0}",
+                                            *set
+                                        )));
+                                    }
+                                    ui.end_row();
+                                }
+                            },
+                        );
+                        ui.add_space(2.0);
+                        ui.horizontal(|ui| {
+                            if ui.button(tr("Heaters off")).clicked() {
+                                run.push(Command::SendToPrinter("M104 S0".into()));
+                                run.push(Command::SendToPrinter("M140 S0".into()));
+                            }
+                            if ui.button(tr("Fan on")).clicked() {
+                                run.push(Command::SendToPrinter("M106 S255".into()));
+                            }
+                            if ui.button(tr("Fan off")).clicked() {
+                                run.push(Command::SendToPrinter("M107".into()));
+                            }
+                        });
+                    });
+                    theme::card(left, "Print", |ui| {
+                        let w = ui.available_width();
+                        if theme::primary(
+                            ui,
+                            tr("Print the current slice"),
+                            true,
+                            egui::vec2(w, 32.0),
+                        )
+                        .clicked()
+                        {
+                            run.push(Command::PrintOverUsb);
+                        }
+                        ui.horizontal(|ui| {
+                            let third =
+                                (ui.available_width() - 2.0 * ui.spacing().item_spacing.x) / 3.0;
+                            let b = |t: &str| {
+                                egui::Button::new(tr(t)).min_size(egui::vec2(third, 28.0))
+                            };
+                            if ui.add(b("Pause")).clicked() {
+                                run.push(Command::PausePrint);
+                            }
+                            if ui.add(b("Resume")).clicked() {
+                                run.push(Command::ResumePrint);
+                            }
+                            if ui.add(b("Cancel")).clicked() {
+                                run.push(Command::CancelPrint);
+                            }
+                        });
+                        if let Some((done, total)) = m.progress {
+                            let frac = if total > 0 { done as f32 / total as f32 } else { 0.0 };
+                            ui.add(
+                                egui::ProgressBar::new(frac)
+                                    .fill(p.accent)
+                                    .text(format!("{done} / {total} {}", tr("lines"))),
+                            );
+                        }
+                    });
+                    theme::card(right, "Move", |ui| {
+                        ui.horizontal(|ui| {
+                            theme::field(ui, "Step");
+                            let mut step = m.step;
+                            if theme::segmented(
+                                ui,
+                                &mut step,
+                                &[
+                                    (0.1, "0.1", true),
+                                    (1.0, "1", true),
+                                    (10.0, "10", true),
+                                    (50.0, "50", true),
+                                ],
+                            ) {
+                                m.step = step;
+                            }
+                            theme::dim(ui, "mm");
+                        });
+                        ui.add_space(4.0);
+                        let step = m.step;
+                        let jog = |run: &mut Vec<Command>, axis: &str, sign: f64| {
                             for l in [
                                 "G91".to_string(),
                                 format!("G1 {axis}{:.2} F3000", sign * step),
@@ -867,74 +1173,107 @@ fn machine_window(app: &mut SliceCraftApp, ctx: &egui::Context) {
                             ] {
                                 run.push(Command::SendToPrinter(l));
                             }
-                        }
-                    }
+                        };
+                        let key = egui::vec2(48.0, 36.0);
+                        egui::Grid::new("jog").num_columns(5).spacing([6.0, 6.0]).show(ui, |ui| {
+                            ui.label("");
+                            if ui.add(egui::Button::new("Y+").min_size(key)).clicked() {
+                                jog(&mut run, "Y", 1.0);
+                            }
+                            ui.label("");
+                            ui.label("");
+                            if ui.add(egui::Button::new("Z+").min_size(key)).clicked() {
+                                jog(&mut run, "Z", 1.0);
+                            }
+                            ui.end_row();
+                            if ui.add(egui::Button::new("X−").min_size(key)).clicked() {
+                                jog(&mut run, "X", -1.0);
+                            }
+                            if ui
+                                .add(egui::Button::new(tr("Home")).min_size(key))
+                                .on_hover_text(tr("Home XY"))
+                                .clicked()
+                            {
+                                run.push(Command::SendToPrinter("G28 X Y".into()));
+                            }
+                            if ui.add(egui::Button::new("X+").min_size(key)).clicked() {
+                                jog(&mut run, "X", 1.0);
+                            }
+                            ui.label("");
+                            if ui
+                                .add(egui::Button::new(tr("All")).min_size(key))
+                                .on_hover_text(tr("Home all"))
+                                .clicked()
+                            {
+                                run.push(Command::SendToPrinter("G28".into()));
+                            }
+                            ui.end_row();
+                            ui.label("");
+                            if ui.add(egui::Button::new("Y−").min_size(key)).clicked() {
+                                jog(&mut run, "Y", -1.0);
+                            }
+                            ui.label("");
+                            ui.label("");
+                            if ui.add(egui::Button::new("Z−").min_size(key)).clicked() {
+                                jog(&mut run, "Z", -1.0);
+                            }
+                            ui.end_row();
+                        });
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            if ui.button(tr("Extrude 5 mm")).clicked() {
+                                for l in ["M83", "G1 E5 F300", "M82"] {
+                                    run.push(Command::SendToPrinter(l.into()));
+                                }
+                            }
+                            if ui.button(tr("Retract 5 mm")).clicked() {
+                                for l in ["M83", "G1 E-5 F1800", "M82"] {
+                                    run.push(Command::SendToPrinter(l.into()));
+                                }
+                            }
+                            if ui.button(tr("Motors off")).clicked() {
+                                run.push(Command::SendToPrinter("M84".into()));
+                            }
+                        });
+                    });
                 });
-                ui.horizontal(|ui| {
-                    if ui.button(crate::i18n::tr("Home all")).clicked() {
-                        run.push(Command::SendToPrinter("G28".into()));
-                    }
-                    if ui.button(crate::i18n::tr("Home XY")).clicked() {
-                        run.push(Command::SendToPrinter("G28 X Y".into()));
-                    }
-                    if ui.button(crate::i18n::tr("Extrude 5 mm")).clicked() {
-                        for l in ["M83", "G1 E5 F300", "M82"] {
-                            run.push(Command::SendToPrinter(l.into()));
+                theme::card(ui, "Terminal", |ui| {
+                    egui::Frame::new()
+                        .fill(ui.visuals().extreme_bg_color)
+                        .corner_radius(6)
+                        .inner_margin(egui::Margin::same(8))
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            egui::ScrollArea::vertical()
+                                .max_height(140.0)
+                                .min_scrolled_height(140.0)
+                                .stick_to_bottom(true)
+                                .auto_shrink([false, false])
+                                .show(ui, |ui| {
+                                    if m.log.is_empty() {
+                                        theme::dim(ui, tr("The printer's replies appear here."));
+                                    }
+                                    for l in &m.log {
+                                        ui.monospace(l);
+                                    }
+                                });
+                        });
+                    ui.horizontal(|ui| {
+                        let r = ui.add(
+                            egui::TextEdit::singleline(&mut m.input)
+                                .hint_text(tr("G-code to send, e.g. M115"))
+                                .desired_width(ui.available_width() - 80.0),
+                        );
+                        let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        if (ui
+                            .add(egui::Button::new(tr("Send")).min_size(egui::vec2(70.0, 26.0)))
+                            .clicked()
+                            || enter)
+                            && !m.input.trim().is_empty()
+                        {
+                            run.push(Command::SendToPrinter(std::mem::take(&mut m.input)));
                         }
-                    }
-                    if ui.button(crate::i18n::tr("Retract 5 mm")).clicked() {
-                        for l in ["M83", "G1 E-5 F1800", "M82"] {
-                            run.push(Command::SendToPrinter(l.into()));
-                        }
-                    }
-                    if ui.button(crate::i18n::tr("Fan on")).clicked() {
-                        run.push(Command::SendToPrinter("M106 S255".into()));
-                    }
-                    if ui.button(crate::i18n::tr("Fan off")).clicked() {
-                        run.push(Command::SendToPrinter("M107".into()));
-                    }
-                    if ui.button(crate::i18n::tr("Motors off")).clicked() {
-                        run.push(Command::SendToPrinter("M84".into()));
-                    }
-                });
-                ui.add_space(6.0);
-                ui.label(RichText::new(crate::i18n::tr("Print")).strong());
-                ui.horizontal(|ui| {
-                    if ui.button(crate::i18n::tr("Print the current slice")).clicked() {
-                        run.push(Command::PrintOverUsb);
-                    }
-                    if ui.button(crate::i18n::tr("Pause")).clicked() {
-                        run.push(Command::PausePrint);
-                    }
-                    if ui.button(crate::i18n::tr("Resume")).clicked() {
-                        run.push(Command::ResumePrint);
-                    }
-                    if ui.button(crate::i18n::tr("Cancel")).clicked() {
-                        run.push(Command::CancelPrint);
-                    }
-                });
-                if let Some((done, total)) = m.progress {
-                    let frac = if total > 0 { done as f32 / total as f32 } else { 0.0 };
-                    ui.add(egui::ProgressBar::new(frac).text(format!("{done} / {total} lines")));
-                }
-                ui.add_space(6.0);
-                ui.label(RichText::new(crate::i18n::tr("Terminal")).strong());
-                egui::ScrollArea::vertical().max_height(160.0).stick_to_bottom(true).show(
-                    ui,
-                    |ui| {
-                        for l in &m.log {
-                            ui.monospace(l);
-                        }
-                    },
-                );
-                ui.horizontal(|ui| {
-                    let r = ui.text_edit_singleline(&mut m.input);
-                    let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                    if (ui.button(crate::i18n::tr("Send")).clicked() || enter)
-                        && !m.input.trim().is_empty()
-                    {
-                        run.push(Command::SendToPrinter(std::mem::take(&mut m.input)));
-                    }
+                    });
                 });
             });
         });
@@ -958,7 +1297,7 @@ fn analysis_window(app: &mut SliceCraftApp, ctx: &egui::Context) {
     let mut open = app.dialogs.analysis;
     let names: Vec<String> =
         app.session.document().objects.iter().map(|o| o.name.clone()).collect();
-    egui::Window::new(crate::i18n::tr("Mesh analysis")).open(&mut open).collapsible(false).default_width(560.0).show(ctx, |ui| {
+    crate::theme::window(ctx, crate::i18n::tr("Mesh analysis")).open(&mut open).collapsible(false).default_width(560.0).show(ctx, |ui| {
         let Some((_, geo)) = &app.geometry else { return };
         if geo.objects.is_empty() {
             ui.weak(crate::i18n::tr("No models."));
@@ -998,7 +1337,7 @@ fn compare_window(app: &mut SliceCraftApp, ctx: &egui::Context) {
     let Some((name, diffs)) = app.dialogs.compare.clone() else { return };
     let mut open = true;
     let mut take: Vec<(&'static str, slicecraft_doc::SettingValue)> = Vec::new();
-    egui::Window::new(format!("Compare with {name}"))
+    crate::theme::window(ctx, format!("Compare with {name}"))
         .open(&mut open)
         .default_size([620.0, 480.0])
         .show(ctx, |ui| {
@@ -1088,7 +1427,7 @@ fn shortcuts_window(app: &mut SliceCraftApp, ctx: &egui::Context) {
             app.dialogs.capture = None;
         }
     }
-    egui::Window::new(crate::i18n::tr("Keyboard shortcuts"))
+    crate::theme::window(ctx, crate::i18n::tr("Keyboard shortcuts"))
         .open(&mut open)
         .collapsible(false)
         .show(ctx, |ui| {
@@ -1145,7 +1484,7 @@ fn shortcuts_window(app: &mut SliceCraftApp, ctx: &egui::Context) {
 
 fn features_window(app: &mut SliceCraftApp, ctx: &egui::Context) {
     let mut open = app.dialogs.features;
-    egui::Window::new(crate::i18n::tr("Feature status"))
+    crate::theme::window(ctx, crate::i18n::tr("Feature status"))
         .open(&mut open)
         .collapsible(false)
         .default_size([520.0, 520.0])
@@ -1192,7 +1531,7 @@ fn features_window(app: &mut SliceCraftApp, ctx: &egui::Context) {
 
 fn about_window(app: &mut SliceCraftApp, ctx: &egui::Context) {
     let mut open = app.dialogs.about;
-    egui::Window::new(crate::i18n::tr("About SliceCraft")).open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
+    crate::theme::window(ctx, crate::i18n::tr("About SliceCraft")).open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
         ui.heading("SliceCraft");
         ui.label(format!("version {} · pre-alpha", env!("CARGO_PKG_VERSION")));
         ui.label(crate::i18n::tr("An open-source, clean-room 3D print slicer in pure Rust."));
@@ -1206,7 +1545,7 @@ fn about_window(app: &mut SliceCraftApp, ctx: &egui::Context) {
 fn planned_window(app: &mut SliceCraftApp, ctx: &egui::Context) {
     let Some(spec) = app.dialogs.planned else { return };
     let mut open = true;
-    egui::Window::new(spec.label).open(&mut open).collapsible(false).resizable(false).show(
+    crate::theme::window(ctx, spec.label).open(&mut open).collapsible(false).resizable(false).show(
         ctx,
         |ui| {
             ui.colored_label(PLANNED, "Not implemented yet.");
@@ -1219,5 +1558,29 @@ fn planned_window(app: &mut SliceCraftApp, ctx: &egui::Context) {
     );
     if !open {
         app.dialogs.planned = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn escape_closes_small_windows_before_the_profile_editor() {
+        let mut d = Dialogs {
+            settings: Some(SettingsEditor::new("draft", PrintSettings::default())),
+            about: true,
+            machine: true,
+            ..Default::default()
+        };
+        d.close_top();
+        assert!(!d.about && d.machine && d.settings.is_some());
+        d.close_top();
+        assert!(!d.machine && d.settings.is_some());
+        d.close_top();
+        assert!(d.settings.is_none() && !d.any_open());
+        // nothing open: closing again changes nothing
+        d.close_top();
+        assert!(!d.any_open());
     }
 }

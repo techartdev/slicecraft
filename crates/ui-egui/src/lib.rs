@@ -24,6 +24,7 @@ pub mod menus;
 pub mod network;
 pub mod panels;
 pub mod scene;
+pub mod theme;
 pub mod viewport;
 pub mod wizard;
 
@@ -39,14 +40,15 @@ pub fn run(session: Session, files: Vec<std::path::PathBuf>) -> Result<(), Strin
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("SliceCraft")
             .with_inner_size([1500.0, 920.0])
-            .with_min_inner_size([960.0, 600.0])
+            .with_min_inner_size([1024.0, 640.0])
             .with_drag_and_drop(true),
         ..Default::default()
     };
     eframe::run_native(
         "SliceCraft",
         options,
-        Box::new(move |_cc| {
+        Box::new(move |cc| {
+            theme::install_fonts(&cc.egui_ctx);
             let mut session = session;
             session.set_interactive(true);
             let mut app = SliceCraftApp::with_config(session, config::config_dir());

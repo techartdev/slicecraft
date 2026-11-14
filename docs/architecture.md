@@ -106,11 +106,12 @@ session revision; a slice is served only for the revision it was taken at, and a
 | Module | What it holds |
 |---|---|
 | `app` | window state, actions shared by panels, the slicing thread, shortcuts, drag-and-drop |
-| `menus` | menu bar (File, Edit, View, Model, Repair, Supports, Slice, Machine, Help) and the icon toolbar; built from `COMMANDS`, planned items disabled or explained |
-| `panels` | prepare mode: model list (visibility, multi-select, context menu), profile presets and quick settings, slice button; placement panel (position, size and scale per axis, rotation, mirror, mesh check); preview mode: build summary, show toggles, colouring, playback and layer range |
-| `viewport` | orbit, pan, zoom, picking, the select/move/rotate/scale tools, section view, overlays (legend with feature toggles, layer slider, nozzle position) |
+| `theme` | the look: dark and light palettes, type sizes and spacing, the interface font, and shared pieces (cards, the primary button, segmented choices, axis chips, figures, tags, floating-bar frames, centred windows) |
+| `menus` | menu bar (File, Edit, View, Model, Repair, Supports, Slice, Machine, Help) and the toolbar (file, model, support and mesh actions on the left; mode switch, export and Slice on the right); built from `COMMANDS`, planned items disabled or explained |
+| `panels` | columns of cards with the main action pinned at the foot. Prepare: models (visibility, tags, multi-select, context menu), profile (preset, quick settings, load/save/zones), support; placement (position, size, rotation, actions, mesh check). Preview: summary figures, extruded length by feature, notes, display options, export; playback and layer range |
+| `viewport` | orbit, pan, zoom, picking, the select/move/rotate/scale tools, section view; floating bars (camera views and display toggles on top, placement tools at the left), an empty-plate prompt, overlays (legend of the kinds the job prints, with toggles; layer badge and slider; nozzle position) |
 | `scene` | CPU projection into egui meshes: bed, grid, volume, axes, shaded depth-sorted models, toolpaths with travel, retractions and nozzle, colouring by feature, speed or height |
-| `dialogs` | profile editor rendered from the settings schema (tabs, sections, search, changed-only, planned tags, per-setting reset), preferences, mesh analysis, machine control (placeholder), shortcuts, feature status, about |
+| `dialogs` | profile editor rendered from the settings schema (tab list with changed counts, section cards, search across tabs, changed-only, planned tags, per-setting reset), preferences, mesh analysis, machine control (connection, temperatures, jog pad, print, terminal), shortcuts, feature status, about; Esc closes the top window |
 | `icons` | toolbar glyphs drawn in code |
 | `camera` | orbit camera, view presets, fit to a box, ray to the bed plane |
 | `config` | what is remembered between sessions: `preferences.txt` (preferences, recent projects) and `last.scprofile` in the per-user folder (`%APPDATA%\SliceCraft`, `~/Library/Application Support/SliceCraft`, `$XDG_CONFIG_HOME/slicecraft`; `SLICECRAFT_CONFIG_DIR` overrides) |

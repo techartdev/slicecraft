@@ -122,7 +122,7 @@ pub fn network_window(app: &mut SliceCraftApp, ctx: &egui::Context) {
     let mut action: Option<(&'static str, bool)> = None;
     let sliced = app.session.slice_result().is_some();
     let busy = app.net.job.as_ref().map(|(w, _)| *w);
-    egui::Window::new(crate::i18n::tr("Network printer"))
+    crate::theme::window(ctx, crate::i18n::tr("Network printer"))
         .open(&mut open)
         .default_width(440.0)
         .show(ctx, |ui| {
@@ -228,9 +228,10 @@ pub fn camera_window(app: &mut SliceCraftApp, ctx: &egui::Context) {
     let mut open = true;
     let mut toggle = false;
     let running = app.net.feed.is_some();
-    egui::Window::new(crate::i18n::tr("Print camera")).open(&mut open).default_width(520.0).show(
-        ctx,
-        |ui| {
+    crate::theme::window(ctx, crate::i18n::tr("Print camera"))
+        .open(&mut open)
+        .default_width(520.0)
+        .show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label(crate::i18n::tr("Snapshot address"));
                 ui.add(
@@ -254,8 +255,7 @@ pub fn camera_window(app: &mut SliceCraftApp, ctx: &egui::Context) {
                         .maintain_aspect_ratio(true),
                 );
             }
-        },
-    );
+        });
     app.net.camera_open = open;
     if !toggle {
         return;

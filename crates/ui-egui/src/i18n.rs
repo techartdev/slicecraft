@@ -678,6 +678,174 @@ const BG: &[(&str, &str)] = &[
     ("Right", "Отдясно"),
     ("Top", "Отгоре"),
     ("Bottom", "Отдолу"),
+    // the restyled window (cards, floating bars, machine panel)
+    ("3D view", "3D изглед"),
+    (
+        "Add support: drag a box on the bed",
+        "Добавяне на подпори: начертайте правоъгълник върху леглото",
+    ),
+    ("All", "Всички"),
+    (
+        "An open-source, clean-room 3D print slicer in pure Rust.",
+        "Програма с отворен код за нарязване на модели за 3D печат, написана изцяло на Rust по метода „чиста стая“.",
+    ),
+    ("Appearance", "Външен вид"),
+    (
+        "Block support: drag a box on the bed",
+        "Забрана на подпори: начертайте правоъгълник върху леглото",
+    ),
+    ("Build summary", "Обобщение на заданието"),
+    ("By feature", "По вид линия"),
+    (
+        "Change settings above a height, or give some models their own settings",
+        "Променете настройките над дадена височина или задайте собствени настройки на някои модели",
+    ),
+    ("Clear all boxes", "Изчистване на всички правоъгълници"),
+    ("Closed and manifold", "Затворена и цялостна"),
+    ("Cost", "Цена"),
+    ("Dark", "Тъмна"),
+    (
+        "Drag a box on the bed: every surface facing down inside it gets support",
+        "Начертайте правоъгълник върху леглото: всяка повърхност в него, обърната надолу, получава подпора",
+    ),
+    (
+        "Drop STL, OBJ or 3MF files here, or import them.",
+        "Пуснете тук файлове STL, OBJ или 3MF или ги импортирайте.",
+    ),
+    ("Find a setting…", "Търсене на настройка…"),
+    ("From layer", "От слой"),
+    ("G-code to send, e.g. M115", "G-код за изпращане, напр. M115"),
+    ("Generate support when slicing", "Генериране на подпори при нарязване"),
+    ("Home", "Начало"),
+    ("Hover a name for its help.", "Задръжте показалеца върху име, за да видите помощ."),
+    ("Import models…", "Импортиране на модели…"),
+    (
+        "Lay the largest flat face on the bed",
+        "Поставяне на най-голямата плоска страна върху леглото",
+    ),
+    ("Layer", "Слой"),
+    ("Licence: MIT OR Apache-2.0.", "Лиценз: MIT OR Apache-2.0."),
+    ("Light", "Светла"),
+    ("Nothing on the plate yet", "Още няма нищо на леглото"),
+    ("Only from the bed", "Само от леглото"),
+    ("Only the last", "Само последните"),
+    (
+        "Open edges are holes; non-manifold edges join more than two faces. Model ▸ Repair fixes most of them.",
+        "Отворените ръбове са дупки, а неправилните ръбове свързват повече от две стени. Модел ▸ Поправка оправя повечето от тях.",
+    ),
+    ("Orbit speed", "Скорост на завъртане"),
+    ("Outside the build volume", "Извън работния обем"),
+    ("Over USB…", "През USB…"),
+    ("Pause (Space)", "Пауза (интервал)"),
+    ("Placement", "Разположение"),
+    ("Play (Space)", "Пускане (интервал)"),
+    ("Port", "Порт"),
+    ("Print time", "Време за печат"),
+    ("Print…", "Печат…"),
+    ("Remembered in", "Запомнени в"),
+    ("Section at Z", "Сечение при Z"),
+    (
+        "See docs/research/02-feature-inventory.md for the plan.",
+        "Планът е в docs/research/02-feature-inventory.md.",
+    ),
+    ("Slice the plate (Ctrl+R)", "Нарязване (Ctrl+R)"),
+    ("Start from preset…", "Започване от шаблон…"),
+    ("Support is on (click to turn off)", "Подпорите са включени (щракнете, за да ги изключите)"),
+    (
+        "The full inventory and plan are in docs/research/02-feature-inventory.md.",
+        "Пълният списък и планът са в docs/research/02-feature-inventory.md.",
+    ),
+    ("The printer's replies appear here.", "Тук се показват отговорите на принтера."),
+    ("Theme", "Тема"),
+    (
+        "This command is on the plan; the menu shows it so nothing is hidden.",
+        "Тази команда е в плана; менюто я показва, за да не остане нищо скрито.",
+    ),
+    (
+        "This system gives no settings folder; preferences last until the window closes.",
+        "Системата не предоставя папка за настройки; предпочитанията важат до затваряне на прозореца.",
+    ),
+    ("To a network printer…", "Към мрежов принтер…"),
+    ("To layer", "До слой"),
+    ("Weight", "Тегло"),
+    (
+        "Written from public specifications and observed behaviour; no code, profiles, strings or artwork from other slicers.",
+        "Написана по публични спецификации и наблюдавано поведение, без код, профили, текстове или графика от други програми за нарязване.",
+    ),
+    ("Zones", "Зони"),
+    ("Zones…", "Зони…"),
+    ("add", "добавяне"),
+    ("bed", "легло"),
+    ("block", "забрана"),
+    ("changed since opening", "променено след отварянето"),
+    ("choose…", "изберете…"),
+    ("connected", "свързан"),
+    ("cutter", "резец"),
+    ("group", "група"),
+    ("layer", "слой"),
+    ("layers", "слоя"),
+    ("models selected", "избрани модела"),
+    ("move", "движение"),
+    ("non-manifold edges", "неправилни ръба"),
+    ("not connected", "няма връзка"),
+    ("off the bed", "извън леглото"),
+    ("ok", "наред"),
+    ("on", "вкл."),
+    ("open edges", "отворени ръба"),
+    ("support", "подпора"),
+    ("target", "цел"),
+    ("to", "до"),
+    ("tool", "инструмент"),
+    ("travel", "празен ход"),
+    ("view", "изглед"),
+    ("Models:", "Модели:"),
+    // feature kinds and slicing stages, as the preview and status bar show them
+    ("outer perimeter", "външен периметър"),
+    ("inner perimeter", "вътрешен периметър"),
+    ("solid infill", "плътен пълнеж"),
+    ("sparse infill", "рядък пълнеж"),
+    ("dense support", "плътна подпора"),
+    ("bridge", "мост"),
+    ("top surface", "горна повърхност"),
+    ("ironing", "гладене"),
+    ("prime tower", "кула за почистване"),
+    ("ooze shield", "щит срещу протичане"),
+    ("cutting layers", "разрязване на слоевете"),
+    ("building support", "изграждане на подпорите"),
+    ("building perimeters", "изграждане на периметрите"),
+    ("filling", "запълване"),
+    ("writing G-code", "записване на G-кода"),
+    // hints at the foot of the 3D view
+    (
+        "drag: orbit · right-drag: pan · wheel: zoom · click: select · shift-drag: move",
+        "плъзгане: завъртане · десен бутон: местене на изгледа · колелце: мащаб · щракване: избор · Shift+плъзгане: местене на модела",
+    ),
+    (
+        "drag a model to move it on the bed · drag empty space to orbit",
+        "плъзнете модел, за да го преместите · плъзнете празно място, за да завъртите изгледа",
+    ),
+    (
+        "drag left/right to turn the selection about Z · shift snaps to 15°",
+        "плъзнете наляво или надясно, за да завъртите избраното около Z · Shift завърта през 15°",
+    ),
+    (
+        "drag up/down to scale the selection",
+        "плъзнете нагоре или надолу, за да мащабирате избраното",
+    ),
+    (
+        "click: one pillar here · drag a box: every surface facing down inside it gets support · Q: back to select",
+        "щракване: една колона тук · правоъгълник: всяка повърхност в него, обърната надолу, получава подпора · Q: обратно към избора",
+    ),
+    (
+        "click a pillar to remove it · drag a box: no support inside it · Q: back to select",
+        "щракнете върху колона, за да я премахнете · правоъгълник: без подпори в него · Q: обратно към избора",
+    ),
+    (
+        "drag: orbit · right-drag: pan · wheel: zoom · Up/Down: layer · Space: play",
+        "плъзгане: завъртане · десен бутон: местене на изгледа · колелце: мащаб · стрелки: слой · интервал: пускане",
+    ),
+    ("Volume", "Обем"),
+    ("nozzle", "дюза"),
 ];
 
 #[cfg(test)]
@@ -696,6 +864,19 @@ mod tests {
         set_language(Language::English);
         assert_eq!(tr("Slice"), "Slice");
         assert_eq!(Language::from_code("bg"), Some(Language::Bulgarian));
+    }
+
+    #[test]
+    fn view_labels_are_translated() {
+        let bg = bulgarian();
+        let missing: Vec<&str> = slicecraft_render::PathKind::ALL
+            .iter()
+            .map(|k| k.label())
+            .chain(crate::scene::Coloring::ALL.iter().map(|c| c.label()))
+            .chain(crate::app::STAGES.iter().map(|s| s.label()))
+            .filter(|l| !bg.contains_key(l))
+            .collect();
+        assert!(missing.is_empty(), "untranslated: {missing:?}");
     }
 
     #[test]

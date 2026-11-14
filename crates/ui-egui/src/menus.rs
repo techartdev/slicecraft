@@ -9,6 +9,7 @@ use crate::camera::ViewPreset;
 use crate::i18n::tr;
 use crate::icons::{self, Icon};
 use crate::keys::Action;
+use crate::theme;
 use eframe::egui::{self, Ui};
 use slicecraft_doc::{Axis, ModelRole};
 use slicecraft_engine::{COMMANDS, Command, CommandState};
@@ -390,12 +391,15 @@ pub fn menu_bar(app: &mut SliceCraftApp, ui: &mut Ui) {
     });
 }
 
+/// The bar under the menus: file and model actions on the left; the mode
+/// switch, export and the slice button on the right. Camera and placement
+/// tools float over the 3D view (see `viewport`).
 pub fn toolbar(app: &mut SliceCraftApp, ui: &mut Ui) {
     let ctx = ui.ctx().clone();
     let has_models = !app.session.document().objects.is_empty();
     let has_sel = !app.selected.is_empty();
     let ready = SliceCraftApp::command_ready;
-    ui.horizontal_wrapped(|ui| {
+    ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 2.0;
         if icons::button(ui, Icon::Import, tr("Import models (Ctrl+O)"), true, false).clicked() {
             app.open_import_dialog();
@@ -413,44 +417,8 @@ pub fn toolbar(app: &mut SliceCraftApp, ui: &mut Ui) {
         {
             app.run(Command::Redo);
         }
-        ui.separator();
-        for (v, icon) in [
-            (ViewPreset::Iso, Icon::ViewIso),
-            (ViewPreset::Front, Icon::ViewFront),
-            (ViewPreset::Back, Icon::ViewBack),
-            (ViewPreset::Left, Icon::ViewLeft),
-            (ViewPreset::Right, Icon::ViewRight),
-            (ViewPreset::Top, Icon::ViewTop),
-            (ViewPreset::Bottom, Icon::ViewBottom),
-        ] {
-            if icons::button(ui, icon, &format!("{} view", v.label()), true, false).clicked() {
-                app.view(v);
-            }
-        }
-        if icons::button(ui, Icon::Fit, tr("Fit models (F)"), true, false).clicked() {
-            app.fit_view();
-        }
-        if icons::button(ui, Icon::Grid, tr("Bed grid"), true, app.prefs.bed.grid).clicked() {
-            app.prefs.bed.grid = !app.prefs.bed.grid;
-        }
-        if icons::button(ui, Icon::Section, tr("Section view"), true, app.section.is_some())
-            .clicked()
-        {
-            app.section = if app.section.is_some() { None } else { Some(10.0) };
-        }
-        ui.separator();
         if app.mode == Mode::Prepare {
-            for (tool, icon) in [
-                (Tool::Select, Icon::Select),
-                (Tool::Move, Icon::Move),
-                (Tool::Rotate, Icon::Rotate),
-                (Tool::Scale, Icon::Scale),
-            ] {
-                if icons::button(ui, icon, tool.label(), true, app.tool == tool).clicked() {
-                    app.tool = tool;
-                }
-            }
-            ui.separator();
+            theme::divider(ui);
             if icons::button(ui, Icon::Duplicate, tr("Duplicate (Ctrl+D)"), has_sel, false)
                 .clicked()
             {
@@ -468,7 +436,7 @@ pub fn toolbar(app: &mut SliceCraftApp, ui: &mut Ui) {
             if icons::button(
                 ui,
                 Icon::LayFlat,
-                "Lay the largest flat face on the bed",
+                tr("Lay the largest flat face on the bed"),
                 has_sel,
                 false,
             )
@@ -479,18 +447,12 @@ pub fn toolbar(app: &mut SliceCraftApp, ui: &mut Ui) {
             if icons::button(ui, Icon::Delete, tr("Remove (Del)"), has_sel, false).clicked() {
                 app.remove_selected();
             }
-            ui.separator();
-            if icons::button(ui, Icon::Analyze, tr("Analyse mesh"), has_models, false).clicked() {
-                app.dialogs.analysis = true;
-            }
-            if icons::button(ui, Icon::Repair, tr("Repair mesh"), has_sel, false).clicked() {
-                app.for_selected(|index| Command::RepairMesh { index, fill: true });
-            }
+            theme::divider(ui);
             let on = app.session.document().settings.support_enabled;
             let tip = if on {
-                "Support is on (click to turn off)"
+                tr("Support is on (click to turn off)")
             } else {
-                "Generate support when slicing"
+                tr("Generate support when slicing")
             };
             if icons::button(ui, Icon::Supports, tip, ready("supports"), on).clicked() {
                 app.run(Command::Supports(!on));
@@ -499,7 +461,7 @@ pub fn toolbar(app: &mut SliceCraftApp, ui: &mut Ui) {
             if icons::button(
                 ui,
                 Icon::SupportAdd,
-                "Add support: drag a box on the bed",
+                tr("Add support: drag a box on the bed"),
                 true,
                 adding,
             )
@@ -508,48 +470,70 @@ pub fn toolbar(app: &mut SliceCraftApp, ui: &mut Ui) {
                 app.tool = if adding { Tool::Select } else { Tool::SupportAdd };
                 app.set_show_support(true);
             }
+            let blocking = app.tool == Tool::SupportBlock;
             if icons::button(
                 ui,
                 Icon::SupportRemove,
-                "Block support: drag a box on the bed",
+                tr("Block support: drag a box on the bed"),
                 true,
-                app.tool == Tool::SupportBlock,
+                blocking,
             )
             .clicked()
             {
-                let blocking = app.tool == Tool::SupportBlock;
                 app.tool = if blocking { Tool::Select } else { Tool::SupportBlock };
                 app.set_show_support(true);
             }
+            theme::divider(ui);
+            if icons::button(ui, Icon::Analyze, tr("Analyse mesh"), has_models, false).clicked() {
+                app.dialogs.analysis = true;
+            }
+            if icons::button(ui, Icon::Repair, tr("Repair mesh"), has_sel, false).clicked() {
+                app.for_selected(|index| Command::RepairMesh { index, fill: true });
+            }
         }
-        ui.separator();
+        theme::divider(ui);
         if icons::button(ui, Icon::Settings, tr("Print settings (Ctrl+P)"), true, false).clicked() {
             app.open_settings();
         }
         if icons::button(ui, Icon::Machine, tr("Machine control"), true, false).clicked() {
             app.dialogs.machine = true;
         }
-        ui.separator();
-        if app.job.is_some() {
-            if ui.button("Cancel slicing").clicked() {
-                app.cancel_slice();
-            }
-        } else {
-            let slice = egui::Button::new(egui::RichText::new(tr("  Slice  ")).strong());
-            if ui.add_enabled(has_models, slice).on_hover_text(tr("Ctrl+R")).clicked() {
+
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            if app.job.is_some() {
+                if ui
+                    .add(egui::Button::new(tr("Cancel")).min_size(egui::vec2(110.0, 32.0)))
+                    .clicked()
+                {
+                    app.cancel_slice();
+                }
+            } else if theme::primary(ui, tr("Slice"), has_models, egui::vec2(110.0, 32.0))
+                .on_hover_text(tr("Slice the plate (Ctrl+R)"))
+                .clicked()
+            {
                 app.start_slice(&ctx);
             }
-        }
-        let can_export = has_models && app.job.is_none();
-        if icons::button(ui, Icon::Export, tr("Export G-code (Ctrl+E)"), can_export, false)
-            .clicked()
-        {
-            app.export(&ctx);
-        }
-        ui.separator();
-        ui.selectable_value(&mut app.mode, Mode::Prepare, "Prepare");
-        ui.add_enabled_ui(app.preview_cache.is_some(), |ui| {
-            ui.selectable_value(&mut app.mode, Mode::Preview, "Preview");
+            let can_export = has_models && app.job.is_none();
+            if icons::button(ui, Icon::Export, tr("Export G-code (Ctrl+E)"), can_export, false)
+                .clicked()
+            {
+                app.export(&ctx);
+            }
+            theme::divider(ui);
+            let can_preview = app.preview_cache.is_some();
+            let mut mode = app.mode;
+            // one allocation, so it reads left to right inside this right-to-left row
+            if theme::segmented(
+                ui,
+                &mut mode,
+                &[
+                    (Mode::Prepare, tr("Prepare"), true),
+                    (Mode::Preview, tr("Preview"), can_preview),
+                ],
+            ) {
+                app.mode = mode;
+            }
         });
     });
 }

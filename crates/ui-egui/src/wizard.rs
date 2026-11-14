@@ -19,50 +19,114 @@ fn mm(ui: &mut egui::Ui, value: &mut f64, range: std::ops::RangeInclusive<f64>, 
     ui.add(egui::DragValue::new(value).range(range).speed(speed).suffix(" mm"));
 }
 
+/// The pages as numbered steps: done, current, still to come.
+fn stepper(ui: &mut egui::Ui, current: usize) {
+    let p = crate::theme::of(ui);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        for (i, name) in PAGES.iter().enumerate() {
+            let (fill, text) = if i < current {
+                (p.accent.gamma_multiply(0.35), p.text)
+            } else if i == current {
+                (p.accent, p.on_accent)
+            } else {
+                (p.input, p.dim)
+            };
+            let (dot, _) = ui.allocate_exact_size(egui::vec2(22.0, 22.0), egui::Sense::hover());
+            ui.painter().circle_filled(dot.center(), 11.0, fill);
+            if i < current {
+                // a drawn tick: the interface font may not have one
+                let c = dot.center();
+                let tick = [
+                    c + egui::vec2(-4.5, 0.5),
+                    c + egui::vec2(-1.0, 4.0),
+                    c + egui::vec2(5.0, -3.5),
+                ];
+                ui.painter().add(egui::Shape::line(tick.to_vec(), egui::Stroke::new(2.0, text)));
+            } else {
+                ui.painter().text(
+                    dot.center(),
+                    egui::Align2::CENTER_CENTER,
+                    (i + 1).to_string(),
+                    crate::theme::strong(12.0),
+                    text,
+                );
+            }
+            let label = RichText::new(crate::i18n::tr(name));
+            ui.label(if i == current {
+                label.font(crate::theme::strong(14.0)).color(p.text)
+            } else {
+                label.color(p.dim)
+            });
+            if i + 1 < PAGES.len() {
+                let (line, _) =
+                    ui.allocate_exact_size(egui::vec2(18.0, 22.0), egui::Sense::hover());
+                ui.painter().hline(
+                    line.x_range(),
+                    line.center().y,
+                    egui::Stroke::new(1.0, p.border),
+                );
+            }
+        }
+    });
+}
+
 pub fn show(app: &mut SliceCraftApp, ctx: &egui::Context) {
     let Some(w) = &mut app.wizard else { return };
     let mut open = true;
     let mut finish = false;
-    egui::Window::new(crate::i18n::tr("Printer setup assistant"))
+    crate::theme::window(ctx, crate::i18n::tr("Printer setup assistant"))
         .open(&mut open)
         .collapsible(false)
         .resizable(false)
-        .default_width(460.0)
+        .default_width(520.0)
         .show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                for (i, p) in PAGES.iter().enumerate() {
-                    let text = RichText::new(format!("{}. {p}", i + 1));
-                    ui.label(if i == w.page { text.strong() } else { text.weak() });
+            stepper(ui, w.page);
+            ui.add_space(8.0);
+            let s = &mut w.setup;
+            crate::theme::card_frame(ui).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                match w.page {
+                    0 => printer_page(ui, s),
+                    1 => extruder_page(ui, s),
+                    2 => material_page(ui, s),
+                    _ => finish_page(ui, s),
                 }
             });
-            ui.separator();
-            let s = &mut w.setup;
-            match w.page {
-                0 => printer_page(ui, s),
-                1 => extruder_page(ui, s),
-                2 => material_page(ui, s),
-                _ => finish_page(ui, s),
+            ui.add_space(8.0);
+            let valid = w.setup.validate();
+            if let Err(e) = &valid {
+                ui.colored_label(crate::theme::of(ui).warn, e.to_string());
             }
-            ui.separator();
             ui.horizontal(|ui| {
-                if ui.add_enabled(w.page > 0, egui::Button::new(crate::i18n::tr("Back"))).clicked()
-                {
-                    w.page -= 1;
-                }
-                let valid = w.setup.validate();
-                if w.page + 1 < PAGES.len() {
-                    if ui.button(crate::i18n::tr("Next")).clicked() {
-                        w.page += 1;
-                    }
-                } else if ui
-                    .add_enabled(valid.is_ok(), egui::Button::new(crate::i18n::tr("Make profile")))
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let size = egui::vec2(130.0, 30.0);
+                    if w.page + 1 < PAGES.len() {
+                        if crate::theme::primary(ui, crate::i18n::tr("Next"), true, size).clicked()
+                        {
+                            w.page += 1;
+                        }
+                    } else if crate::theme::primary(
+                        ui,
+                        crate::i18n::tr("Make profile"),
+                        valid.is_ok(),
+                        size,
+                    )
                     .clicked()
-                {
-                    finish = true;
-                }
-                if let Err(e) = valid {
-                    ui.colored_label(egui::Color32::from_rgb(0xff, 0x7a, 0x70), e.to_string());
-                }
+                    {
+                        finish = true;
+                    }
+                    if ui
+                        .add_enabled(
+                            w.page > 0,
+                            egui::Button::new(crate::i18n::tr("Back"))
+                                .min_size(egui::vec2(90.0, 30.0)),
+                        )
+                        .clicked()
+                    {
+                        w.page -= 1;
+                    }
+                });
             });
         });
     if finish {

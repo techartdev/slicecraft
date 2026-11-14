@@ -28,11 +28,11 @@ the extrusion model, the estimates and support removal, this is not a release �
 | Phases complete | P0–P5 in code; P6 without packaging | measured against the phase table |
 | Crates | 7 libraries, 2 apps, 1 tool | measured |
 | Lines of Rust | ≈ 28,000 | measured (`cargo xtask stats`) |
-| Tests | 236, all green | measured (`cargo test --workspace`) |
+| Tests | 258, all green | measured (`cargo test --workspace`) |
 | Commands | 49, all ready | measured (`engine::COMMANDS`) |
 | Profile settings | 171, all used by the slicer | measured (`doc::settings::SETTINGS`) |
 | Crown with support (350 layers, release) | sliced in ≈ 1.5 s; support filament 676 mm vs the reference's 682 mm; 2606 retractions vs 4384 | measured on one Windows machine |
-| Direct external dependencies | 8 (`i_overlay`, `roxmltree`, `miniz_oxide`, `serial2`; `eframe`, `rfd`, `zune-jpeg` in the window only) | measured |
+| Direct external dependencies | 9 (`i_overlay`, `roxmltree`, `miniz_oxide`, `serial2`; `eframe`, `rfd`, `zune-jpeg`, `skrifa` in the window only) | measured |
 | Simplify3D profiles imported | 16 of 16 operator files (4.0 and 5.1.2) | measured (`io::fff::tests::corpus_profiles_import`, corpus outside the repo) |
 | 20 mm cube, defaults | 99 layers, 1.17 m filament, ≈ 14 min (no acceleration) | measured, uncalibrated |
 | Filament vs an independent area estimate | within ±10% on the 20 mm cube | measured (`engine::tests::cube_filament_matches_hand_estimate`) |
@@ -56,7 +56,7 @@ damaged meshes dominate the uncertainty.
 | **P3** Shells & infill | shells ✓, seams ✓, thin walls and gap fill ✓, ten infill patterns ✓, solid top/bottom, bridges, ironing, reinforcement ✓, extrusion model ✓ (matches the reference's outer-wall filament within 0.1%) | **done** | crown outer perimeter 1641 vs 1642 mm |
 | **P4** Support & control | support pillars and areas ✓, preview ✓, add/block boxes ✓; skirt, brim, raft ✓; retraction rules, coast, wipe, combing ✓; schedules ✓ | **done** | crown support filament 676 vs 682 mm |
 | **P5** Output & agents | three flavours, arcs, thumbnails ✓; preview ✓; turn-weighted estimates ✓; MCP over stdio ✓ (32 tools); multi-tool with prime tower and ooze shield ✓ (synthetic tests) | **done** | `mcp::server` tests and a scripted MCP session slicing a 190k-triangle model |
-| **P6** UI & packaging | egui window ✓, 3D bed view ✓, panels ✓, dialogs ✓; USB and network printing ✓, camera ✓; packaging ✗; wasm ✗ | started | window driven and screenshotted on Windows 11 |
+| **P6** UI & packaging | egui window ✓, 3D bed view ✓, panels ✓, dialogs ✓, visual overhaul (theme, cards, floating view and tool bars, settings editor with a tab list, machine panel with a jog pad, light theme) ✓; USB and network printing ✓, camera ✓; packaging ✗; wasm ✗ | started | window driven and screenshotted on Windows 11, dark, light, English and Bulgarian |
 
 ## What is next (concrete)
 
