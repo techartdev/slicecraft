@@ -139,8 +139,9 @@ fn zones_window(app: &mut SliceCraftApp, ctx: &egui::Context) {
     let top = slicecraft_geom::MAX_COORD;
     let mut open = true;
     let mut command: Option<Command> = None;
-    crate::theme::window(ctx, crate::i18n::tr("Setting zones")).open(&mut open).default_width(640.0).show(ctx, |ui| {
-        ui.label(crate::i18n::tr("Change settings above a height, or for some models only. Zones apply in order; later ones win."));
+    let mut profile_error: Option<String> = None;
+    crate::theme::window(ctx, crate::i18n::tr("Setting zones: several profiles per job")).open(&mut open).default_width(640.0).show(ctx, |ui| {
+        ui.label(crate::i18n::tr("Print part of the job with other settings: above or below a height, for some models only, or both. A zone can take a whole profile. Zones apply in order; later ones win."));
         ui.add_space(4.0);
         ui.horizontal_top(|ui| {
             ui.vertical(|ui| {
@@ -175,6 +176,37 @@ fn zones_window(app: &mut SliceCraftApp, ctx: &egui::Context) {
                     ui.label(crate::i18n::tr("Name"));
                     ui.text_edit_singleline(&mut z.name);
                 });
+                ui.horizontal(|ui| {
+                    ui.label(crate::i18n::tr("Use a whole profile"));
+                    let mut chosen = None;
+                    egui::ComboBox::from_id_salt("zone-preset")
+                        .selected_text(crate::i18n::tr("preset…"))
+                        .width(150.0)
+                        .show_ui(ui, |ui| {
+                            for p in presets() {
+                                if ui.selectable_label(false, &p.name).clicked() {
+                                    chosen = Some(p);
+                                }
+                            }
+                        });
+                    if let Some(p) = chosen {
+                        z.take_profile(&base, &p.settings);
+                    }
+                    if ui.button(crate::i18n::tr("From a file…")).clicked()
+                        && let Some(path) = rfd::FileDialog::new()
+                            .add_filter("Profiles (SliceCraft, Simplify3D)", &["scprofile", "fff", "txt", "gcode"])
+                            .pick_file()
+                    {
+                        match slicecraft_engine::read_profile_file(&path) {
+                            Ok(p) => z.take_profile(&base, &p.settings),
+                            Err(e) => profile_error = Some(e.to_string()),
+                        }
+                    }
+                })
+                .response
+                .on_hover_text(crate::i18n::tr(
+                    "The zone takes every job setting where that profile differs from the plate's",
+                ));
                 ui.horizontal(|ui| {
                     ui.label(crate::i18n::tr("From"));
                     ui.add(egui::DragValue::new(&mut z.z_from).range(0.0..=10_000.0).speed(0.1).suffix(" mm"));
@@ -261,6 +293,9 @@ fn zones_window(app: &mut SliceCraftApp, ctx: &egui::Context) {
             });
         });
     });
+    if let Some(e) = profile_error {
+        app.error(e);
+    }
     if let Some(c) = command {
         app.run(c);
     }

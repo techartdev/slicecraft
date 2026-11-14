@@ -202,6 +202,11 @@ impl OrbitCamera {
 }
 
 impl Frame {
+    /// The camera's right, up and forward directions.
+    pub fn axes(&self) -> (Vec3, Vec3, Vec3) {
+        (self.right, self.up, self.forward)
+    }
+
     /// The camera position.
     pub fn eye(&self) -> Vec3 {
         self.eye

@@ -17,6 +17,7 @@ pub mod app;
 pub mod camera;
 pub mod config;
 pub mod dialogs;
+pub mod gizmo;
 pub mod i18n;
 pub mod icons;
 pub mod keys;

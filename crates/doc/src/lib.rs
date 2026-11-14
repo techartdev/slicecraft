@@ -288,6 +288,12 @@ pub struct SettingZone {
     pub overrides: std::collections::BTreeMap<String, settings::SettingValue>,
 }
 
+impl Default for SettingZone {
+    fn default() -> Self {
+        Self::new("")
+    }
+}
+
 impl SettingZone {
     /// The whole height, every model, nothing changed yet.
     pub fn new(name: impl Into<String>) -> Self {
@@ -317,6 +323,17 @@ impl SettingZone {
         z >= self.z_from && z < self.z_to
     }
 
+    /// Make this zone print with `profile` where it differs from `base`: the
+    /// overrides become every such setting a zone can change. The machine,
+    /// the G-code format and the scripts stay with the plate's profile.
+    pub fn take_profile(&mut self, base: &PrintSettings, profile: &PrintSettings) {
+        self.overrides = settings::differences(base, profile)
+            .into_iter()
+            .filter(|(spec, _, _)| zone_can_change(spec))
+            .map(|(spec, _, theirs)| (spec.key.to_string(), theirs))
+            .collect();
+    }
+
     /// `base` with this zone's overrides applied.
     pub fn apply(&self, base: &PrintSettings) -> PrintSettings {
         let mut out = base.clone();
@@ -325,6 +342,12 @@ impl SettingZone {
         }
         out
     }
+}
+
+/// Whether a setting can differ inside a zone: anything but the machine, the
+/// G-code format and the scripts, which belong to the whole job.
+pub fn zone_can_change(spec: &settings::SettingSpec) -> bool {
+    !matches!(spec.tab, settings::Tab::Machine | settings::Tab::Gcode | settings::Tab::Scripts)
 }
 
 /// Most support edits one document holds.
@@ -532,11 +555,14 @@ impl Document {
             });
         }
         items.sort_by(|a, b| b.depth.total_cmp(&a.depth));
+        // the skirt, brim or raft around the block must land on the bed too
+        let margin = self.settings.adhesion_margin();
+        let usable_width = (self.bed.width - 2.0 * margin).max(0.0);
         let mut rows: Vec<Row> = Vec::new();
         for it in items {
-            let fits = rows.last().is_some_and(|r| {
-                r.members.is_empty() || r.width + gap + it.width <= self.bed.width
-            });
+            let fits = rows
+                .last()
+                .is_some_and(|r| r.members.is_empty() || r.width + gap + it.width <= usable_width);
             if !fits {
                 rows.push(Row::default());
             }
@@ -755,6 +781,27 @@ mod tests {
         let p = PrintSettings { bed_width: 300.0, ..PrintSettings::default() };
         doc.set_settings(p);
         assert_eq!(doc.bed.width, 300.0);
+    }
+
+    #[test]
+    fn arrange_leaves_room_for_the_skirt() {
+        // nine 20 mm plates 5 mm apart are exactly 220 mm: a row that fills
+        // the bed edge to edge would push the skirt off it
+        let mut d = Document::default();
+        for i in 0..9 {
+            let Some(mesh) = square_plate(20.0) else { return };
+            assert!(d.add(SceneObject::new(format!("p{i}"), mesh)).is_ok());
+        }
+        d.settings.skirt_enabled = true;
+        d.settings.skirt_distance = 3.0;
+        d.settings.skirt_loops = 2;
+        assert!(d.arrange(5.0).is_ok());
+        let margin = d.settings.adhesion_margin();
+        assert!(margin > 3.0);
+        for o in &d.objects {
+            let b = o.world_bounds();
+            assert!(b.min().x >= margin - 1e-6 && b.max().x <= d.bed.width - margin + 1e-6);
+        }
     }
 
     #[test]

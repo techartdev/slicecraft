@@ -200,6 +200,12 @@ pub const TOOLS: &[ToolSpec] = &[
         args: &["settings:string!", "name:string", "z_from:number", "z_to:number", "models:string"],
     },
     ToolSpec {
+        name: "slicecraft.zone_from_profile",
+        command: "zone-from-profile",
+        description: "Print part of the job with another profile file: from z_from to z_to mm, and only the listed models (optional indices such as 0,2); the file's job settings that differ from the current profile become the zone",
+        args: &["profile:string!", "name:string", "z_from:number", "z_to:number", "models:string"],
+    },
+    ToolSpec {
         name: "slicecraft.preview",
         command: "preview",
         description: "Describe the layer preview of the current document",
@@ -546,6 +552,22 @@ fn call_tool(session: &mut Session, spec: &ToolSpec, call: &Call) -> Result<Repl
                 zone.overrides.insert(k.to_string(), value);
             }
             run(session, Command::AddZone(Box::new(zone)))
+        }
+        "zone_from_profile" => {
+            let mut zone = slicecraft_doc::SettingZone::new(
+                call.args.get("name").cloned().unwrap_or_default(),
+            );
+            if let Some(z) = number_arg(call, "z_from")? {
+                zone.z_from = z;
+            }
+            if let Some(z) = number_arg(call, "z_to")? {
+                zone.z_to = z;
+            }
+            if let Some(m) = call.args.get("models") {
+                zone.objects = indices_arg(m).ok_or("`models` is a list such as 0,2")?;
+            }
+            let path = call.args.get("profile").ok_or("`profile` is the path of a profile file")?;
+            run(session, Command::ZoneFromProfile { path: path.into(), zone: Box::new(zone) })
         }
         "preview" => {
             let layers = session.preview_layers();

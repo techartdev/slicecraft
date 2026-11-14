@@ -523,7 +523,12 @@ fn layer_regions(
             let layer =
                 slicecraft_render::cross_section_with(m, slot.cut_z(), close_gap, keep_open);
             dropped += layer.dropped_chains;
-            loops.extend(layer.loops.into_iter().map(|l| l.points));
+            loops.extend(layer.loops.into_iter().map(|l| {
+                slicecraft_render::section::simplify_ring(
+                    &l.points,
+                    slicecraft_render::section::SIMPLIFY_TOLERANCE,
+                )
+            }));
             open.extend(layer.open);
         }
         let region = compensate(

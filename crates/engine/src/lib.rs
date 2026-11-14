@@ -93,6 +93,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     ready("profile", "Print Settings"),
     ready("load-profile", "Load Profile"),
     ready("compare-profile", "Compare with a Profile File"),
+    ready("zone-from-profile", "Settings Zone from a Profile File"),
     ready("save-profile", "Save Profile"),
     ready("new-project", "New Project"),
     ready("open-project", "Open Project"),
@@ -283,6 +284,12 @@ pub enum Command {
     /// Read a profile file (SliceCraft or Simplify3D) and list how it differs
     /// from the current profile, without loading it.
     CompareProfile(PathBuf),
+    /// Add `zone` (its name, heights and models) printing with the profile in
+    /// a file: its overrides become every job setting that file changes.
+    ZoneFromProfile {
+        path: PathBuf,
+        zone: Box<slicecraft_doc::SettingZone>,
+    },
     /// Make and load a profile from the printer setup assistant's answers.
     SetupPrinter(Box<slicecraft_doc::setup::PrinterSetup>),
     /// Ask a network print host whether it answers (and accepts the key).
@@ -357,6 +364,7 @@ impl Command {
             Command::CheckNetworkPrinter(_) | Command::UploadToNetwork { .. } => "print-network",
             Command::SetupPrinter(_) => "profile-wizard",
             Command::CompareProfile(_) => "compare-profile",
+            Command::ZoneFromProfile { .. } => "zone-from-profile",
         }
     }
 }
@@ -1202,15 +1210,17 @@ impl Session {
                 self.doc.set_settings(*settings);
                 Ok(self.changed())
             }
+            Command::ZoneFromProfile { path, mut zone } => {
+                let profile = read_profile_file(&path)?;
+                profile.settings.validate()?;
+                zone.take_profile(&self.doc.settings, &profile.settings);
+                if zone.name.trim().is_empty() {
+                    zone.name = profile.name;
+                }
+                self.execute(Command::AddZone(zone))
+            }
             Command::CompareProfile(path) => {
-                let text = read_profile_text(&path)?;
-                let profile = if looks_like_fff(&text) {
-                    import_fff(&text)?.0
-                } else if slicecraft_io::looks_like_s3d_gcode(&text) {
-                    slicecraft_io::import_s3d_gcode(&text)?.0
-                } else {
-                    Profile::from_text(&text)?.0
-                };
+                let profile = read_profile_file(&path)?;
                 let diffs =
                     slicecraft_doc::settings::differences(&self.doc.settings, &profile.settings)
                         .into_iter()
@@ -1600,6 +1610,19 @@ impl Session {
     }
 }
 
+/// A profile from a file: SliceCraft's own, a Simplify3D `.fff`, or the
+/// settings header of a Simplify3D G-code file.
+pub fn read_profile_file(path: &Path) -> Result<Profile, EngineError> {
+    let text = read_profile_text(path)?;
+    Ok(if looks_like_fff(&text) {
+        import_fff(&text)?.0
+    } else if slicecraft_io::looks_like_s3d_gcode(&text) {
+        slicecraft_io::import_s3d_gcode(&text)?.0
+    } else {
+        Profile::from_text(&text)?.0
+    })
+}
+
 /// A profile file's text: a SliceCraft profile or Simplify3D `.fff` within
 /// their size limit, or the settings header at the top of a Simplify3D
 /// G-code file of any size (only its first megabyte is read).
@@ -1789,6 +1812,7 @@ mod tests {
             Command::SetupPrinter(Box::default()),
             Command::SwitchPrinter(String::new()),
             Command::CompareProfile(PathBuf::new()),
+            Command::ZoneFromProfile { path: PathBuf::new(), zone: Box::default() },
             Command::CheckNetworkPrinter(slicecraft_io::network::NetworkPrinter::default()),
             Command::UploadToNetwork {
                 printer: slicecraft_io::network::NetworkPrinter::default(),
@@ -2990,6 +3014,40 @@ T0 ; tool change"
             "not loaded"
         );
         assert!(s.execute(Command::CompareProfile(PathBuf::from("no/such/file"))).is_err());
+    }
+
+    #[test]
+    fn a_profile_file_becomes_a_zone_for_one_model() {
+        let Some(mut s) = session_with(cube(10.0)) else { return };
+        let path =
+            std::env::temp_dir().join(format!("slicecraft-zone-{}.scprofile", std::process::id()));
+        let other = slicecraft_doc::PrintSettings {
+            infill_percentage: 80.0,
+            perimeter_count: 5,
+            // a machine setting: stays with the plate's profile
+            bed_width: 300.0,
+            ..PrintSettings::default()
+        };
+        let text = Profile { name: "strong".into(), settings: other }.to_text();
+        assert!(std::fs::write(&path, text).is_ok());
+        let mut zone = slicecraft_doc::SettingZone::new("");
+        zone.objects = vec![0];
+        let r = s.execute(Command::ZoneFromProfile { path: path.clone(), zone: Box::new(zone) });
+        let _ = std::fs::remove_file(&path);
+        assert!(r.is_ok(), "{r:?}");
+        let Some(z) = s.document().zones.first() else { return };
+        assert_eq!(z.name, "strong");
+        assert_eq!(z.objects, vec![0]);
+        assert!(z.overrides.contains_key("infill_percentage"));
+        assert!(z.overrides.contains_key("perimeter_count"));
+        assert!(!z.overrides.contains_key("bed_width"), "{:?}", z.overrides.keys());
+        // the plate's own profile is untouched
+        assert_eq!(s.document().settings.perimeter_count, PrintSettings::default().perimeter_count);
+        // and the model prints with the zone's walls
+        assert!(s.execute(Command::Slice).is_ok());
+        let missing = PathBuf::from("no/such/profile");
+        let zone = Box::new(slicecraft_doc::SettingZone::new("x"));
+        assert!(s.execute(Command::ZoneFromProfile { path: missing, zone }).is_err());
     }
 
     #[test]

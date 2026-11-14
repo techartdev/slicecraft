@@ -188,7 +188,7 @@ pub fn menu_bar(app: &mut SliceCraftApp, ui: &mut Ui) {
             ui.checkbox(&mut app.prefs.bed.axes, tr("Axes"));
             let mut section = app.section.is_some();
             if ui.checkbox(&mut section, tr("Section view")).changed() {
-                app.section = if section { Some(10.0) } else { None };
+                app.set_section(section);
             }
             ui.separator();
             ui.add_enabled_ui(app.preview_cache.is_some(), |ui| {
@@ -206,7 +206,7 @@ pub fn menu_bar(app: &mut SliceCraftApp, ui: &mut Ui) {
                 [(Axis::X, "Mirror X"), (Axis::Y, "Mirror Y"), (Axis::Z, "Mirror Z")]
             {
                 if plain(ui, label, "", has_sel) {
-                    app.mirror_selected(axis);
+                    crate::gizmo::mirror(app, axis);
                 }
             }
             ui.separator();
@@ -424,11 +424,27 @@ pub fn toolbar(app: &mut SliceCraftApp, ui: &mut Ui) {
             {
                 app.duplicate_selected();
             }
-            if icons::button(ui, Icon::MirrorX, tr("Mirror X"), has_sel, false).clicked() {
-                app.mirror_selected(Axis::X);
+            if icons::button(
+                ui,
+                Icon::MirrorX,
+                tr("Mirror X: flip the selection left to right"),
+                has_sel,
+                false,
+            )
+            .clicked()
+            {
+                crate::gizmo::mirror(app, Axis::X);
             }
-            if icons::button(ui, Icon::MirrorY, tr("Mirror Y"), has_sel, false).clicked() {
-                app.mirror_selected(Axis::Y);
+            if icons::button(
+                ui,
+                Icon::MirrorY,
+                tr("Mirror Y: flip the selection front to back"),
+                has_sel,
+                false,
+            )
+            .clicked()
+            {
+                crate::gizmo::mirror(app, Axis::Y);
             }
             if icons::button(ui, Icon::Center, tr("Centre on the bed"), has_sel, false).clicked() {
                 app.center_selected();

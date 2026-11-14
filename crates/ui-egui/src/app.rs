@@ -602,6 +602,21 @@ impl SliceCraftApp {
     }
 
     /// Show or hide the support preview.
+    /// Turn the section view on (cutting halfway up the models) or off.
+    pub(crate) fn set_section(&mut self, on: bool) {
+        self.section = if on {
+            let b = self.session.document().bounds();
+            let mid = if b.is_empty() { 10.0 } else { (b.min().z + b.max().z) / 2.0 };
+            self.info(format!(
+                "{} {mid:.1} mm",
+                crate::i18n::tr("Section view: models are cut at Z")
+            ));
+            Some(mid)
+        } else {
+            None
+        };
+    }
+
     pub(crate) fn set_show_support(&mut self, on: bool) {
         self.show_support = on;
         if !on {

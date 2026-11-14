@@ -185,7 +185,7 @@ fn models_card(app: &mut SliceCraftApp, ui: &mut Ui) {
                             [(Axis::X, "Mirror X"), (Axis::Y, "Mirror Y"), (Axis::Z, "Mirror Z")]
                         {
                             if ui.button(tr(label)).clicked() {
-                                app.mirror_selected(axis);
+                                crate::gizmo::mirror(app, axis);
                             }
                         }
                         if ui.button(tr("Centre on the bed")).clicked() {
@@ -415,33 +415,46 @@ fn support_card(app: &mut SliceCraftApp, ui: &mut Ui) {
     }
 }
 
-/// A number field in the placement grids.
-fn number(
-    ui: &mut Ui,
-    value: &mut f64,
-    speed: f64,
-    range: std::ops::RangeInclusive<f64>,
-    suffix: &str,
-) -> bool {
-    ui.add_sized(
-        [VALUE_W - 20.0, 24.0],
-        egui::DragValue::new(value).speed(speed).range(range).suffix(suffix),
-    )
-    .changed()
-}
-
-/// Right panel in prepare mode: exact placement of the selection.
+/// Right panel in prepare mode: what the selected model is and how it
+/// prints. Exact position, angle and size are in the move, rotate and scale
+/// tools' own panels.
 pub fn transform_panel(app: &mut SliceCraftApp, ui: &mut Ui) {
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         ui.add_space(2.0);
-        placement(app, ui);
+        object_cards(app, ui);
     });
 }
 
-fn placement(app: &mut SliceCraftApp, ui: &mut Ui) {
+/// The zone that gives model `i` its own settings over its whole height.
+fn own_zone(app: &SliceCraftApp, i: usize) -> Option<usize> {
+    app.session
+        .document()
+        .zones
+        .iter()
+        .position(|z| z.objects == [i] && z.z_from <= 0.0 && z.z_to >= slicecraft_geom::MAX_COORD)
+}
+
+/// Give model `i` its own settings from `profile`, replacing any it had.
+fn give_profile(
+    app: &mut SliceCraftApp,
+    i: usize,
+    label: &str,
+    profile: &slicecraft_doc::PrintSettings,
+) {
+    let name = app.session.document().objects.get(i).map(|o| o.name.clone()).unwrap_or_default();
+    let mut zone = slicecraft_doc::SettingZone::new(format!("{name}: {label}"));
+    zone.objects = vec![i];
+    zone.take_profile(&app.session.document().settings, profile);
+    match own_zone(app, i) {
+        Some(index) => app.run(Command::UpdateZone { index, zone: Box::new(zone) }),
+        None => app.run(Command::AddZone(Box::new(zone))),
+    };
+}
+
+fn object_cards(app: &mut SliceCraftApp, ui: &mut Ui) {
     let count = app.selected.len();
     if count == 0 {
-        theme::card(ui, "Placement", |ui| {
+        theme::card(ui, "Model", |ui| {
             theme::dim(ui, tr("Select a model in the list or the 3D view."));
             ui.add_space(6.0);
             for (k, what) in [("Q", "select"), ("W", "move"), ("E", "rotate"), ("R", "scale")] {
@@ -453,10 +466,12 @@ fn placement(app: &mut SliceCraftApp, ui: &mut Ui) {
         });
         return;
     }
+    let p = theme::of(ui);
     if count > 1 {
-        theme::card(ui, "Placement", |ui| {
+        theme::card(ui, "Models", |ui| {
             ui.label(format!("{count} {}", tr("models selected")));
         });
+        mirror_card(app, ui);
         actions_card(app, ui);
         return;
     }
@@ -464,13 +479,9 @@ fn placement(app: &mut SliceCraftApp, ui: &mut Ui) {
     let Some(o) = app.session.document().objects.get(i) else { return };
     let name = o.name.clone();
     let tris = o.mesh.len();
-    let original = o.original_size();
     let placed = o.size();
-    let mut t = o.transform;
-    let before = t;
-    let bed = app.session.document().bed.clone();
+    let role = o.role;
     let off_bed = app.session.document().outside_bed().contains(&name);
-    let p = theme::of(ui);
 
     theme::card_frame(ui).show(ui, |ui| {
         ui.set_width(ui.available_width());
@@ -483,115 +494,102 @@ fn placement(app: &mut SliceCraftApp, ui: &mut Ui) {
     });
     ui.add_space(8.0);
 
-    theme::card(ui, "Position", |ui| {
-        egui::Grid::new("pos").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
-            theme::axis_chip(ui, 0);
-            number(ui, &mut t.translate.x, 0.5, -bed.width..=2.0 * bed.width, " mm");
-            ui.end_row();
-            theme::axis_chip(ui, 1);
-            number(ui, &mut t.translate.y, 0.5, -bed.depth..=2.0 * bed.depth, " mm");
-            ui.end_row();
+    // exact placement lives with the tools
+    theme::card(ui, "Place exactly", |ui| {
+        theme::dim(ui, tr("Pick a tool for its handles and exact values:"));
+        ui.horizontal(|ui| {
+            for (tool, label) in
+                [(Tool::Move, "Move (W)"), (Tool::Rotate, "Rotate (E)"), (Tool::Scale, "Scale (R)")]
+            {
+                if ui.add(egui::Button::new(tr(label)).selected(app.tool == tool)).clicked() {
+                    app.tool = tool;
+                }
+            }
         });
-        theme::dim(ui, tr("model centre, on the bed"));
     });
 
-    let mut size =
-        Vec3::new(original.x * t.scale.x, original.y * t.scale.y, original.z * t.scale.z);
-    let mut pct = t.scale.scale(100.0);
-    let mut changed_axis: Option<(usize, f64)> = None;
-    let mut uniform = app.uniform_scale;
-    theme::card_with(
-        ui,
-        "Size",
-        |ui| {
-            ui.checkbox(&mut uniform, tr("uniform"));
-        },
-        |ui| {
-            egui::Grid::new("scale").num_columns(3).spacing([10.0, 6.0]).show(ui, |ui| {
-                for k in 0..3 {
-                    theme::axis_chip(ui, k);
-                    let (sz, pc, orig) = match k {
-                        0 => (&mut size.x, &mut pct.x, original.x),
-                        1 => (&mut size.y, &mut pct.y, original.y),
-                        _ => (&mut size.z, &mut pct.z, original.z),
-                    };
-                    let w = (ui.available_width() - 10.0) / 2.0;
-                    if ui
-                        .add_sized(
-                            [w.clamp(60.0, 100.0), 24.0],
-                            egui::DragValue::new(sz)
-                                .speed(0.5)
-                                .range(0.01..=10_000.0)
-                                .suffix(" mm"),
-                        )
-                        .changed()
-                        && orig > 0.0
-                    {
-                        changed_axis = Some((k, *sz / orig));
-                    }
-                    if ui
-                        .add_sized(
-                            [w.clamp(56.0, 80.0), 24.0],
-                            egui::DragValue::new(pc).speed(1.0).range(0.1..=100_000.0).suffix(" %"),
-                        )
-                        .changed()
-                    {
-                        changed_axis = Some((k, *pc / 100.0));
-                    }
-                    ui.end_row();
+    theme::card(ui, "Use as", |ui| {
+        let mut r = role;
+        if theme::segmented(
+            ui,
+            &mut r,
+            &[
+                (ModelRole::Print, tr("Part"), true),
+                (ModelRole::Support, tr("Support"), true),
+                (ModelRole::Cutter, tr("Cutter"), true),
+            ],
+        ) {
+            app.run(Command::SetRole { index: i, role: r });
+        }
+        theme::dim(
+            ui,
+            match r {
+                ModelRole::Print => tr("Printed as it is."),
+                ModelRole::Support => tr("Printed with the support settings, easy to break away."),
+                ModelRole::Cutter => {
+                    tr("Not printed: removes its shape from the parts it overlaps.")
                 }
-            });
-        },
-    );
-    app.uniform_scale = uniform;
-    if let Some((k, factor)) = changed_axis
-        && factor.is_finite()
-        && factor > 0.0
-    {
-        if app.uniform_scale {
-            let old = match k {
-                0 => t.scale.x,
-                1 => t.scale.y,
-                _ => t.scale.z,
-            };
-            let ratio = if old > 0.0 { factor / old } else { 1.0 };
-            t.scale = t.scale.scale(ratio);
-        } else {
-            match k {
-                0 => t.scale.x = factor,
-                1 => t.scale.y = factor,
-                _ => t.scale.z = factor,
+            },
+        );
+    });
+
+    // several profiles per job: this model's own settings
+    let own = own_zone(app, i);
+    let own_name = own
+        .and_then(|z| app.session.document().zones.get(z))
+        .map(|z| (z.name.clone(), z.overrides.len()));
+    theme::card(ui, "Print settings", |ui| {
+        match &own_name {
+            Some((zname, n)) => {
+                ui.label(RichText::new(zname).strong());
+                theme::dim(ui, format!("{n} {}", tr("settings differ from the plate's profile")));
+            }
+            None => {
+                theme::dim(ui, tr("Prints with the plate's profile."));
             }
         }
-    }
-
-    theme::card(ui, "Rotation", |ui| {
-        egui::Grid::new("rot").num_columns(3).spacing([10.0, 6.0]).show(ui, |ui| {
-            for k in 0..3 {
-                theme::axis_chip(ui, k);
-                let r = match k {
-                    0 => &mut t.rotate.x,
-                    1 => &mut t.rotate.y,
-                    _ => &mut t.rotate.z,
-                };
-                number(ui, r, 1.0, -360.0..=360.0, "°");
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 4.0;
-                    if ui.small_button("−90").clicked() {
-                        *r = (*r - 90.0) % 360.0;
+        let mut chosen = None;
+        egui::ComboBox::from_id_salt("model-profile")
+            .selected_text(tr("Use a profile for this model…"))
+            .width(ui.available_width())
+            .show_ui(ui, |ui| {
+                for preset in presets() {
+                    if ui.selectable_label(false, &preset.name).clicked() {
+                        chosen = Some(preset);
                     }
-                    if ui.small_button("+90").clicked() {
-                        *r = (*r + 90.0) % 360.0;
-                    }
-                });
-                ui.end_row();
+                }
+            });
+        if let Some(preset) = chosen {
+            give_profile(app, i, &preset.name, &preset.settings);
+        }
+        ui.horizontal(|ui| {
+            if ui.button(tr("From a file…")).clicked()
+                && let Some(path) = rfd::FileDialog::new()
+                    .set_title(tr("Profile for this model"))
+                    .add_filter(
+                        "Profiles (SliceCraft, Simplify3D)",
+                        &["scprofile", "fff", "txt", "gcode"],
+                    )
+                    .pick_file()
+            {
+                match slicecraft_engine::read_profile_file(&path) {
+                    Ok(profile) => give_profile(app, i, &profile.name, &profile.settings),
+                    Err(e) => app.error(e.to_string()),
+                }
+            }
+            if let Some(z) = own {
+                if ui.button(tr("Edit…")).clicked() {
+                    app.dialogs.zones =
+                        Some(crate::dialogs::ZonesEditor { selected: z, search: String::new() });
+                }
+                if ui.button(tr("Back to the plate's")).clicked() {
+                    app.run(Command::RemoveZone { index: z });
+                }
             }
         });
     });
-    if t != before && t.is_valid() {
-        app.place(i, t);
-    }
 
+    mirror_card(app, ui);
     actions_card(app, ui);
 
     if let Some((_, geo)) = &app.geometry
@@ -632,6 +630,36 @@ fn placement(app: &mut SliceCraftApp, ui: &mut Ui) {
     }
 }
 
+/// Mirror buttons that say what they do.
+fn mirror_card(app: &mut SliceCraftApp, ui: &mut Ui) {
+    theme::card(ui, "Mirror", |ui| {
+        ui.horizontal(|ui| {
+            for (k, axis, tip) in [
+                (0, Axis::X, "Flip left to right"),
+                (1, Axis::Y, "Flip front to back"),
+                (2, Axis::Z, "Turn upside down"),
+            ] {
+                let letter = ["X", "Y", "Z"].get(k).copied().unwrap_or("?");
+                let colour = theme::AXES.get(k).copied().unwrap_or(Color32::GRAY);
+                if ui
+                    .add(
+                        egui::Button::new(RichText::new(letter).color(colour).strong())
+                            .min_size(vec2(44.0, 28.0)),
+                    )
+                    .on_hover_text(tr(tip))
+                    .clicked()
+                {
+                    crate::gizmo::mirror(app, axis);
+                }
+            }
+        });
+        theme::dim(
+            ui,
+            tr("A mirror image: lettering reads backwards. A symmetric model looks the same."),
+        );
+    });
+}
+
 /// Actions on the selection, as a grid of equal buttons.
 fn actions_card(app: &mut SliceCraftApp, ui: &mut Ui) {
     theme::card(ui, "Arrange", |ui| {
@@ -656,22 +684,6 @@ fn actions_card(app: &mut SliceCraftApp, ui: &mut Ui) {
             }
             if ui.add(b("Reset")).on_hover_text(tr("Reset rotation and scale")).clicked() {
                 app.reset_selected();
-            }
-        });
-        ui.horizontal(|ui| {
-            theme::field(ui, "Mirror");
-            for (k, axis) in [Axis::X, Axis::Y, Axis::Z].into_iter().enumerate() {
-                let letter = ["X", "Y", "Z"].get(k).copied().unwrap_or("?");
-                let colour = theme::AXES.get(k).copied().unwrap_or(Color32::GRAY);
-                if ui
-                    .add(
-                        egui::Button::new(RichText::new(letter).color(colour).strong())
-                            .min_size(vec2(34.0, 26.0)),
-                    )
-                    .clicked()
-                {
-                    app.mirror_selected(axis);
-                }
             }
         });
         ui.add_space(2.0);

@@ -3,12 +3,13 @@
 
 use crate::app::{Mode, SliceCraftApp, Tool};
 use crate::camera::{Frame, ViewPreset, Viewport};
+use crate::gizmo::{self, Gizmo, GizmoDrag, Handle};
 use crate::i18n::tr;
 use crate::icons::{self, Icon};
 use crate::scene::{self, Builder, Coloring, ModelStyle, PreviewStyle};
 use crate::theme;
 use eframe::egui::{self, Align2, Color32, FontId, PointerButton, Pos2, Rect, Sense, Ui};
-use slicecraft_doc::{SupportEdit, SupportEditKind, Transform};
+use slicecraft_doc::{SupportEdit, SupportEditKind};
 use slicecraft_engine::Command;
 use slicecraft_geom::Vec3;
 
@@ -19,16 +20,8 @@ pub enum Drag {
         index: usize,
         grab: Vec3,
     },
-    Rotate {
-        index: usize,
-        start: Transform,
-        x0: f32,
-    },
-    Scale {
-        index: usize,
-        start: Transform,
-        y0: f32,
-    },
+    /// A handle of the move, rotate or scale tool.
+    Gizmo(GizmoDrag),
     /// A support box being drawn on the bed, corner to corner.
     SupportBox {
         kind: SupportEditKind,
@@ -49,6 +42,31 @@ fn pick(app: &SliceCraftApp, f: &Frame, p: Pos2) -> Option<usize> {
         }
     }
     best.map(|(_, i)| i)
+}
+
+/// The handles of the selected model, when the active tool has handles.
+fn selection_gizmo(app: &SliceCraftApp, f: &Frame) -> Option<Gizmo> {
+    if app.mode != Mode::Prepare || !matches!(app.tool, Tool::Move | Tool::Rotate | Tool::Scale) {
+        return None;
+    }
+    let index = app.primary()?;
+    Gizmo::new(f, g_bounds(app, index))
+}
+
+/// A model's placed bounds, as last drawn.
+fn g_bounds(app: &SliceCraftApp, index: usize) -> slicecraft_geom::Bounds3 {
+    app.geometry
+        .as_ref()
+        .and_then(|(_, g)| g.objects.get(index))
+        .map(|o| o.bounds)
+        .unwrap_or_default()
+}
+
+fn ring_axis(h: Handle) -> usize {
+    match h {
+        Handle::Ring(k) => k,
+        _ => 2,
+    }
 }
 
 pub fn viewport(app: &mut SliceCraftApp, ui: &mut Ui) {
@@ -148,26 +166,59 @@ pub fn viewport(app: &mut SliceCraftApp, ui: &mut Ui) {
     {
         app.drag = None;
         let p = resp.interact_pointer_pos();
-        let hit = p.and_then(|p| pick(app, &frame0, p));
-        let tool = if shift && app.tool == Tool::Select { Tool::Move } else { app.tool };
-        let target = match tool {
-            Tool::Move => hit,
-            _ => hit.or(app.primary()),
-        };
-        if let (Some(index), Some(p)) = (target, p) {
-            let t = app.session.document().objects.get(index).map(|o| o.transform);
-            if let Some(t) = t {
-                match tool {
-                    Tool::Move => {
-                        if let Some(at) = frame0.bed_point(f64::from(p.x), f64::from(p.y)) {
-                            app.drag = Some(Drag::Move { index, grab: t.translate - at });
-                            app.selected = app.with_group(index);
-                        }
-                    }
-                    Tool::Rotate => app.drag = Some(Drag::Rotate { index, start: t, x0: p.x }),
-                    Tool::Scale => app.drag = Some(Drag::Scale { index, start: t, y0: p.y }),
-                    Tool::Select | Tool::SupportAdd | Tool::SupportBlock => {}
+        // a handle of the active tool comes first
+        if let Some(p) = p
+            && let Some(index) = app.primary()
+            && let Some(g) = selection_gizmo(app, &frame0)
+            && let Some(handle) = g.hit(&frame0, app.tool, p)
+            && let Some(start) = app.session.document().objects.get(index).map(|o| o.transform)
+        {
+            let grab = match handle {
+                Handle::MovePlane => frame0
+                    .bed_point(f64::from(p.x), f64::from(p.y))
+                    .map_or(Vec3::ZERO, |at| start.translate - at),
+                Handle::Ring(_) => {
+                    let c =
+                        frame0.project(g.center).map_or(p, |c| Pos2::new(c.x as f32, c.y as f32));
+                    Vec3::new(
+                        gizmo::screen_angle(c, p),
+                        g.ring_angle_at(&frame0, ring_axis(handle), p),
+                        0.0,
+                    )
                 }
+                Handle::ScaleAxis(k) => {
+                    let size = g.bounds.size();
+                    let half = match k {
+                        0 => size.x,
+                        1 => size.y,
+                        _ => size.z,
+                    } / 2.0;
+                    Vec3::new(half, 0.0, 0.0)
+                }
+                _ => Vec3::ZERO,
+            };
+            app.drag = Some(Drag::Gizmo(GizmoDrag {
+                index,
+                handle,
+                start,
+                from: p,
+                center: g.center,
+                grab,
+            }));
+            if matches!(handle, Handle::MoveAxis(_) | Handle::MovePlane) {
+                app.selected = app.with_group(index);
+            }
+        } else {
+            let hit = p.and_then(|p| pick(app, &frame0, p));
+            let tool = if shift && app.tool == Tool::Select { Tool::Move } else { app.tool };
+            // dragging a model with the move tool (or shift) slides it on the bed
+            if tool == Tool::Move
+                && let (Some(index), Some(p)) = (hit, p)
+                && let Some(t) = app.session.document().objects.get(index).map(|o| o.transform)
+                && let Some(at) = frame0.bed_point(f64::from(p.x), f64::from(p.y))
+            {
+                app.drag = Some(Drag::Move { index, grab: t.translate - at });
+                app.selected = app.with_group(index);
             }
         }
     }
@@ -182,20 +233,18 @@ pub fn viewport(app: &mut SliceCraftApp, ui: &mut Ui) {
                         app.move_with_group(index, Vec3::new(at.x + grab.x, at.y + grab.y, 0.0));
                     }
                 }
-                Drag::Rotate { index, start, x0 } => {
-                    let mut t = start;
-                    let deg = f64::from(p.x - x0) * 0.5;
-                    let snapped = if shift { (deg / 15.0).round() * 15.0 } else { deg };
-                    t.rotate.z = (start.rotate.z + snapped) % 360.0;
-                    app.place(index, t);
-                }
                 Drag::SupportBox { .. } => {}
-                Drag::Scale { index, start, y0 } => {
-                    let mut t = start;
-                    let k = (-f64::from(p.y - y0) * 0.005).exp();
-                    t.scale = start.scale.scale(k);
-                    if t.is_valid() {
-                        app.place(index, t);
+                Drag::Gizmo(g) => {
+                    let gz = Gizmo::new(&frame0, g_bounds(app, g.index));
+                    if let Some(gz) = gz
+                        && let Some(t) = gizmo::apply(&frame0, &g, &gz, p, app.uniform_scale, shift)
+                    {
+                        match g.handle {
+                            Handle::MoveAxis(_) | Handle::MovePlane => {
+                                app.move_with_group(g.index, t.translate)
+                            }
+                            _ => app.place(g.index, t),
+                        }
                     }
                 }
             }
@@ -254,6 +303,7 @@ pub fn viewport(app: &mut SliceCraftApp, ui: &mut Ui) {
         }
     }
     let mut head = None;
+    let mut dial_label: Option<(Pos2, f64)> = None;
     match app.mode {
         Mode::Preview => {
             if let Some((_, layers)) = &app.preview_cache {
@@ -324,10 +374,41 @@ pub fn viewport(app: &mut SliceCraftApp, ui: &mut Ui) {
                 let e = SupportEdit::columns(kind, from, to);
                 scene::support_edits(&mut b, &frame, &[e], height);
             }
+            if let Some(g) = selection_gizmo(app, &frame) {
+                let dragging = match app.drag {
+                    Some(Drag::Gizmo(d)) => Some(d),
+                    _ => None,
+                };
+                let hot = dragging
+                    .map(|d| d.handle)
+                    .or_else(|| resp.hover_pos().and_then(|p| g.hit(&frame, app.tool, p)));
+                if hot.is_some() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+                }
+                g.draw(&mut b, &frame, app.tool, hot);
+                if let Some(d) = dragging
+                    && let Handle::Ring(k) = d.handle
+                    && let Some(p) = resp.interact_pointer_pos()
+                {
+                    let turned = gizmo::ring_turned(&frame, &d, p, shift);
+                    g.draw_dial(&mut b, &frame, k, d.grab.y, turned);
+                    dial_label = Some((p, turned.to_degrees()));
+                }
+            }
         }
     }
     if !b.is_empty() {
         painter.add(b.into_shape());
+    }
+    if let Some((p, deg)) = dial_label {
+        let text = format!("{deg:+.0}°");
+        painter.text(
+            p + egui::vec2(16.0, -16.0),
+            Align2::LEFT_BOTTOM,
+            text,
+            theme::strong(16.0),
+            Color32::WHITE,
+        );
     }
     overlays(app, ui, rect, head);
 }
@@ -345,9 +426,12 @@ fn badge(ui: &mut Ui, at: Pos2, align: Align2, text: &str) {
     painter.galley(r.min + egui::vec2(8.0, 4.0), galley, p.text);
 }
 
-/// The floating bar of camera views at the top of the 3D view.
+/// The floating bar at the top of the 3D view: framing and display toggles.
+/// The camera directions are on the view cube.
 fn view_bar(app: &mut SliceCraftApp, ui: &mut Ui, rect: Rect) {
-    let width = 11.0 * 30.0 + 2.0 * 9.0 + 8.0;
+    let prepare = app.mode == Mode::Prepare;
+    let buttons = if prepare { 5.0 } else { 4.0 };
+    let width = buttons * 30.0 + 9.0 + 8.0;
     let at = egui::pos2(rect.center().x - width / 2.0, rect.top() + 10.0);
     ui.scope_builder(
         egui::UiBuilder::new()
@@ -356,21 +440,11 @@ fn view_bar(app: &mut SliceCraftApp, ui: &mut Ui, rect: Rect) {
         |ui| {
             theme::overlay_frame(ui).show(ui, |ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
-                for (v, icon) in [
-                    (ViewPreset::Iso, Icon::ViewIso),
-                    (ViewPreset::Front, Icon::ViewFront),
-                    (ViewPreset::Back, Icon::ViewBack),
-                    (ViewPreset::Left, Icon::ViewLeft),
-                    (ViewPreset::Right, Icon::ViewRight),
-                    (ViewPreset::Top, Icon::ViewTop),
-                    (ViewPreset::Bottom, Icon::ViewBottom),
-                ] {
-                    let tip = format!("{} ({})", tr(v.label()), tr("view"));
-                    if icons::sized(ui, icon, &tip, true, false, 28.0).clicked() {
-                        app.view(v);
-                    }
+                if icons::sized(ui, Icon::ViewIso, tr("Perspective view (0)"), true, false, 28.0)
+                    .clicked()
+                {
+                    app.view(ViewPreset::Iso);
                 }
-                theme::divider(ui);
                 if icons::sized(ui, Icon::Fit, tr("Fit models (F)"), true, false, 28.0).clicked() {
                     app.fit_view();
                 }
@@ -380,9 +454,12 @@ fn view_bar(app: &mut SliceCraftApp, ui: &mut Ui, rect: Rect) {
                 {
                     app.prefs.bed.grid = !app.prefs.bed.grid;
                 }
-                let cut = app.section.is_some();
-                if icons::sized(ui, Icon::Section, tr("Section view"), true, cut, 28.0).clicked() {
-                    app.section = if cut { None } else { Some(10.0) };
+                if prepare {
+                    let cut = app.section.is_some();
+                    let tip = tr("Section view: cut the models at a height to see inside");
+                    if icons::sized(ui, Icon::Section, tip, true, cut, 28.0).clicked() {
+                        app.set_section(!cut);
+                    }
                 }
                 let wire = app.prefs.wireframe;
                 if icons::sized(
@@ -401,6 +478,27 @@ fn view_bar(app: &mut SliceCraftApp, ui: &mut Ui, rect: Rect) {
         },
     );
 }
+
+/// The view cube in the bottom-right corner.
+fn cube_corner(app: &mut SliceCraftApp, ui: &mut Ui, rect: Rect) {
+    let vp = crate::camera::Viewport {
+        left: f64::from(rect.left()),
+        top: f64::from(rect.top()),
+        width: f64::from(rect.width()),
+        height: f64::from(rect.height()),
+    };
+    let f = app.camera.frame(vp);
+    let area = Rect::from_min_size(
+        rect.right_bottom() - egui::vec2(CUBE_SIDE + 8.0, CUBE_SIDE + 30.0),
+        egui::vec2(CUBE_SIDE, CUBE_SIDE),
+    );
+    if let Some(preset) = gizmo::view_cube(ui, &f, area) {
+        app.view(preset);
+    }
+}
+
+/// Side of the view cube's square (px).
+const CUBE_SIDE: f32 = 104.0;
 
 /// The floating bar of placement tools at the left of the 3D view.
 fn tool_bar(app: &mut SliceCraftApp, ui: &mut Ui, rect: Rect) {
@@ -454,8 +552,11 @@ fn overlays(app: &mut SliceCraftApp, ui: &mut Ui, rect: Rect, head: Option<Vec3>
     let painter = ui.painter_at(rect);
     let faint = p.dim;
     view_bar(app, ui, rect);
+    cube_corner(app, ui, rect);
     if app.mode == Mode::Prepare {
         tool_bar(app, ui, rect);
+        let top = rect.center().y - (4.0 * 34.0 + 10.0) / 2.0;
+        gizmo::tool_panel(app, ui, egui::pos2(rect.left() + 66.0, top));
         if app.session.document().objects.is_empty() {
             empty_plate(app, ui, rect);
         }
@@ -466,12 +567,14 @@ fn overlays(app: &mut SliceCraftApp, ui: &mut Ui, rect: Rect, head: Option<Vec3>
             "drag: orbit · right-drag: pan · wheel: zoom · click: select · shift-drag: move"
         }
         (Mode::Prepare, Tool::Move) => {
-            "drag a model to move it on the bed · drag empty space to orbit"
+            "drag an arrow to move along it, the square or the model to move freely · drag empty space to orbit"
         }
         (Mode::Prepare, Tool::Rotate) => {
-            "drag left/right to turn the selection about Z · shift snaps to 15°"
+            "drag a ring to turn the model about its axis · Shift: 15° steps · drag empty space to orbit"
         }
-        (Mode::Prepare, Tool::Scale) => "drag up/down to scale the selection",
+        (Mode::Prepare, Tool::Scale) => {
+            "drag a coloured square to stretch one way, the white corner to scale evenly · drag empty space to orbit"
+        }
         (Mode::Prepare, Tool::SupportAdd) => {
             "click: one pillar here · drag a box: every surface facing down inside it gets support · Q: back to select"
         }
@@ -499,12 +602,13 @@ fn overlays(app: &mut SliceCraftApp, ui: &mut Ui, rect: Rect, head: Option<Vec3>
             if b.is_empty() { 100.0 } else { b.max().z }
         });
         let r = Rect::from_min_max(
-            Pos2::new(rect.right() - 54.0, rect.top() + 40.0),
-            Pos2::new(rect.right() - 14.0, rect.bottom() - 60.0),
+            Pos2::new(rect.right() - 54.0, rect.top() + 44.0),
+            Pos2::new(rect.right() - 14.0, rect.bottom() - CUBE_SIDE - 48.0),
         );
         ui.scope_builder(egui::UiBuilder::new().max_rect(r), |ui| {
             ui.spacing_mut().slider_width = r.height();
-            ui.add(egui::Slider::new(z, 0.0..=top.max(0.1)).vertical().show_value(false));
+            ui.add(egui::Slider::new(z, 0.0..=top.max(0.1)).vertical().show_value(false))
+                .on_hover_text(tr("Drag to move the cut up or down"));
         });
         let label = format!("{} {:.2} mm", tr("Section at Z"), *z);
         badge(ui, Pos2::new(rect.right() - 12.0, rect.top() + 12.0), Align2::RIGHT_TOP, &label);
@@ -520,8 +624,8 @@ fn overlays(app: &mut SliceCraftApp, ui: &mut Ui, rect: Rect, head: Option<Vec3>
         format!("{} {} / {}   ·   Z {:.2} mm", tr("Layer"), app.preview.last_layer + 1, max + 1, z);
     badge(ui, Pos2::new(rect.right() - 12.0, rect.top() + 12.0), Align2::RIGHT_TOP, &label);
     let r = Rect::from_min_max(
-        Pos2::new(rect.right() - 54.0, rect.top() + 40.0),
-        Pos2::new(rect.right() - 14.0, rect.bottom() - 60.0),
+        Pos2::new(rect.right() - 54.0, rect.top() + 44.0),
+        Pos2::new(rect.right() - 14.0, rect.bottom() - CUBE_SIDE - 48.0),
     );
     ui.scope_builder(egui::UiBuilder::new().max_rect(r), |ui| {
         ui.spacing_mut().slider_width = r.height();

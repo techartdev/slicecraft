@@ -28,8 +28,8 @@ the extrusion model, the estimates and support removal, this is not a release �
 | Phases complete | P0–P5 in code; P6 without packaging | measured against the phase table |
 | Crates | 7 libraries, 2 apps, 1 tool | measured |
 | Lines of Rust | ≈ 28,000 | measured (`cargo xtask stats`) |
-| Tests | 258, all green | measured (`cargo test --workspace`) |
-| Commands | 49, all ready | measured (`engine::COMMANDS`) |
+| Tests | 271, all green | measured (`cargo test --workspace`) |
+| Commands | 50, all ready | measured (`engine::COMMANDS`) |
 | Profile settings | 171, all used by the slicer | measured (`doc::settings::SETTINGS`) |
 | Crown with support (350 layers, release) | sliced in ≈ 1.5 s; support filament 676 mm vs the reference's 682 mm; 2606 retractions vs 4384 | measured on one Windows machine |
 | Direct external dependencies | 9 (`i_overlay`, `roxmltree`, `miniz_oxide`, `serial2`; `eframe`, `rfd`, `zune-jpeg`, `skrifa` in the window only) | measured |

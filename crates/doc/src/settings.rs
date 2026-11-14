@@ -1062,6 +1062,23 @@ impl PrintSettings {
         if self.extrusion_width_auto { self.nozzle_diameter * 1.125 } else { self.extrusion_width }
     }
 
+    /// How far skirt, brim or raft reach outside the models (mm), for keeping
+    /// them on the bed when models are laid out.
+    pub fn adhesion_margin(&self) -> f64 {
+        let w = self.line_width();
+        let mut m: f64 = 0.0;
+        if self.skirt_enabled {
+            m = m.max(self.skirt_distance + f64::from(self.skirt_loops.min(100)) * w);
+        }
+        if self.brim_enabled {
+            m = m.max(f64::from(self.brim_loops.min(200)) * w);
+        }
+        if self.raft_enabled {
+            m = m.max(self.raft_margin);
+        }
+        if m.is_finite() { m.clamp(0.0, 50.0) } else { 0.0 }
+    }
+
     /// Effective retraction length (zero when retraction is off).
     pub fn retraction(&self) -> f64 {
         if self.retract_enabled { self.retract_length } else { 0.0 }
