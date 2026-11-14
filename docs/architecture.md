@@ -9,18 +9,18 @@ describes code that exists. The rules that keep the shape are in
 
 ## Workspace
 
-13 packages: 7 libraries, 2 apps, `xtask`. About 13,700 lines of Rust
-(`cargo xtask stats`, 2026-11-13), 133 tests in 17 test binaries.
+13 packages: 7 libraries, 2 apps, `xtask`. About 17,300 lines of Rust
+(`cargo xtask stats`, 2026-11-13), 158 tests in 17 test binaries.
 
 | Layer | Crate | What it does |
 |---|---|---|
 | L0 | `geom` | `Vec3`, `Point2`, bounds, `Triangle`, `Mesh` (finite and within `±MAX_COORD`), `region`: polygons with holes, offset, union/difference/intersection on a 1 µm grid via `i_overlay` |
 | L1 | `doc` | `Document` (bed, profile, objects), `SceneObject` + `Transform` (centre → scale → rotate Z → place), `PrintSettings` (25 validated fields incl. `Flavor`), arrange, off-bed check |
 | L2 | `render` | `section`: triangle → directed segment → stitched loops; `paths`: toolpath types, perimeter shells, line infill, path ordering; `fixtures` for tests |
-| L3 | `io` | STL (binary + ASCII, detected by content), OBJ; `GcodeWriter` and `write_gcode` with the extrusion model, retraction, fan and estimates |
-| L4 | `engine` | `Session`, `Command`/`Outcome`, `COMMANDS`, `SliceJob`; `pipeline`: the parallel slicing pipeline |
+| L3 | `io` | STL (binary + ASCII, detected by content), OBJ; `GcodeWriter` and `write_gcode` with the extrusion model, retraction, fan and estimates; `project` (`.scproj`); `fff` (Simplify3D profile import) |
+| L4 | `engine` | `Session`, `Command`/`Outcome`, `COMMANDS`, `SliceJob`; `pipeline`: the parallel slicing pipeline; `support`: support areas and paths |
 | L5 | `ui-egui` | eframe window: `app` (panels, commands, slicing thread), `camera` (orbit camera math), `scene` (bed, models, toolpaths as egui meshes) |
-| L5 | `mcp` | `ToolSpec` table bound to engine command ids, `dispatch` with arguments |
+| L5 | `mcp` | `ToolSpec` table bound to engine command ids, `dispatch` with arguments, the stdio MCP server |
 | app | `slicecraft` | Opens the window, with model files from the command line pre-loaded |
 | app | `slicecraft-cli` | `commands`, `info <model>`, `slice <model>... -o out.gcode [options] [--json]` |
 | tool | `xtask` | `ci`, `layers`, `stats` |
@@ -101,16 +101,19 @@ session revision; a slice is served only for the revision it was taken at, and a
 
 ## The window
 
-`ui-egui` is an eframe app (glow backend), split into modules:
+`ui-egui` is an eframe app (wgpu backend, OpenGL when wgpu cannot start), split into modules:
 
 | Module | What it holds |
 |---|---|
 | `app` | window state, actions shared by panels, the slicing thread, shortcuts, drag-and-drop |
-| `menus` | menu bar (File, Edit, View, Model, Repair, Supports, Slice, Machine, Help) and the icon toolbar; built from `COMMANDS`, planned items disabled or explained |
-| `panels` | prepare mode: model list (visibility, multi-select, context menu), profile presets and quick settings, slice button; placement panel (position, size and scale per axis, rotation, mirror, mesh check); preview mode: build summary, show toggles, colouring, playback and layer range |
-| `viewport` | orbit, pan, zoom, picking, the select/move/rotate/scale tools, section view, overlays (legend with feature toggles, layer slider, nozzle position) |
+| `theme` | the look: dark and light palettes, type sizes and spacing, the interface font, and shared pieces (cards, the primary button, segmented choices, axis chips, figures, tags, floating-bar frames, centred windows) |
+| `menus` | menu bar (File, Edit, View, Model, Repair, Supports, Slice, Machine, Help) and the toolbar (file, model, support and mesh actions on the left; mode switch, export and Slice on the right); built from `COMMANDS`, planned items disabled or explained |
+| `panels` | columns of cards with the main action pinned at the foot. Prepare: models (visibility, tags, multi-select, context menu), profile (preset, quick settings, load/save/zones), support; placement (position, size, rotation, actions, mesh check). Preview: summary figures, extruded length by feature, notes, display options, export; playback and layer range |
+| `gpu` | the 3D view on the graphics card (wgpu, safe Rust): its own MSAA and depth target shown to egui as a texture; lit model meshes, every extrusion a lit bead built from one template, travel lines, a shader-drawn bed grid; geometry uploaded once per slice, layers and kinds chosen by draw range and uniforms; each frame inside an error scope, falling back to the CPU `scene` drawing (also used without a usable adapter, or when turned off in Preferences); `gpu.wgsl` holds the shaders |
+| `gizmo` | handles on the selected model (move arrows and plane, rotation rings with a degree dial, scale squares and an even-scale corner), the view cube, the floating panel with each tool's exact values, mirror with feedback |
+| `viewport` | orbit, pan, zoom, picking, the select/move/rotate/scale tools, section view; floating bars (framing and display toggles on top, placement tools at the left, the active tool's panel beside them), the view cube in the corner, an empty-plate prompt, overlays (legend of the kinds the job prints, with toggles; layer badge and slider; nozzle position) |
 | `scene` | CPU projection into egui meshes: bed, grid, volume, axes, shaded depth-sorted models, toolpaths with travel, retractions and nozzle, colouring by feature, speed or height |
-| `dialogs` | profile editor rendered from the settings schema (tabs, sections, search, changed-only, planned tags, per-setting reset), preferences, mesh analysis, machine control (placeholder), shortcuts, feature status, about |
+| `dialogs` | profile editor rendered from the settings schema (tab list with changed counts, section cards, search across tabs, changed-only, planned tags, per-setting reset), preferences, mesh analysis, machine control (connection, temperatures, jog pad, print, terminal), shortcuts, feature status, about; Esc closes the top window |
 | `icons` | toolbar glyphs drawn in code |
 | `camera` | orbit camera, view presets, fit to a box, ray to the bed plane |
 | `config` | what is remembered between sessions: `preferences.txt` (preferences, recent projects) and `last.scprofile` in the per-user folder (`%APPDATA%\SliceCraft`, `~/Library/Application Support/SliceCraft`, `$XDG_CONFIG_HOME/slicecraft`; `SLICECRAFT_CONFIG_DIR` overrides) |
@@ -145,12 +148,60 @@ window title and the "save changes?" prompt before New, Open and Quit. Opening o
 starting a project clears undo. The CLI's `slice` accepts a project in place of (or
 with) models, and MCP has `open_project` and `save_project`.
 
+## Support
+
+`engine::support` runs after the layer regions and before the shells:
+
+1. **Overhang:** per layer (in parallel), the area beyond the layer below plus
+   `h · tan(angle)`.
+2. **Joining:** each neighbouring pair of overhang strips is closed, so a slope's
+   thin strips become one area.
+3. **Columns:** stacked from the top down, cut by the model, and for "from the bed
+   only" filtered from the bottom up. This is the one sequential pass, unions only.
+4. **Pillars** (default style): per layer, the column area is snapped to grid cells
+   fixed to the bed, a line width apart.
+5. **Clearance and density:** per layer (in parallel), the horizontal and bottom
+   gaps, an opening by half a line, and dense zones under the model, on the model
+   and at the base. Each pillar or area is filled with one zigzag
+   (`render::paths::zigzag`).
+
+**Edits.** `Document::support_edits` holds boxes in bed coordinates. An `Add` box
+adds every surface facing down inside it, at any angle, to the overhangs; it works
+even with automatic support off. A `Block` box cuts the columns, and the pillar
+snapping, like the model does. The edits are commands (`support-edit`,
+`support-blockers`, `support-clear`) and are saved in the project's `[support]`
+section.
+
+**Preview.** `pipeline::support_preview` runs the same stages without slicing the
+rest. The window runs it as a `SupportJob` on a worker thread whenever the document
+changes, and stacks repeated outlines into prisms (`scene::support_prisms`). These
+are drawn in the same depth order as the models.
+
+Paths are `PathKind::Support` and `PathKind::SupportInterface`. They are printed
+first on each layer, at `support_speed_percent`. The first layer's support is inside
+the skirt and brim. The design and its comparison with the reference are in
+[research/05-support.md](research/05-support.md).
+
+## Importing Simplify3D profiles
+
+`io::fff` reads `.fff` profiles of both generations (plain values in 4.x, option lists
+in 5.x) with `roxmltree`, with no DTD and a node limit. It converts mm/min to mm/s,
+the automatic width to 1.2 × the nozzle, and the 4.x speed fractions to SliceCraft's
+wall/outer-wall model. Every value goes through `PrintSettings::set`, so ranges hold.
+It returns the profile and an `ImportReport`: settings the slicer uses, settings kept
+as planned, notes, and elements with no counterpart. `Command::LoadProfile` recognises
+the file by content, so the window, `--profile` and MCP all accept it. The
+measurements behind each conversion are in [research/09-fff-profiles.md](research/09-fff-profiles.md).
+
 ## Agent control
 
-`mcp::TOOLS` binds each tool to an engine command and `dispatch` runs it with string
-arguments (`path`, `index`); a programmatic call never opens a dialog. Transport
-(JSON-RPC over stdio) and the JSON control channel are phase P5. Until then,
-`slicecraft-cli` (with `--json`) is the automation surface.
+`mcp::TOOLS` binds each tool to an engine command, declares its arguments (which
+become each tool's JSON schema) and `dispatch` runs it with text arguments; a
+programmatic call never opens a dialog. `mcp::server` speaks MCP over standard input
+and output (`slicecraft-cli mcp`): `initialize`, `ping`, `tools/list`, `tools/call`,
+JSON-RPC 2.0 one message per line, through its own small JSON reader (`mcp::json`,
+depth and size capped). An agent starts with `slicecraft.describe`, which lists the
+models by index, the profile and the slice state.
 
 ## Safety
 
@@ -171,3 +222,6 @@ points panic on out-of-range input.
 | 2026-11-13 | MVP | Loops, regions, shells, solid/sparse infill, skirt, ordering, extrusion model, binary STL + OBJ, command API, egui window with 3D bed and toolpath preview |
 | 2026-11-13 | UI | Settings schema (169 settings), profiles, undo/redo, XYZ transforms, mirror/duplicate, brim, more patterns and seams, scripts, offsets; full window: menus, toolbars, placement, profile editor, preview controls, analysis |
 | 2026-11-13 | projects | `.scproj` project files, new/open/save/recent, unsaved-changes prompt, preferences and last profile remembered |
+| 2026-11-13 | fff | Simplify3D `.fff` import with a report; heat-up before custom start scripts |
+| 2026-11-13 | support | Region-based automatic support with interface, floor and base layers; `supports` command |
+| 2026-11-13 | support editing | Add/block boxes, support preview in the prepare view, edits in projects |

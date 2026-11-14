@@ -24,17 +24,94 @@ pub fn bead_area(width: f64, height: f64) -> f64 {
     }
 }
 
-/// Millimetres of filament per millimetre of path.
+/// Millimetres of filament per millimetre of path, for the profile's bead shape.
 pub fn filament_per_mm(width: f64, height: f64, settings: &PrintSettings) -> f64 {
     let filament_area = std::f64::consts::PI * settings.filament_diameter.powi(2) / 4.0;
     if filament_area <= 0.0 {
         return 0.0;
     }
-    bead_area(width, height) / filament_area * settings.extrusion_multiplier
+    let bead = match settings.bead_shape {
+        slicecraft_doc::BeadShape::Rectangle => width * height,
+        slicecraft_doc::BeadShape::Rounded => bead_area(width, height),
+    };
+    bead / filament_area * settings.extrusion_multiplier
+}
+
+/// How far points may stray from a fitted arc, mm.
+pub const ARC_TOLERANCE: f64 = 0.01;
+
+/// The circle through three points: centre, or `None` when they are in line.
+fn circle(a: Point2, b: Point2, c: Point2) -> Option<Point2> {
+    let d = 2.0 * (a.x * (b.y - c.y) + b.x * (c.y - a.y) + c.x * (a.y - b.y));
+    if d.abs() < 1e-9 {
+        return None;
+    }
+    let (a2, b2, c2) = (a.x * a.x + a.y * a.y, b.x * b.x + b.y * b.y, c.x * c.x + c.y * c.y);
+    Some(Point2::new(
+        (a2 * (b.y - c.y) + b2 * (c.y - a.y) + c2 * (a.y - b.y)) / d,
+        (a2 * (c.x - b.x) + b2 * (a.x - c.x) + c2 * (b.x - a.x)) / d,
+    ))
+}
+
+/// The longest run from `start` (at least four points) on one circle, turning
+/// one way and less than a full turn: (last index, centre, counter-clockwise).
+fn fit_arc(pts: &[Point2], start: usize) -> Option<(usize, Point2, bool)> {
+    let (a, b, c) = (*pts.get(start)?, *pts.get(start + 1)?, *pts.get(start + 2)?);
+    let centre = circle(a, b, c)?;
+    let r = a.distance(centre);
+    if !(0.5..=1000.0).contains(&r) {
+        return None;
+    }
+    let turn =
+        |p: Point2, q: Point2, s: Point2| (q.x - p.x) * (s.y - q.y) - (q.y - p.y) * (s.x - q.x);
+    let ccw = turn(a, b, c) > 0.0;
+    let mut end = start + 2;
+    let mut swept = 0.0;
+    while let Some(&next) = pts.get(end + 1) {
+        let (Some(&p), Some(&q)) = (pts.get(end - 1), pts.get(end)) else { break };
+        if (next.distance(centre) - r).abs() > ARC_TOLERANCE || (turn(p, q, next) > 0.0) != ccw {
+            break;
+        }
+        // the middle of each chord must also lie on the arc
+        let mid = Point2::new((q.x + next.x) / 2.0, (q.y + next.y) / 2.0);
+        if r - mid.distance(centre) > ARC_TOLERANCE {
+            break;
+        }
+        swept += q.distance(next) / r;
+        if swept > 5.5 {
+            break;
+        }
+        end += 1;
+    }
+    (end - start >= 3).then_some((end, centre, ccw))
+}
+
+/// Line width on a printed layer: the first layer may be wider, unless a raft
+/// is under it (then the raft is the first layer).
+pub fn layer_line_width(settings: &PrintSettings, layer_index: usize) -> f64 {
+    if layer_index == 0 && !settings.raft_enabled {
+        settings.line_width() * settings.first_layer_width_percent / 100.0
+    } else {
+        settings.line_width()
+    }
 }
 
 /// Feed speed for a feature on a layer, mm/s: the one rule the writer and the
 /// preview share.
+/// True when a start script heats the nozzle or bed itself (an `M104`,
+/// `M109`, `M140` or `M190` command, or a temperature placeholder).
+pub fn script_sets_temperatures(script: &str) -> bool {
+    script.contains("{nozzle}")
+        || script.contains("{bed}")
+        || script.contains("{first_nozzle}")
+        || script.contains("{first_bed}")
+        || script.lines().any(|l| {
+            let code = l.split(';').next().unwrap_or("").trim().to_ascii_uppercase();
+            let word = code.split_whitespace().next().unwrap_or("");
+            matches!(word, "M104" | "M109" | "M140" | "M190")
+        })
+}
+
 pub fn path_speed(s: &PrintSettings, kind: PathKind, layer_index: usize) -> f64 {
     if layer_index == 0 {
         return s.first_layer_speed;
@@ -43,8 +120,19 @@ pub fn path_speed(s: &PrintSettings, kind: PathKind, layer_index: usize) -> f64 
         PathKind::Skirt | PathKind::Brim => s.first_layer_speed,
         PathKind::OuterPerimeter => s.perimeter_speed * s.outer_perimeter_speed_percent / 100.0,
         PathKind::InnerPerimeter => s.perimeter_speed,
-        PathKind::SolidInfill => s.print_speed * s.solid_infill_speed_percent / 100.0,
+        PathKind::SolidInfill | PathKind::GapFill => {
+            s.print_speed * s.solid_infill_speed_percent / 100.0
+        }
+        PathKind::TopSolid | PathKind::Ironing => {
+            s.print_speed * s.solid_infill_speed_percent / 100.0 * s.top_speed_percent / 100.0
+        }
+        PathKind::Bridge => s.print_speed * s.bridge_speed_percent / 100.0,
         PathKind::SparseInfill => s.print_speed,
+        PathKind::Raft => s.first_layer_speed.max(s.print_speed * 0.5),
+        PathKind::Support | PathKind::SupportInterface => {
+            s.print_speed * s.support_speed_percent / 100.0
+        }
+        PathKind::PrimeTower | PathKind::OozeShield => s.perimeter_speed,
     }
 }
 
@@ -69,6 +157,7 @@ pub struct GcodeStats {
     pub extruded_mm: f64,
     pub travel_mm: f64,
     pub retractions: usize,
+    pub tool_changes: usize,
 }
 
 /// Writes G-code for one tool, in absolute millimetres and absolute E.
@@ -84,6 +173,96 @@ pub struct GcodeWriter<'a> {
     feed: Option<f64>,
     kind: Option<PathKind>,
     stats: GcodeStats,
+    /// Path length extruded since the last retraction, mm.
+    since_retract: f64,
+    /// Feed multiplier for the current layer (minimum layer time).
+    speed_factor: f64,
+    /// Current fan duty, 0–255.
+    fan: u8,
+    /// The fan duty this layer runs at outside bridges and top surfaces.
+    layer_fan: u8,
+    /// On a spiral layer, the height the wall rises from.
+    spiral_from: Option<f64>,
+    /// Direction of the last move, for the acceleration estimate.
+    last_dir: Option<(f64, f64)>,
+    /// The active tool.
+    tool: u8,
+    /// Every tool the job uses, ascending.
+    tools: Vec<u8>,
+    /// Layers from this index on are the print's last solid layers.
+    top_from: usize,
+    /// Idle tools: (tool, estimated time it went idle, cooled to standby yet).
+    idle: Vec<(u8, f64, bool)>,
+    /// The highest layer printed so far (one model at a time), mm.
+    printed_top: f64,
+}
+
+/// The temperature schedule's "layer temperature" pairs (layers counted from
+/// 1); lines that do not read as two sensible numbers are skipped.
+pub fn temperature_schedule(text: &str) -> Vec<(usize, f64)> {
+    text.lines()
+        .take(1000)
+        .filter_map(|l| {
+            let mut it = l.split([' ', '\t', ',', ':', '=']).filter(|w| !w.is_empty());
+            let layer = it.next()?.parse::<usize>().ok()?;
+            let temp = it.next()?.parse::<f64>().ok()?;
+            (layer >= 1 && temp.is_finite() && (0.0..=450.0).contains(&temp))
+                .then_some((layer, temp))
+        })
+        .collect()
+}
+
+/// Flow multiplier for a feature, on top of the profile's.
+pub fn kind_flow(s: &PrintSettings, kind: PathKind) -> f64 {
+    match kind {
+        // combined infill is as thick as the layers it stands for
+        PathKind::SparseInfill => {
+            f64::from(s.infill_every_layers.max(1)) * s.infill_width_percent / 100.0
+        }
+        PathKind::Support => f64::from(s.support_every_layers.max(1)),
+        PathKind::Bridge => s.bridge_flow_percent / 100.0,
+        PathKind::TopSolid => s.top_flow_percent / 100.0,
+        PathKind::Ironing => s.ironing_flow / 100.0,
+        _ => 1.0,
+    }
+}
+
+/// What happens at the end of a path that a retraction follows.
+#[derive(Debug, Clone, Copy, Default)]
+struct Finish {
+    coast: f64,
+    wipe: f64,
+}
+
+/// The first `length` mm of a polyline, as points after `points[0]`.
+fn along(points: &[Point2], length: f64) -> Vec<Point2> {
+    let mut out = Vec::new();
+    let mut left = length;
+    for w in points.windows(2) {
+        let [a, b] = w else { continue };
+        let d = a.distance(*b);
+        if d <= 0.0 {
+            continue;
+        }
+        if d >= left {
+            let t = left / d;
+            out.push(Point2::new(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t));
+            return out;
+        }
+        out.push(*b);
+        left -= d;
+    }
+    out
+}
+
+fn polyline_length(points: &[Point2]) -> f64 {
+    points
+        .windows(2)
+        .map(|w| match w {
+            [a, b] => a.distance(*b),
+            _ => 0.0,
+        })
+        .sum()
 }
 
 impl<'a> GcodeWriter<'a> {
@@ -98,7 +277,82 @@ impl<'a> GcodeWriter<'a> {
             feed: None,
             kind: None,
             stats: GcodeStats::default(),
+            since_retract: 0.0,
+            speed_factor: 1.0,
+            fan: 0,
+            layer_fan: 0,
+            spiral_from: None,
+            last_dir: None,
+            tool: 0,
+            tools: Vec::new(),
+            top_from: usize::MAX,
+            idle: Vec::new(),
+            printed_top: 0.0,
         }
+    }
+
+    /// Drop tools idle for longer than the profile allows to their standby
+    /// temperature.
+    fn cool_idle_tools(&mut self) {
+        let s = self.settings;
+        if s.standby_temperature <= 0.0 || self.idle.is_empty() {
+            return;
+        }
+        let now = self.stats.estimated_seconds;
+        for k in 0..self.idle.len() {
+            let Some(&(t, since, cooled)) = self.idle.get(k) else { continue };
+            if !cooled && now - since >= s.idle_after_seconds {
+                let _ = writeln!(self.out, "M104 T{t} S{:.0} ; idle tool", s.standby_temperature);
+                if let Some(e) = self.idle.get_mut(k) {
+                    e.2 = true;
+                }
+            }
+        }
+    }
+
+    /// Change to tool `new`: pull the filament back further than a normal
+    /// retraction, let the old tool cool to its idle temperature, switch,
+    /// run the tool change script and wait for the new tool to be hot.
+    fn tool_change(&mut self, new: u8) {
+        let s = self.settings;
+        let old = self.tool;
+        if new == old {
+            return;
+        }
+        let want = s.tool_change_retract;
+        if want > self.retracted && self.stats.filament_mm > 0.0 {
+            let d = want - self.retracted;
+            self.retracted = want;
+            let e = self.e_word(-d);
+            let f = self.feed_word(s.tool_change_speed);
+            let _ = writeln!(self.out, "G1 {e}{f} ; tool change retraction");
+            self.stats.retractions += 1;
+            self.stats.estimated_seconds += d / s.tool_change_speed.max(1.0);
+        }
+        // the old tool waits hot for a while; the delay decides when it cools
+        self.idle.retain(|(t, _, _)| *t != old);
+        self.idle.push((old, self.stats.estimated_seconds, false));
+        self.cool_idle_tools();
+        let _ = writeln!(self.out, "T{new} ; tool change");
+        if !s.tool_change_script.trim().is_empty() {
+            let text = s
+                .tool_change_script
+                .replace("{old}", &old.to_string())
+                .replace("{new}", &new.to_string());
+            self.script(&text, None);
+        }
+        // a tool that cooled down heats up again before it prints
+        let cooled = self.idle.iter().any(|(t, _, c)| *t == new && *c);
+        self.idle.retain(|(t, _, _)| *t != new);
+        if cooled {
+            let _ =
+                writeln!(self.out, "M109 T{new} S{:.0} ; wait for the tool", s.nozzle_temperature);
+        }
+        // the firmware moves to the new tool's offset: the next move is a travel
+        self.pos = None;
+        self.feed = None;
+        self.tool = new;
+        self.stats.tool_changes += 1;
     }
 
     fn line(&mut self, text: &str) {
@@ -144,7 +398,13 @@ impl<'a> GcodeWriter<'a> {
     fn start(&mut self) {
         let s = self.settings;
         let (nozzle, bed) = (s.first_layer_nozzle_temperature, s.first_layer_bed_temperature);
-        if s.start_script.trim().is_empty() {
+        let script = s.start_script.trim();
+        // heat first, unless the script sets temperatures itself; a script
+        // without heating would otherwise prime a cold nozzle
+        if s.chamber_temperature > 0.0 {
+            let _ = writeln!(self.out, "M141 S{:.0} ; chamber heating", s.chamber_temperature);
+        }
+        if script.is_empty() || !script_sets_temperatures(script) {
             if bed > 0.0 {
                 let _ = writeln!(self.out, "M140 S{bed:.0} ; bed heating");
             }
@@ -155,6 +415,8 @@ impl<'a> GcodeWriter<'a> {
                 }
                 let _ = writeln!(self.out, "M109 S{nozzle:.0} ; wait for nozzle");
             }
+        }
+        if script.is_empty() {
             self.line("G21 ; millimetres");
             self.line("G28 ; home all axes");
         } else {
@@ -164,54 +426,254 @@ impl<'a> GcodeWriter<'a> {
         }
         // the writer's own assumptions hold whatever the script did
         self.line("G90 ; absolute coordinates");
-        self.line("M82 ; absolute extrusion");
+        if s.relative_extrusion {
+            self.line("M83 ; relative extrusion");
+        } else {
+            self.line("M82 ; absolute extrusion");
+        }
         self.line("G92 E0");
         self.line("M107 ; fan off");
         self.e = 0.0;
         self.retracted = 0.0;
+        // several tools: the others heat to their idle temperature now, and
+        // the job starts on the lowest-numbered tool
+        if self.tools.len() > 1 {
+            let first = self.tools.first().copied().unwrap_or(0);
+            let idle = if s.standby_temperature > 0.0 {
+                s.standby_temperature
+            } else {
+                s.nozzle_temperature
+            };
+            for t in self.tools.clone() {
+                if t != first {
+                    let _ = writeln!(self.out, "M104 T{t} S{idle:.0} ; tool {t} heating");
+                    self.idle.push((t, 0.0, s.standby_temperature > 0.0));
+                }
+            }
+            let _ = writeln!(self.out, "T{first} ; first tool");
+            self.tool = first;
+        } else if let Some(&only) = self.tools.first().filter(|&&t| t != 0) {
+            let _ = writeln!(self.out, "T{only} ; tool");
+            self.tool = only;
+        }
+    }
+
+    /// What every X and Y written is shifted by: the user's offsets, and the
+    /// bed centre when the printer's origin is there.
+    fn xy_offset(&self) -> (f64, f64) {
+        let s = self.settings;
+        let (cx, cy) = if s.origin_center {
+            match s.bed_shape {
+                slicecraft_doc::BedShape::Circle => (s.bed_diameter / 2.0, s.bed_diameter / 2.0),
+                slicecraft_doc::BedShape::Rectangle => (s.bed_width / 2.0, s.bed_depth / 2.0),
+            }
+        } else {
+            (0.0, 0.0)
+        };
+        (s.gcode_offset_x - cx, s.gcode_offset_y - cy)
+    }
+
+    /// Time for a move of `d` mm at `v` mm/s towards `to`. With an
+    /// acceleration set, the move pays for slowing down at its start in
+    /// proportion to how sharply it turns from the last move (nothing on a
+    /// straight line, a full stop on a reversal), as firmware junction
+    /// handling does.
+    fn move_time(&mut self, d: f64, v: f64, to: Option<Point2>) -> f64 {
+        let a = self.settings.max_acceleration;
+        if v <= 0.0 {
+            return 0.0;
+        }
+        let dir = match (self.pos, to) {
+            (Some(p), Some(q)) if d > 1e-9 => Some(((q.x - p.x) / d, (q.y - p.y) / d)),
+            _ => None,
+        };
+        let turn = match (self.last_dir, dir) {
+            (Some(u), Some(w)) => (1.0 - (u.0 * w.0 + u.1 * w.1)) / 2.0,
+            _ => 1.0,
+        };
+        if dir.is_some() {
+            self.last_dir = dir;
+        }
+        if a <= 0.0 {
+            return d / v;
+        }
+        // a stop-and-go move: a trapezoid, or a triangle when too short
+        let full = if d >= v * v / a { d / v + v / a } else { 2.0 * (d / a).sqrt() };
+        d / v + turn.clamp(0.0, 1.0) * (full - d / v)
+    }
+
+    /// The E word for a move of `de` mm of filament, absolute or relative.
+    fn e_word(&mut self, de: f64) -> String {
+        self.e += de;
+        if self.settings.relative_extrusion {
+            format!("E{de:.5}")
+        } else {
+            format!("E{:.5}", self.e)
+        }
     }
 
     fn retract(&mut self) {
-        let r = self.settings.retraction();
+        let s = self.settings;
+        let r = s.retraction();
         // nothing extruded yet: there is no pressure to relieve
         if r <= 0.0 || self.retracted > 0.0 || self.stats.filament_mm <= 0.0 {
             return;
         }
-        self.e -= r;
+        if s.retract_min_extrusion > 0.0 && self.since_retract < s.retract_min_extrusion {
+            return;
+        }
         self.retracted = r;
-        let f = self.feed_word(self.settings.retract_speed);
-        let _ = writeln!(self.out, "G1 E{:.5}{f}", self.e);
+        self.since_retract = 0.0;
+        if s.firmware_retraction {
+            self.line("G10 ; retract");
+        } else {
+            let e = self.e_word(-r);
+            let f = self.feed_word(s.retract_speed);
+            let _ = writeln!(self.out, "G1 {e}{f}");
+        }
         self.stats.retractions += 1;
-        self.stats.estimated_seconds += r / self.settings.retract_speed;
+        self.stats.estimated_seconds += r / s.retract_speed;
+        if !s.retract_script.trim().is_empty() {
+            let text = s.retract_script.clone();
+            self.script(&text, None);
+        }
     }
 
     fn unretract(&mut self) {
         if self.retracted <= 0.0 {
             return;
         }
-        self.e += self.retracted;
-        let r = self.retracted;
+        let s = self.settings;
+        // the extra restart length makes up for ooze (or holds some back)
+        let r = (self.retracted + s.retract_extra_restart).max(0.0);
         self.retracted = 0.0;
-        let f = self.feed_word(self.settings.retract_speed);
-        let _ = writeln!(self.out, "G1 E{:.5}{f}", self.e);
-        self.stats.estimated_seconds += r / self.settings.retract_speed;
+        if s.firmware_retraction {
+            self.line("G11 ; unretract");
+        } else {
+            let e = self.e_word(r);
+            let f = self.feed_word(s.retract_speed);
+            let _ = writeln!(self.out, "G1 {e}{f}");
+        }
+        self.stats.estimated_seconds += r / s.retract_speed;
+    }
+
+    fn set_fan(&mut self, duty: u8) {
+        if duty == self.fan {
+            return;
+        }
+        if duty == 0 {
+            self.line("M107 ; fan off");
+        } else {
+            if self.fan == 0 && duty < 255 && self.settings.fan_kickstart {
+                self.line("M106 S255 ; kick-start the fan");
+                self.line("G4 P200");
+            }
+            if self.settings.flavor == slicecraft_doc::Flavor::RepRap {
+                // RepRapFirmware takes the fan as a fraction
+                let _ = writeln!(self.out, "M106 S{:.2}", f64::from(duty) / 255.0);
+            } else {
+                let _ = writeln!(self.out, "M106 S{duty}");
+            }
+        }
+        self.fan = duty;
+    }
+
+    /// The layer's printing time at full speed, s: extrusion plus travel.
+    fn layer_time(&self, layer: &LayerPaths) -> f64 {
+        let s = self.settings;
+        let mut t = 0.0;
+        let mut at: Option<Point2> = None;
+        for p in &layer.paths {
+            let speed = path_speed(s, p.kind, layer.index).max(1e-6);
+            let mut len = polyline_length(&p.points);
+            if p.closed
+                && let (Some(a), Some(b)) = (p.points.first(), p.points.last())
+            {
+                len += a.distance(*b);
+            }
+            t += len / speed;
+            if let (Some(a), Some(b)) = (at, p.start()) {
+                t += a.distance(b) / s.travel_speed.max(1e-6);
+            }
+            at = p.end();
+        }
+        t
+    }
+
+    /// True when this layer is printed as part of the spiral (vase mode):
+    /// above the bottom, and with a single wall to follow. A layer with
+    /// several outlines prints them as plain walls at the layer's height.
+    fn spiral(&self, layer: &LayerPaths) -> bool {
+        self.settings.vase_mode
+            && layer.index > self.settings.solid_layers_bottom as usize
+            && layer.paths.iter().filter(|p| p.kind == PathKind::OuterPerimeter).count() == 1
     }
 
     /// Move to `z` for a new layer: retract, lift, reset E.
     fn layer_change(&mut self, layer: &LayerPaths) {
-        let _ = writeln!(
-            self.out,
-            ";LAYER:{} Z:{:.3} HEIGHT:{:.3}",
-            layer.index, layer.z, layer.height
-        );
-        if self.settings.retract_on_layer_change {
+        if self.settings.verbose_comments {
+            let _ = writeln!(
+                self.out,
+                ";LAYER:{} Z:{:.3} HEIGHT:{:.3}",
+                layer.index, layer.z, layer.height
+            );
+        }
+        if self.settings.flavor == slicecraft_doc::Flavor::Klipper {
+            let _ = writeln!(self.out, "SET_PRINT_STATS_INFO CURRENT_LAYER={}", layer.index + 1);
+        }
+        let spiral = self.spiral(layer);
+        if self.settings.retract_on_layer_change && !spiral {
             self.retract();
         }
-        let z_speed = self.settings.z_speed.min(self.settings.travel_speed);
-        let f = self.feed_word(z_speed);
-        let _ = writeln!(self.out, "G0 Z{:.3}{f}", layer.z + self.settings.gcode_offset_z);
-        let dz = self.z.map_or(layer.z, |z| (layer.z - z).abs());
-        self.stats.estimated_seconds += dz / z_speed;
+        // a layer lower than the last one starts the next model (one model at a
+        // time): rise above everything printed, cross over, then come down
+        if let Some(z) = self.z
+            && layer.z < z - 1e-6
+        {
+            self.retract();
+            self.printed_top = self.printed_top.max(z);
+            let s = self.settings;
+            let safe = (self.printed_top + 5.0).min(s.bed_height.max(self.printed_top));
+            let f = self.feed_word(s.z_speed.min(s.travel_speed));
+            let _ = writeln!(
+                self.out,
+                "G0 Z{:.3}{f} ; clear the printed models",
+                safe + s.gcode_offset_z
+            );
+            self.stats.estimated_seconds += (safe - z).abs() / s.z_speed.max(1.0);
+            if let Some(p) = layer.paths.first().and_then(ToolPath::start) {
+                let (ox, oy) = self.xy_offset();
+                let f = self.feed_word(s.travel_speed);
+                let _ = writeln!(
+                    self.out,
+                    "G0 X{:.3} Y{:.3}{f} ; to the next model",
+                    p.x + ox,
+                    p.y + oy
+                );
+                if let Some(q) = self.pos {
+                    self.stats.travel_mm += q.distance(p);
+                    self.stats.estimated_seconds += q.distance(p) / s.travel_speed.max(1.0);
+                }
+                self.pos = Some(p);
+            }
+            // first-layer temperatures again for the new model's first layer
+            if layer.index == 0 && s.first_layer_nozzle_temperature != s.nozzle_temperature {
+                let _ = writeln!(
+                    self.out,
+                    "M104 S{:.0} ; first layer of the next model",
+                    s.first_layer_nozzle_temperature
+                );
+            }
+        }
+        // a spiral layer rises along its wall: no separate Z move
+        if !spiral {
+            let z_speed = self.settings.z_speed.min(self.settings.travel_speed);
+            let f = self.feed_word(z_speed);
+            let _ = writeln!(self.out, "G0 Z{:.3}{f}", layer.z + self.settings.gcode_offset_z);
+            let dz = self.z.map_or(layer.z, |z| (layer.z - z).abs());
+            self.stats.estimated_seconds += dz / z_speed;
+        }
+        self.spiral_from = if spiral { self.z } else { None };
         self.z = Some(layer.z);
         let s = self.settings;
         if layer.index == 1 {
@@ -239,22 +701,45 @@ impl<'a> GcodeWriter<'a> {
         // unretraction then moves to +retracted.
         self.line("G92 E0");
         self.e = 0.0;
+        // cooling: slow a quick layer down, boost the fan on a quick layer
+        let time = self.layer_time(layer);
+        self.speed_factor = if s.min_layer_time > 0.0 && time > 0.0 && time < s.min_layer_time {
+            time / s.min_layer_time
+        } else {
+            1.0
+        };
         let fan_layer = layer.index + 1;
-        let from = self.settings.fan_from_layer.max(1) as usize;
-        if fan_layer == from && self.settings.fan_percent > 0.0 {
-            let duty = (self.settings.fan_percent / 100.0 * 255.0).round();
-            let _ = writeln!(self.out, "M106 S{duty:.0} ; fan on");
+        let from = s.fan_from_layer.max(1) as usize;
+        let mut duty =
+            if fan_layer >= from { (s.fan_percent / 100.0 * 255.0).round() } else { 0.0 };
+        if fan_layer >= from && s.fan_boost_below_seconds > 0.0 && time < s.fan_boost_below_seconds
+        {
+            duty = 255.0;
         }
+        if s.fan_ramp_layers > 0 && fan_layer >= from && duty > 0.0 {
+            let step = (fan_layer - from + 1) as f64 / f64::from(s.fan_ramp_layers);
+            duty = (duty * step.min(1.0)).round();
+        }
+        self.layer_fan = duty.clamp(0.0, 255.0) as u8;
+        if let Some(t) = temperature_schedule(&s.temperature_schedule)
+            .into_iter()
+            .rev()
+            .find(|(l, _)| *l == fan_layer)
+            .map(|(_, t)| t)
+        {
+            let _ = writeln!(self.out, "M104 S{t:.0} ; scheduled temperature");
+        }
+        self.set_fan(self.layer_fan);
         self.kind = None;
     }
 
-    fn travel_to(&mut self, p: Point2) {
+    fn travel_to(&mut self, p: Point2, inside: bool) {
         let d = self.pos.map(|q| q.distance(p));
         if d.is_some_and(|d| d < 1e-6) {
             return;
         }
         let mut lifted = None;
-        if d.is_none_or(|d| d >= self.settings.retract_min_travel) {
+        if !inside && d.is_none_or(|d| d >= self.settings.retract_min_travel) {
             let was = self.retracted;
             self.retract();
             // Z hop only for a travel that retracted here, on a known layer
@@ -271,7 +756,7 @@ impl<'a> GcodeWriter<'a> {
             }
         }
         let f = self.feed_word(self.settings.travel_speed);
-        let (ox, oy) = (self.settings.gcode_offset_x, self.settings.gcode_offset_y);
+        let (ox, oy) = self.xy_offset();
         let _ = writeln!(self.out, "G0 X{:.3} Y{:.3}{f}", p.x + ox, p.y + oy);
         if let Some(z) = lifted {
             let f = self.feed_word(self.settings.z_speed);
@@ -279,14 +764,15 @@ impl<'a> GcodeWriter<'a> {
         }
         if let Some(d) = d {
             self.stats.travel_mm += d;
-            self.stats.estimated_seconds += d / self.settings.travel_speed;
+            let v = self.settings.travel_speed;
+            self.stats.estimated_seconds += self.move_time(d, v, Some(p));
         }
         self.pos = Some(p);
     }
 
     fn extrude_to(&mut self, p: Point2, speed: f64, e_per_mm: f64) {
         let Some(from) = self.pos else {
-            self.travel_to(p);
+            self.travel_to(p, false);
             return;
         };
         let d = from.distance(p);
@@ -295,38 +781,267 @@ impl<'a> GcodeWriter<'a> {
         }
         self.unretract();
         let de = d * e_per_mm;
-        self.e += de;
+        let e = self.e_word(de);
         let f = self.feed_word(speed);
-        let (ox, oy) = (self.settings.gcode_offset_x, self.settings.gcode_offset_y);
-        let _ = writeln!(self.out, "G1 X{:.3} Y{:.3} E{:.5}{f}", p.x + ox, p.y + oy, self.e);
+        let (ox, oy) = self.xy_offset();
+        let _ = writeln!(self.out, "G1 X{:.3} Y{:.3} {e}{f}", p.x + ox, p.y + oy);
         self.stats.extruded_mm += d;
         self.stats.filament_mm += de;
+        self.stats.estimated_seconds += self.move_time(d, speed, Some(p));
+        self.since_retract += d;
+        self.pos = Some(p);
+    }
+
+    /// Extrude along `pts`, as G2/G3 where at least four points lie on one
+    /// circle (within `ARC_TOLERANCE`), as G1 elsewhere.
+    fn extrude_arcs(&mut self, pts: &[Point2], speed: f64, e_per_mm: f64) {
+        let mut i = 0;
+        while i + 1 < pts.len() {
+            match fit_arc(pts, i) {
+                Some((end, centre, ccw)) => {
+                    let (Some(a), Some(b)) = (pts.get(i), pts.get(end)) else { break };
+                    let r = a.distance(centre);
+                    // length along the arc, from the swept angle
+                    let mut sweep = (b.y - centre.y).atan2(b.x - centre.x)
+                        - (a.y - centre.y).atan2(a.x - centre.x);
+                    if ccw && sweep <= 0.0 {
+                        sweep += std::f64::consts::TAU;
+                    }
+                    if !ccw && sweep >= 0.0 {
+                        sweep -= std::f64::consts::TAU;
+                    }
+                    let len = r * sweep.abs();
+                    self.unretract();
+                    let e = self.e_word(len * e_per_mm);
+                    let f = self.feed_word(speed);
+                    let (ox, oy) = self.xy_offset();
+                    let _ = writeln!(
+                        self.out,
+                        "{} X{:.3} Y{:.3} I{:.3} J{:.3} {e}{f}",
+                        if ccw { "G3" } else { "G2" },
+                        b.x + ox,
+                        b.y + oy,
+                        centre.x - a.x,
+                        centre.y - a.y
+                    );
+                    self.stats.extruded_mm += len;
+                    self.stats.filament_mm += len * e_per_mm;
+                    self.stats.estimated_seconds += self.move_time(len, speed, Some(*b));
+                    self.since_retract += len;
+                    self.pos = Some(*b);
+                    i = end;
+                }
+                None => {
+                    if let Some(b) = pts.get(i + 1) {
+                        self.extrude_to(*b, speed, e_per_mm);
+                    }
+                    i += 1;
+                }
+            }
+        }
+    }
+
+    /// A move at printing speed without extruding (coasting, wiping).
+    fn glide_to(&mut self, p: Point2, speed: f64) {
+        let Some(from) = self.pos else { return };
+        let d = from.distance(p);
+        if d < 1e-6 {
+            return;
+        }
+        let f = self.feed_word(speed);
+        let (ox, oy) = self.xy_offset();
+        let _ = writeln!(self.out, "G1 X{:.3} Y{:.3}{f}", p.x + ox, p.y + oy);
         self.stats.estimated_seconds += d / speed;
         self.pos = Some(p);
     }
 
     /// One path: travel to its start, then extrude along it.
     pub fn path(&mut self, path: &ToolPath, layer: &LayerPaths) {
+        self.path_after(path, layer, false);
+    }
+
+    /// Like `path`; `inside` says the travel to it stays inside the printed
+    /// area and needs no retraction.
+    pub fn path_after(&mut self, path: &ToolPath, layer: &LayerPaths, inside: bool) {
+        self.path_full(path, layer, inside, Finish::default());
+    }
+
+    fn path_full(&mut self, path: &ToolPath, layer: &LayerPaths, inside: bool, finish: Finish) {
         let Some(start) = path.start() else { return };
+        if path.tool != self.tool {
+            self.tool_change(path.tool);
+        }
+        self.cool_idle_tools();
         if self.kind != Some(path.kind) {
-            let _ = writeln!(self.out, ";TYPE:{}", path.kind.label());
+            if self.settings.verbose_comments {
+                let _ = writeln!(self.out, ";TYPE:{}", path.kind.label());
+            }
             self.kind = Some(path.kind);
         }
-        let speed = path_speed(self.settings, path.kind, layer.index);
-        let e_per_mm = filament_per_mm(self.settings.line_width(), layer.height, self.settings);
-        self.travel_to(start);
-        for p in path.points.iter().skip(1) {
-            self.extrude_to(*p, speed, e_per_mm);
+        let s = self.settings;
+        let width = layer_line_width(s, layer.index);
+        let e_per_mm = filament_per_mm(width, layer.height, s) * kind_flow(s, path.kind);
+        let mut full = path_speed(s, path.kind, layer.index);
+        if layer.index >= self.top_from && layer.index > 0 {
+            full *= s.top_layer_speed_percent / 100.0;
         }
-        if path.closed && path.points.len() > 2 {
-            self.extrude_to(start, speed, e_per_mm);
+        // short walls print slower so they can cool
+        if s.short_wall_length > 0.0
+            && matches!(path.kind, PathKind::OuterPerimeter | PathKind::InnerPerimeter)
+        {
+            let mut len = polyline_length(&path.points);
+            if path.closed
+                && let (Some(a), Some(b)) = (path.points.first(), path.points.last())
+            {
+                len += a.distance(*b);
+            }
+            if len < s.short_wall_length {
+                full *= (len / s.short_wall_length).max(0.5);
+            }
+        }
+        // never melt more than the hot end can
+        if s.max_volumetric_flow > 0.0 {
+            let section = width * layer.height * kind_flow(s, path.kind);
+            if section > 0.0 {
+                full = full.min(s.max_volumetric_flow / section);
+            }
+        }
+        let speed = (full * self.speed_factor).max(s.min_layer_speed.min(full));
+        // bridges and top surfaces may want their own fan, once the fan is on
+        let fan_for = |pct: f64| (pct / 100.0 * 255.0).round().clamp(0.0, 255.0) as u8;
+        let wanted = match path.kind {
+            PathKind::Bridge if self.layer_fan > 0 || layer.index > 0 => {
+                fan_for(s.bridge_fan_percent)
+            }
+            PathKind::TopSolid | PathKind::Ironing if self.layer_fan > 0 => {
+                fan_for(s.top_fan_percent)
+            }
+            _ => self.layer_fan,
+        };
+        self.set_fan(wanted);
+        self.travel_to(start, inside);
+        let mut pts: Vec<Point2> = path.points.clone();
+        if path.closed && pts.len() > 2 {
+            pts.push(start);
+        }
+        let total = polyline_length(&pts);
+        // vase mode: the outer wall rises from the last layer's height to this one's
+        if let (Some(z0), Some(z1), PathKind::OuterPerimeter) =
+            (self.spiral_from, self.z, path.kind)
+            && total > 0.0
+        {
+            let mut done = 0.0;
+            for w in pts.windows(2) {
+                let [a, b] = w else { continue };
+                done += a.distance(*b);
+                self.unretract();
+                let d = a.distance(*b);
+                let e = self.e_word(d * e_per_mm);
+                let f = self.feed_word(speed);
+                let z = z0 + (z1 - z0) * done / total;
+                let (ox, oy) = self.xy_offset();
+                let oz = s.gcode_offset_z;
+                let _ = writeln!(
+                    self.out,
+                    "G1 X{:.3} Y{:.3} Z{:.4} {e}{f}",
+                    b.x + ox,
+                    b.y + oy,
+                    z + oz
+                );
+                self.stats.extruded_mm += d;
+                self.stats.filament_mm += d * e_per_mm;
+                self.stats.estimated_seconds += d / speed;
+                self.pos = Some(*b);
+            }
+            return;
+        }
+        // arcs: only without coasting or wiping (they cut the path)
+        if s.arc_fitting && finish.coast <= 0.0 && finish.wipe <= 0.0 && pts.len() >= 4 {
+            self.extrude_arcs(&pts, speed, e_per_mm);
+            return;
+        }
+        // coast: the last stretch without extruding, if the path is long enough
+        let coast =
+            if finish.coast > 0.0 && total > 2.0 * finish.coast { finish.coast } else { 0.0 };
+        let mut done = 0.0;
+        for w in pts.windows(2) {
+            let [a, b] = w else { continue };
+            let d = a.distance(*b);
+            let stop = total - coast;
+            if done + d <= stop {
+                self.extrude_to(*b, speed, e_per_mm);
+            } else if done >= stop {
+                self.glide_to(*b, speed);
+            } else {
+                let t = (stop - done) / d;
+                let mid = Point2::new(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t);
+                self.extrude_to(mid, speed, e_per_mm);
+                self.glide_to(*b, speed);
+            }
+            done += d;
+        }
+        // wipe: along the loop again, or back along an open path
+        if finish.wipe > 0.0 {
+            let route: Vec<Point2> = if path.closed {
+                let mut r = pts.clone();
+                r.extend(pts.iter().skip(1).copied());
+                r
+            } else {
+                pts.iter().rev().copied().collect()
+            };
+            let skip = if path.closed { total } else { 0.0 };
+            let ahead = along(&route, skip + finish.wipe);
+            let mut walked = 0.0;
+            let mut at = route.first().copied().unwrap_or(start);
+            for q in ahead {
+                walked += at.distance(q);
+                at = q;
+                if walked > skip {
+                    self.glide_to(q, speed);
+                }
+            }
         }
     }
 
     pub fn layer(&mut self, layer: &LayerPaths) {
         self.layer_change(layer);
-        for p in &layer.paths {
-            self.path(p, layer);
+        let s = self.settings;
+        let n = layer.paths.len();
+        for (k, p) in layer.paths.iter().enumerate() {
+            let inside = layer.inside_travel.get(k).copied().unwrap_or(false);
+            // a combed travel follows its waypoints, inside the part
+            if inside && let Some(via) = layer.travel_via.get(k) {
+                for w in via {
+                    self.travel_to(*w, true);
+                }
+            }
+            // will the travel after this path retract? then coast and wipe
+            let retracts_next = if k + 1 == n {
+                s.retract_on_layer_change
+            } else {
+                let next_inside = layer.inside_travel.get(k + 1).copied().unwrap_or(false);
+                let gap = match (p.end(), layer.paths.get(k + 1).and_then(ToolPath::start)) {
+                    (Some(a), Some(b)) => a.distance(b),
+                    _ => 0.0,
+                };
+                !next_inside && gap >= s.retract_min_travel
+            };
+            let finish = if retracts_next && s.retraction() > 0.0 {
+                let wipes = match s.wipe_features {
+                    slicecraft_doc::WipeFeatures::OuterWalls => p.kind == PathKind::OuterPerimeter,
+                    slicecraft_doc::WipeFeatures::AllWalls => {
+                        matches!(p.kind, PathKind::OuterPerimeter | PathKind::InnerPerimeter)
+                    }
+                    slicecraft_doc::WipeFeatures::Everything => true,
+                };
+                Finish {
+                    coast: if s.coast_enabled { s.coast_distance } else { 0.0 },
+                    wipe: if s.wipe_enabled && wipes { s.wipe_distance } else { 0.0 },
+                }
+            } else {
+                Finish::default()
+            };
+            self.path_full(p, layer, inside, finish);
         }
         self.stats.layers += 1;
     }
@@ -342,6 +1057,9 @@ impl<'a> GcodeWriter<'a> {
         self.line("M107 ; fan off");
         self.line("M104 S0 ; nozzle off");
         self.line("M140 S0 ; bed off");
+        if self.settings.chamber_temperature > 0.0 {
+            self.line("M141 S0 ; chamber off");
+        }
         let lift = self.z.map_or(END_LIFT, |z| (z + END_LIFT).min(bed.height));
         let f = self.feed_word(self.settings.z_speed);
         let _ = writeln!(self.out, "G0 Z{lift:.3}{f} ; clear the part");
@@ -352,11 +1070,46 @@ impl<'a> GcodeWriter<'a> {
 
 /// Write a complete job: header, start sequence, every layer, end sequence.
 pub fn write_gcode(layers: &[LayerPaths], settings: &PrintSettings, bed: &Bed) -> GcodeOutput {
+    write_gcode_layers(layers, settings, &[], bed)
+}
+
+/// Like `write_gcode`, with each layer's own settings (setting zones):
+/// `per_layer[k]` applies to `layers[k]`; missing entries use `settings`.
+pub fn write_gcode_layers<'a>(
+    layers: &[LayerPaths],
+    settings: &'a PrintSettings,
+    per_layer: &[&'a PrintSettings],
+    bed: &Bed,
+) -> GcodeOutput {
     let mut w = GcodeWriter::new(settings);
+    let mut tools: Vec<u8> = layers.iter().flat_map(|l| l.paths.iter().map(|p| p.tool)).collect();
+    tools.sort_unstable();
+    tools.dedup();
+    w.tools = tools;
+    w.top_from = layers.len().saturating_sub(settings.solid_layers_top as usize);
     w.start();
-    for layer in layers {
+    let mut previous = settings;
+    for (k, layer) in layers.iter().enumerate() {
+        let here = per_layer.get(k).copied().unwrap_or(settings);
+        w.settings = here;
+        // a zone with other temperatures: change them as the layer starts
+        if layer.index >= 2 {
+            if here.nozzle_temperature != previous.nozzle_temperature {
+                let _ = writeln!(w.out, "M104 S{:.0} ; zone temperature", here.nozzle_temperature);
+            }
+            if here.bed_temperature != previous.bed_temperature {
+                let _ = writeln!(w.out, "M140 S{:.0} ; zone bed temperature", here.bed_temperature);
+            }
+        }
+        if k > 0 && here != previous && !here.profile_change_script.trim().is_empty() {
+            let text = here.profile_change_script.clone();
+            w.settings = here;
+            w.script(&text, Some(layer));
+        }
+        previous = here;
         w.layer(layer);
     }
+    w.settings = settings;
     w.end(bed);
     let mut stats = w.stats;
     let filament_area = std::f64::consts::PI * settings.filament_diameter.powi(2) / 4.0;
@@ -364,7 +1117,13 @@ pub fn write_gcode(layers: &[LayerPaths], settings: &PrintSettings, bed: &Bed) -
     stats.filament_cost = stats.filament_grams / 1000.0 * settings.filament_cost;
 
     let mut text = String::with_capacity(w.out.len() + 1024);
+    if settings.thumbnail_size > 0 {
+        text.push_str(&crate::thumbnail::gcode_block(layers, settings.thumbnail_size));
+    }
     let _ = writeln!(text, "; generated by SliceCraft {}", env!("CARGO_PKG_VERSION"));
+    if settings.flavor == slicecraft_doc::Flavor::Klipper {
+        let _ = writeln!(text, "SET_PRINT_STATS_INFO TOTAL_LAYER={}", stats.layers);
+    }
     let _ = writeln!(text, "; flavor: {}", flavor_label(settings.flavor));
     let _ = writeln!(text, "; layers: {}", stats.layers);
     let _ = writeln!(
@@ -419,11 +1178,23 @@ mod tests {
     use super::*;
 
     fn line(a: (f64, f64), b: (f64, f64), kind: PathKind) -> ToolPath {
-        ToolPath { kind, points: vec![Point2::new(a.0, a.1), Point2::new(b.0, b.1)], closed: false }
+        ToolPath {
+            kind,
+            points: vec![Point2::new(a.0, a.1), Point2::new(b.0, b.1)],
+            closed: false,
+            tool: 0,
+        }
     }
 
     fn one_layer(paths: Vec<ToolPath>) -> Vec<LayerPaths> {
-        vec![LayerPaths { index: 0, z: 0.3, height: 0.3, paths }]
+        vec![LayerPaths {
+            index: 0,
+            z: 0.3,
+            height: 0.3,
+            paths,
+            inside_travel: Vec::new(),
+            travel_via: Vec::new(),
+        }]
     }
 
     #[test]
@@ -458,8 +1229,22 @@ mod tests {
         s.extrusion_width = 0.9;
         let b = write_gcode(&layers, &s, &Bed::default()).stats.filament_mm;
         let expect_a = 100.0 * filament_per_mm(0.45, 0.3, &PrintSettings::default());
+        assert!(
+            (filament_per_mm(0.45, 0.3, &PrintSettings::default())
+                - 0.45 * 0.3 / (std::f64::consts::PI * 1.75f64.powi(2) / 4.0))
+                .abs()
+                < 1e-12,
+            "rectangle by default"
+        );
         assert!((a - expect_a).abs() < 1e-9);
-        assert!(b > a * 2.0, "wider line uses more than twice the filament");
+        // a rectangle bead scales exactly with width
+        assert!((b - a * 2.0).abs() < 1e-9, "twice the width, twice the filament");
+        // the rounded bead gives more than twice: its rounded sides do not grow
+        s.bead_shape = slicecraft_doc::BeadShape::Rounded;
+        let c = write_gcode(&layers, &s, &Bed::default()).stats.filament_mm;
+        s.extrusion_width = 0.45;
+        let d = write_gcode(&layers, &s, &Bed::default()).stats.filament_mm;
+        assert!(c > d * 2.0 && d < a, "rounded: {c} {d} vs {a}");
     }
 
     #[test]
@@ -469,6 +1254,7 @@ mod tests {
             kind: PathKind::OuterPerimeter,
             points: vec![Point2::new(0.0, 0.0), Point2::new(10.0, 0.0), Point2::new(10.0, 10.0)],
             closed: true,
+            tool: 0,
         };
         let out = write_gcode(&one_layer(vec![ring]), &s, &Bed::default());
         assert!((out.stats.extruded_mm - (20.0 + 200f64.sqrt())).abs() < 1e-9);
@@ -483,6 +1269,8 @@ mod tests {
             z: 0.5,
             height: 0.2,
             paths: vec![line((0.0, 0.0), (10.0, 0.0), PathKind::SparseInfill)],
+            inside_travel: Vec::new(),
+            travel_via: Vec::new(),
         });
         let out = write_gcode(&layers, &s, &Bed::default());
         let t = &out.text;
@@ -518,6 +1306,8 @@ mod tests {
             z: 0.5,
             height: 0.2,
             paths: vec![line((0.0, 0.0), (10.0, 0.0), PathKind::SparseInfill)],
+            inside_travel: Vec::new(),
+            travel_via: Vec::new(),
         });
         let text = write_gcode(&layers, &s, &Bed::default()).text;
         let after = text.split(";LAYER:1").nth(1).unwrap_or_default();
@@ -565,7 +1355,14 @@ mod tests {
     fn first_layer_temperatures_switch_on_layer_two() {
         let s = PrintSettings { first_layer_nozzle_temperature: 220.0, ..PrintSettings::default() };
         let mut layers = one_layer(vec![line((0.0, 0.0), (5.0, 0.0), PathKind::Skirt)]);
-        layers.push(LayerPaths { index: 1, z: 0.5, height: 0.2, paths: vec![] });
+        layers.push(LayerPaths {
+            index: 1,
+            z: 0.5,
+            height: 0.2,
+            paths: vec![],
+            inside_travel: Vec::new(),
+            travel_via: Vec::new(),
+        });
         let t = write_gcode(&layers, &s, &Bed::default()).text;
         assert!(t.contains("M109 S220"));
         let l1 = t.find(";LAYER:1").unwrap_or(usize::MAX);
@@ -607,5 +1404,311 @@ mod tests {
         assert_eq!(format_duration(3723.0), "1h 02m 03s");
         assert_eq!(format_duration(59.4), "0m 59s");
         assert_eq!(format_duration(f64::NAN), "unknown");
+    }
+
+    #[test]
+    fn heating_comes_before_a_start_script_without_temperatures() {
+        let mut s = PrintSettings {
+            start_script: "G28 ; home\nG1 Y80 E10 F600 ; prime".into(),
+            ..PrintSettings::default()
+        };
+        let mut w = GcodeWriter::new(&s);
+        w.start();
+        let text = w.out.clone();
+        let heat = text.find("M109").unwrap_or(usize::MAX);
+        let prime = text.find("G1 Y80 E10").unwrap_or(0);
+        assert!(heat < prime, "the nozzle is hot before the script primes:\n{text}");
+        assert!(!text.contains("G21 ; millimetres"), "the script does its own homing");
+
+        s.start_script = "M190 S{first_bed}\nM109 S{first_nozzle}\nG28".into();
+        let mut w = GcodeWriter::new(&s);
+        w.start();
+        assert_eq!(
+            w.out.matches("M109").count(),
+            1,
+            "a script that heats is not doubled:\n{}",
+            w.out
+        );
+        assert!(script_sets_temperatures("m104 s200"));
+        assert!(!script_sets_temperatures("G28 ; M104 later"));
+    }
+
+    #[test]
+    fn travel_marked_inside_does_not_retract() {
+        let s = PrintSettings { retract_min_travel: 1.0, ..PrintSettings::default() };
+        let paths = vec![
+            line((0.0, 0.0), (10.0, 0.0), PathKind::SparseInfill),
+            line((0.0, 20.0), (10.0, 20.0), PathKind::SparseInfill),
+        ];
+        let mut layers = one_layer(paths.clone());
+        let normal = write_gcode(&layers, &s, &Bed::default());
+        // one retraction for the travel, one in the end sequence
+        assert_eq!(normal.stats.retractions, 2);
+        if let Some(l) = layers.first_mut() {
+            l.inside_travel = vec![false, true];
+        }
+        let inside = write_gcode(&layers, &s, &Bed::default());
+        assert_eq!(
+            inside.stats.retractions, 1,
+            "only the end sequence:
+{}",
+            inside.text
+        );
+    }
+
+    fn two_far_lines() -> Vec<LayerPaths> {
+        one_layer(vec![
+            line((0.0, 0.0), (20.0, 0.0), PathKind::SparseInfill),
+            line((0.0, 30.0), (20.0, 30.0), PathKind::SparseInfill),
+        ])
+    }
+
+    #[test]
+    fn idle_tools_cool_only_after_the_delay() {
+        // ten layers, each printing with tool 0 then tool 1
+        let mut layers = Vec::new();
+        for k in 0..10 {
+            let mut a = line((0.0, 0.0), (100.0, 0.0), PathKind::OuterPerimeter);
+            let mut b = line((0.0, 10.0), (100.0, 10.0), PathKind::OuterPerimeter);
+            a.tool = 0;
+            b.tool = 1;
+            let mut l = one_layer(vec![a, b]);
+            if let Some(x) = l.first_mut() {
+                x.index = k;
+                x.z = 0.3 + 0.2 * k as f64;
+            }
+            layers.extend(l);
+        }
+        let quick = PrintSettings { idle_after_seconds: 1.0, ..PrintSettings::default() };
+        let patient = PrintSettings { idle_after_seconds: 3600.0, ..PrintSettings::default() };
+        let q = write_gcode(&layers, &quick, &Bed::default());
+        let p = write_gcode(&layers, &patient, &Bed::default());
+        assert_eq!(q.stats.tool_changes, 19);
+        assert!(
+            q.text.matches("; idle tool").count() >= 10,
+            "quick changes still cool after a second"
+        );
+        assert_eq!(
+            p.text.matches("; idle tool").count(),
+            0,
+            "a tool back within the hour stays hot"
+        );
+        // tool 1 started at standby, so it is heated once before its first use
+        assert_eq!(p.text.matches("M109 T1").count(), 1);
+    }
+
+    #[test]
+    fn schedules_ramps_chamber_and_scripts() {
+        assert_eq!(
+            temperature_schedule(
+                "2 205
+bad
+3, 210
+0 200
+4 999"
+            ),
+            vec![(2, 205.0), (3, 210.0)]
+        );
+        let s = PrintSettings {
+            temperature_schedule: "2 205".into(),
+            fan_ramp_layers: 2,
+            fan_from_layer: 1,
+            chamber_temperature: 45.0,
+            retract_script: "; pulled back".into(),
+            ..PrintSettings::default()
+        };
+        let mut layers = two_far_lines();
+        let mut second = layers.clone();
+        if let Some(l) = second.first_mut() {
+            l.index = 1;
+            l.z = 0.5;
+        }
+        layers.extend(second);
+        let out = write_gcode(&layers, &s, &Bed::default());
+        let t = &out.text;
+        assert!(t.contains("M141 S45") && t.contains("M141 S0"));
+        assert!(t.contains("M104 S205 ; scheduled temperature"));
+        assert!(t.contains("M106 S128") && t.contains("M106 S255"), "the fan ramps up");
+        assert!(t.contains("; pulled back"));
+    }
+
+    #[test]
+    fn coasting_and_wiping_end_paths_without_extruding() {
+        let s = PrintSettings {
+            coast_enabled: true,
+            coast_distance: 0.5,
+            wipe_enabled: true,
+            wipe_distance: 2.0,
+            wipe_features: slicecraft_doc::WipeFeatures::Everything,
+            ..PrintSettings::default()
+        };
+        let walls_only =
+            PrintSettings { wipe_features: slicecraft_doc::WipeFeatures::OuterWalls, ..s.clone() };
+        let no_wipe = write_gcode(&two_far_lines(), &walls_only, &Bed::default());
+        assert!(
+            !no_wipe.text.contains("G1 X18.000 Y0.000"),
+            "infill does not wipe when only walls do"
+        );
+        let plain = write_gcode(&two_far_lines(), &PrintSettings::default(), &Bed::default());
+        let out = write_gcode(&two_far_lines(), &s, &Bed::default());
+        // the first line coasts its last 0.5 mm, then wipes 2 mm back
+        assert!(out.text.contains("G1 X19.500 Y0.000 E"), "{}", out.text);
+        assert!(
+            out.text.contains(
+                "G1 X20.000 Y0.000
+"
+            ),
+            "coast without E"
+        );
+        assert!(out.text.contains("G1 X18.000 Y0.000"), "wipe back");
+        assert!(out.stats.filament_mm < plain.stats.filament_mm);
+    }
+
+    #[test]
+    fn relative_extrusion_firmware_retraction_and_extra_restart() {
+        let rel = PrintSettings { relative_extrusion: true, ..PrintSettings::default() };
+        let out = write_gcode(&two_far_lines(), &rel, &Bed::default());
+        assert!(out.text.contains("M83"));
+        let r = rel.retraction();
+        assert!(out.text.contains(&format!("G1 E{:.5}", -r)), "{}", out.text);
+        let fw = PrintSettings { firmware_retraction: true, ..PrintSettings::default() };
+        let out = write_gcode(&two_far_lines(), &fw, &Bed::default());
+        assert!(out.text.contains("G10") && out.text.contains("G11"));
+        // absolute: after a retraction of r and an extra restart of 0.3, E is 0.3 ahead
+        let extra = PrintSettings { retract_extra_restart: 0.3, ..PrintSettings::default() };
+        let a = write_gcode(&two_far_lines(), &extra, &Bed::default());
+        let b = write_gcode(&two_far_lines(), &PrintSettings::default(), &Bed::default());
+        let last_e = |t: &str| {
+            t.lines()
+                .rfind(|l| l.starts_with("G1 X") && l.contains(" E"))
+                .and_then(|l| l.split_whitespace().find(|w| w.starts_with('E')))
+                .and_then(|w| w.get(1..)?.parse::<f64>().ok())
+                .unwrap_or(0.0)
+        };
+        assert!((last_e(&a.text) - last_e(&b.text) - 0.3).abs() < 1e-4);
+    }
+
+    #[test]
+    fn quick_layers_slow_down_and_boost_the_fan() {
+        let s = PrintSettings {
+            min_layer_time: 60.0,
+            min_layer_speed: 5.0,
+            fan_boost_below_seconds: 30.0,
+            fan_from_layer: 1,
+            fan_percent: 50.0,
+            fan_kickstart: true,
+            ..PrintSettings::default()
+        };
+        let fast = write_gcode(&two_far_lines(), &PrintSettings::default(), &Bed::default());
+        let slow = write_gcode(&two_far_lines(), &s, &Bed::default());
+        assert!(slow.stats.estimated_seconds > fast.stats.estimated_seconds * 2.0);
+        assert!(slow.text.contains("M106 S255"), "boosted");
+        // a slow layer gets the profile fan, kick-started
+        let calm = PrintSettings { fan_boost_below_seconds: 0.0, ..s.clone() };
+        let out = write_gcode(&two_far_lines(), &calm, &Bed::default());
+        assert!(out.text.contains("M106 S255 ; kick-start") && out.text.contains("M106 S128"));
+    }
+
+    #[test]
+    fn short_extrusions_do_not_retract_when_asked() {
+        let s = PrintSettings { retract_min_extrusion: 50.0, ..PrintSettings::default() };
+        let out = write_gcode(&two_far_lines(), &s, &Bed::default());
+        // 20 mm extruded before the travel: below 50, so only the end retracts... or not at all
+        assert!(out.stats.retractions <= 1, "{}", out.stats.retractions);
+    }
+
+    #[test]
+    fn short_walls_and_the_flow_cap_slow_down() {
+        let wall = |len: f64| {
+            one_layer(vec![ToolPath {
+                kind: PathKind::OuterPerimeter,
+                points: vec![
+                    Point2::new(0.0, 0.0),
+                    Point2::new(len, 0.0),
+                    Point2::new(len, len),
+                    Point2::new(0.0, len),
+                ],
+                closed: true,
+                tool: 0,
+            }])
+        };
+        let base = PrintSettings::default();
+        let t =
+            |s: &PrintSettings| write_gcode(&wall(5.0), s, &Bed::default()).stats.estimated_seconds;
+        let short = PrintSettings { short_wall_length: 100.0, ..base.clone() };
+        assert!(t(&short) > t(&base) * 1.5);
+        let capped = PrintSettings { max_volumetric_flow: 1.0, ..base.clone() };
+        assert!(t(&capped) > t(&base) * 1.5);
+    }
+
+    fn circle_path(r: f64, n: usize) -> Vec<LayerPaths> {
+        let points = (0..n)
+            .map(|k| {
+                let a = k as f64 / n as f64 * std::f64::consts::TAU;
+                Point2::new(100.0 + r * a.cos(), 100.0 + r * a.sin())
+            })
+            .collect();
+        one_layer(vec![ToolPath { kind: PathKind::OuterPerimeter, points, closed: true, tool: 0 }])
+    }
+
+    #[test]
+    fn arcs_replace_segments_on_a_circle_with_about_the_same_filament() {
+        let base = PrintSettings::default();
+        let arcs = PrintSettings { arc_fitting: true, ..base.clone() };
+        let a = write_gcode(&circle_path(10.0, 120), &base, &Bed::default());
+        let b = write_gcode(&circle_path(10.0, 120), &arcs, &Bed::default());
+        assert!(b.text.contains("G3 ") || b.text.contains("G2 "), "{}", b.text);
+        assert!(b.text.lines().count() < a.text.lines().count() - 50);
+        assert!((a.stats.filament_mm - b.stats.filament_mm).abs() / a.stats.filament_mm < 0.01);
+        // a square is not an arc
+        let sq = write_gcode(
+            &one_layer(vec![ToolPath {
+                kind: PathKind::OuterPerimeter,
+                points: vec![
+                    Point2::new(0.0, 0.0),
+                    Point2::new(10.0, 0.0),
+                    Point2::new(10.0, 10.0),
+                    Point2::new(0.0, 10.0),
+                ],
+                closed: true,
+                tool: 0,
+            }]),
+            &arcs,
+            &Bed::default(),
+        );
+        assert!(!sq.text.contains("G2 ") && !sq.text.contains("G3 "));
+    }
+
+    #[test]
+    fn origin_flavour_comments_thumbnail_and_acceleration() {
+        let centred = PrintSettings { origin_center: true, ..PrintSettings::default() };
+        let out = write_gcode(&circle_path(10.0, 12), &centred, &Bed::default());
+        // the circle around (100, 100) on a 220 bed lands around (-10, -10)
+        assert!(
+            out.text.lines().any(|l| l.starts_with("G1 X-") || l.starts_with("G0 X-")),
+            "{}",
+            out.text
+        );
+        let quiet = PrintSettings { verbose_comments: false, ..PrintSettings::default() };
+        assert!(
+            !write_gcode(&circle_path(10.0, 12), &quiet, &Bed::default()).text.contains(";TYPE:")
+        );
+        let klipper =
+            PrintSettings { flavor: slicecraft_doc::Flavor::Klipper, ..PrintSettings::default() };
+        assert!(
+            write_gcode(&circle_path(10.0, 12), &klipper, &Bed::default())
+                .text
+                .contains("SET_PRINT_STATS_INFO CURRENT_LAYER=1")
+        );
+        let thumb = PrintSettings { thumbnail_size: 64, ..PrintSettings::default() };
+        assert!(
+            write_gcode(&circle_path(10.0, 12), &thumb, &Bed::default())
+                .text
+                .starts_with("; thumbnail begin 64x64")
+        );
+        let slow = PrintSettings { max_acceleration: 500.0, ..PrintSettings::default() };
+        let fast = write_gcode(&circle_path(10.0, 120), &PrintSettings::default(), &Bed::default());
+        let real = write_gcode(&circle_path(10.0, 120), &slow, &Bed::default());
+        assert!(real.stats.estimated_seconds > fast.stats.estimated_seconds);
     }
 }

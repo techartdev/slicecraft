@@ -11,6 +11,9 @@ repository.workspace = true
 slicecraft-doc.workspace = true
 slicecraft-geom.workspace = true
 slicecraft-render.workspace = true
+roxmltree = "0.21"
+miniz_oxide = "0.8"
+serial2 = "0.2"
 
 [lints]
 workspace = true

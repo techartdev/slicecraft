@@ -34,7 +34,7 @@ fn main() -> std::process::ExitCode {
         _ => {
             let files: Vec<PathBuf> =
                 args.iter().filter(|a| !a.starts_with("--")).map(PathBuf::from).collect();
-            match slicecraft_ui_egui::run(Session::new(), files) {
+            match slicecraft_ui_egui::run_with_fallback(Session::new, files) {
                 Ok(()) => std::process::ExitCode::SUCCESS,
                 Err(e) => {
                     eprintln!("slicecraft: cannot open the window: {e}");

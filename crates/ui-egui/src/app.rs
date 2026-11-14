@@ -35,6 +35,10 @@ pub enum Tool {
     Move,
     Rotate,
     Scale,
+    /// Drag a box on the bed where support is added.
+    SupportAdd,
+    /// Drag a box on the bed where support is blocked.
+    SupportBlock,
 }
 
 impl Tool {
@@ -46,6 +50,8 @@ impl Tool {
             Tool::Move => "Move on the bed (W)",
             Tool::Rotate => "Rotate about Z (E)",
             Tool::Scale => "Scale (R)",
+            Tool::SupportAdd => "Add support: drag a box on the bed",
+            Tool::SupportBlock => "Block support: drag a box on the bed",
         }
     }
 }
@@ -58,7 +64,8 @@ pub struct Progress {
     pub total: AtomicUsize,
 }
 
-pub const STAGES: [Stage; 4] = [Stage::Sections, Stage::Shells, Stage::Infill, Stage::Gcode];
+pub const STAGES: [Stage; 5] =
+    [Stage::Sections, Stage::Support, Stage::Shells, Stage::Infill, Stage::Gcode];
 
 struct Observer {
     progress: Arc<Progress>,
@@ -77,6 +84,20 @@ impl SliceObserver for Observer {
 
     fn cancelled(&self) -> bool {
         self.cancel.load(Ordering::Relaxed)
+    }
+}
+
+/// A support preview running on a worker thread.
+pub struct SupportPreviewJob {
+    pub revision: u64,
+    rx: mpsc::Receiver<Result<Vec<slicecraft_engine::SupportPreviewLayer>, EngineError>>,
+    cancel: Arc<AtomicBool>,
+}
+
+struct CancelOnly(Arc<AtomicBool>);
+impl SliceObserver for CancelOnly {
+    fn cancelled(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
     }
 }
 
@@ -149,6 +170,44 @@ impl Pending {
     }
 }
 
+/// What the machine-control window shows.
+#[derive(Debug, Clone)]
+pub struct MachineState {
+    pub ports: Vec<String>,
+    pub port: String,
+    pub baud: u32,
+    /// (current, target), °C.
+    pub nozzle: (f64, f64),
+    pub bed: (f64, f64),
+    pub set_nozzle: f64,
+    pub set_bed: f64,
+    pub step: f64,
+    pub log: std::collections::VecDeque<String>,
+    pub input: String,
+    pub progress: Option<(usize, usize)>,
+    /// Ports were listed once already.
+    pub scanned: bool,
+}
+
+impl Default for MachineState {
+    fn default() -> Self {
+        Self {
+            ports: Vec::new(),
+            port: String::new(),
+            baud: 115_200,
+            nozzle: (0.0, 0.0),
+            bed: (0.0, 0.0),
+            set_nozzle: 200.0,
+            set_bed: 60.0,
+            step: 10.0,
+            log: Default::default(),
+            input: String::new(),
+            progress: None,
+            scanned: false,
+        }
+    }
+}
+
 /// Window preferences, remembered between sessions (see `config`).
 #[derive(Debug, Clone)]
 pub struct Preferences {
@@ -158,6 +217,25 @@ pub struct Preferences {
     pub orbit_sensitivity: f32,
     pub preview_after_slice: bool,
     pub fit_on_import: bool,
+    /// The network print host and camera, remembered between sessions.
+    pub network: slicecraft_io::network::NetworkPrinter,
+    pub camera_url: String,
+    /// Keyboard shortcuts the user changed.
+    pub keys: crate::keys::Shortcuts,
+    /// Parallel projection instead of perspective.
+    pub ortho: bool,
+    /// Models drawn as triangle edges.
+    pub wireframe: bool,
+    /// Draw the 3D view on the graphics card (off: on the processor).
+    pub gpu_view: bool,
+    /// Scale a model under 10 mm across by 25.4 on import (it is likely in inches).
+    pub inch_check: bool,
+    /// Turn every imported model by these angles (degrees, X Y Z) ...
+    pub import_rotate: [f64; 3],
+    /// ... and scale it by this factor.
+    pub import_scale: f64,
+    /// The window's language.
+    pub language: crate::i18n::Language,
 }
 
 impl Default for Preferences {
@@ -169,6 +247,16 @@ impl Default for Preferences {
             orbit_sensitivity: 1.0,
             preview_after_slice: true,
             fit_on_import: false,
+            network: slicecraft_io::network::NetworkPrinter::default(),
+            camera_url: String::new(),
+            keys: crate::keys::Shortcuts::default(),
+            ortho: false,
+            wireframe: false,
+            gpu_view: true,
+            inch_check: false,
+            import_rotate: [0.0; 3],
+            import_scale: 1.0,
+            language: crate::i18n::Language::English,
         }
     }
 }
@@ -186,6 +274,14 @@ pub struct SliceCraftApp {
     pending_export: Option<PathBuf>,
     pub(crate) geometry: Option<(u64, ModelGeometry)>,
     pub(crate) preview_cache: Option<(usize, Vec<PreviewLayer>)>,
+    /// The 3D view on the graphics card, when the window has one.
+    pub(crate) gpu: Option<crate::gpu::Gpu>,
+    /// Why the graphics card is not drawing the 3D view, when it is not.
+    pub(crate) gpu_note: Option<String>,
+    /// The preview summary's measurements of the current slice.
+    pub(crate) summary_cache: Option<crate::panels::Measured>,
+    /// Which feature kinds the previewed job contains, in `PathKind::ALL` order.
+    pub(crate) kinds_present: Vec<bool>,
     pub(crate) preview: PreviewState,
     pub(crate) prefs: Preferences,
     pub(crate) dialogs: Dialogs,
@@ -196,6 +292,15 @@ pub struct SliceCraftApp {
     applied_dark: Option<bool>,
     /// Recent project files, newest first.
     pub(crate) recent: Vec<PathBuf>,
+    /// Show the support a slice would print while preparing.
+    pub(crate) show_support: bool,
+    pub(crate) machine: MachineState,
+    pub(crate) net: crate::network::NetState,
+    pub(crate) wizard: Option<crate::wizard::Wizard>,
+    pub(crate) support_job: Option<SupportPreviewJob>,
+    /// The latest support preview: the revision it was made for and its prisms.
+    pub(crate) support_view: Option<(u64, Vec<scene::Prism>)>,
+    pub(crate) support_note: Option<String>,
     /// Where preferences are remembered; `None` keeps them for this session only.
     config_dir: Option<PathBuf>,
     /// An action waiting for "save your changes?".
@@ -228,6 +333,10 @@ impl SliceCraftApp {
             pending_export: None,
             geometry: None,
             preview_cache: None,
+            gpu: None,
+            gpu_note: None,
+            summary_cache: None,
+            kinds_present: Vec::new(),
             preview: PreviewState::default(),
             prefs: Preferences::default(),
             dialogs: Dialogs::default(),
@@ -236,6 +345,13 @@ impl SliceCraftApp {
             drag: None,
             applied_dark: None,
             recent: Vec::new(),
+            show_support: false,
+            machine: MachineState::default(),
+            net: crate::network::NetState::default(),
+            wizard: None,
+            support_job: None,
+            support_view: None,
+            support_note: None,
             config_dir: None,
             confirm: None,
             allow_close: false,
@@ -265,6 +381,7 @@ impl SliceCraftApp {
             app.camera = OrbitCamera::for_bed(bed.width, bed.depth, bed.height);
         }
         app.config_dir = dir;
+        crate::i18n::set_language(app.prefs.language);
         app
     }
 
@@ -287,7 +404,7 @@ impl SliceCraftApp {
         for path in paths {
             match extension(&path).as_deref() {
                 Some("scproj") => self.request(Pending::OpenProject(Some(path))),
-                Some("scprofile") => {
+                Some("scprofile" | "fff") => {
                     self.run(Command::LoadProfile(path));
                 }
                 _ => models.push(path),
@@ -405,6 +522,124 @@ impl SliceCraftApp {
         }
     }
 
+    /// Keep the support preview in step with the document, one job at a time.
+    fn refresh_support_preview(&mut self, ctx: &egui::Context) {
+        if let Some(job) = &self.support_job {
+            match job.rx.try_recv() {
+                Ok(result) => {
+                    let revision = job.revision;
+                    self.support_job = None;
+                    match result {
+                        Ok(layers) => {
+                            let prisms = scene::support_prisms(&layers);
+                            self.support_note = Some(if layers.is_empty() {
+                                "No support needed.".into()
+                            } else {
+                                let volume: f64 =
+                                    layers.iter().map(|l| l.area.area() * l.slot.height).sum();
+                                format!(
+                                    "Support on {} layers, about {:.1} cm³.",
+                                    layers.len(),
+                                    volume / 1000.0
+                                )
+                            });
+                            self.support_view = Some((revision, prisms));
+                        }
+                        Err(EngineError::Cancelled) => {}
+                        Err(e) => {
+                            self.support_view = None;
+                            self.support_note = Some(format!("Support preview: {e}"));
+                        }
+                    }
+                }
+                Err(mpsc::TryRecvError::Empty) => return,
+                Err(mpsc::TryRecvError::Disconnected) => self.support_job = None,
+            }
+        }
+        let rev = self.session.revision();
+        let stale = self.support_view.as_ref().is_none_or(|(r, _)| *r != rev);
+        if !self.show_support || self.mode != Mode::Prepare || !stale || self.job.is_some() {
+            return;
+        }
+        if self.session.document().sliceable().is_err() {
+            self.support_view = None;
+            return;
+        }
+        let job = self.session.support_job();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = mpsc::channel();
+        let mut observer = CancelOnly(Arc::clone(&cancel));
+        let wake = ctx.clone();
+        let spawned = std::thread::Builder::new().name("support-preview".into()).spawn(move || {
+            let _ = tx.send(job.run(&mut observer));
+            wake.request_repaint();
+        });
+        if spawned.is_ok() {
+            self.support_job = Some(SupportPreviewJob { revision: rev, rx, cancel });
+        }
+    }
+
+    /// Take in what the printer said.
+    fn poll_printer(&mut self, ctx: &egui::Context) {
+        use slicecraft_io::printer::HostEvent;
+        // printers in the background report through their status
+        let background = self.session.printers().len() > 1;
+        if self.session.printer_port().is_none() {
+            if background {
+                ctx.request_repaint_after(std::time::Duration::from_millis(500));
+            }
+            return;
+        }
+        for e in self.session.printer_events() {
+            let m = &mut self.machine;
+            match e {
+                HostEvent::Line(l) => m.log.push_back(l),
+                HostEvent::Temperatures { nozzle, nozzle_target, bed, bed_target } => {
+                    m.nozzle = (nozzle, nozzle_target);
+                    m.bed = (bed, bed_target);
+                }
+                HostEvent::Progress { done, total } => m.progress = Some((done, total)),
+                HostEvent::PrintFinished => {
+                    m.progress = None;
+                    m.log.push_back("— print finished —".into());
+                }
+                HostEvent::Error(err) => m.log.push_back(format!("! {err}")),
+                HostEvent::Disconnected => m.log.push_back("— disconnected —".into()),
+            }
+            while m.log.len() > 500 {
+                m.log.pop_front();
+            }
+        }
+        ctx.request_repaint_after(std::time::Duration::from_millis(200));
+    }
+
+    /// Show or hide the support preview.
+    /// Turn the section view on (cutting halfway up the models) or off.
+    pub(crate) fn set_section(&mut self, on: bool) {
+        self.section = if on {
+            let b = self.session.document().bounds();
+            let mid = if b.is_empty() { 10.0 } else { (b.min().z + b.max().z) / 2.0 };
+            self.info(format!(
+                "{} {mid:.1} mm",
+                crate::i18n::tr("Section view: models are cut at Z")
+            ));
+            Some(mid)
+        } else {
+            None
+        };
+    }
+
+    pub(crate) fn set_show_support(&mut self, on: bool) {
+        self.show_support = on;
+        if !on {
+            if let Some(job) = &self.support_job {
+                job.cancel.store(true, Ordering::Relaxed);
+            }
+            self.support_view = None;
+            self.support_note = None;
+        }
+    }
+
     fn update_title(&mut self, ctx: &egui::Context) {
         let dirty = if self.session.is_modified() { " *" } else { "" };
         let title = format!("{}{dirty} - SliceCraft", self.project_name());
@@ -460,6 +695,10 @@ impl SliceCraftApp {
         match self.session.execute(command) {
             Ok(o) => {
                 match &o {
+                    Outcome::Network { message } => self.info(message.clone()),
+                    Outcome::ProfileCompared { diffs, .. } => {
+                        self.info(format!("{} setting(s) differ.", diffs.len()));
+                    }
                     Outcome::Imported { index, triangles, skipped_facets, format } => {
                         self.selected = BTreeSet::from([*index]);
                         self.mode = Mode::Prepare;
@@ -484,11 +723,61 @@ impl SliceCraftApp {
                         };
                         self.info(format!("Loaded profile \"{name}\".{w}"));
                     }
+                    Outcome::ProfileImported { name, report } => {
+                        self.info(format!(
+                            "Imported \"{name}\": {} settings applied, {} kept as planned, {} not used.",
+                            report.applied.len(),
+                            report.placeholders.len(),
+                            report.ignored.len()
+                        ));
+                        self.dialogs.import_report = Some((name.clone(), report.clone()));
+                    }
+                    Outcome::Intersections { pairs, .. } => self.info(match pairs {
+                        Some(0) => "No self-intersections.".to_string(),
+                        Some(n) => format!("{n} pairs of triangles cross each other."),
+                        None => {
+                            "The model is too large to check for self-intersections.".to_string()
+                        }
+                    }),
+                    Outcome::Repaired { report, .. } => {
+                        self.info(format!(
+                            "Repaired: {} degenerate faces removed, {} flipped, {} holes filled ({} faces added){}.",
+                            report.degenerate_removed,
+                            report.flipped,
+                            report.holes_filled,
+                            report.triangles_added,
+                            if report.turned_inside_out { ", turned right side out" } else { "" }
+                        ));
+                    }
                     Outcome::Saved { path } => self.info(format!("Saved {}.", path.display())),
+                    Outcome::PrinterConnected { port } => {
+                        self.info(format!("Connected to {port}."))
+                    }
+                    Outcome::PrintStarted { lines } => {
+                        self.info(format!("Printing: {lines} lines sent to the printer in turn."))
+                    }
+                    Outcome::GcodeOpened { path, layers } => {
+                        self.mode = Mode::Preview;
+                        self.preview.first_layer = 0;
+                        self.preview.last_layer = layers.saturating_sub(1);
+                        self.info(format!(
+                            "Opened {} for preview: {layers} layers.",
+                            path.display()
+                        ));
+                    }
+                    Outcome::SupportPreviewed { layers, volume } => {
+                        self.info(format!(
+                            "Support on {layers} layers, about {:.1} cm³.",
+                            volume / 1000.0
+                        ));
+                    }
                     Outcome::Sliced { .. }
                     | Outcome::ProjectOpened { .. }
                     | Outcome::Changed
                     | Outcome::Unchanged => {}
+                }
+                if let Outcome::Imported { index, .. } = &o {
+                    self.after_import(*index);
                 }
                 Some(o)
             }
@@ -512,7 +801,7 @@ impl SliceCraftApp {
     pub(crate) fn open_import_dialog(&mut self) {
         if let Some(paths) = rfd::FileDialog::new()
             .set_title("Import models")
-            .add_filter("3D models", &["stl", "obj"])
+            .add_filter("3D models", &["stl", "obj", "3mf"])
             .add_filter("All files", &["*"])
             .pick_files()
         {
@@ -520,14 +809,51 @@ impl SliceCraftApp {
         }
     }
 
+    pub(crate) fn open_gcode_dialog(&mut self) {
+        if let Some(path) = rfd::FileDialog::new()
+            .set_title("Open G-code for preview")
+            .add_filter("G-code", &["gcode", "gco", "g"])
+            .pick_file()
+        {
+            self.run(Command::OpenGcode(path));
+        }
+    }
+
+    pub(crate) fn export_models_dialog(&mut self) {
+        if let Some(path) = rfd::FileDialog::new()
+            .set_title("Export models")
+            .add_filter("STL", &["stl"])
+            .add_filter("3MF", &["3mf"])
+            .add_filter("OBJ", &["obj"])
+            .set_file_name("models.stl")
+            .save_file()
+        {
+            self.run(Command::ExportModels(path));
+        }
+    }
+
     pub(crate) fn load_profile_dialog(&mut self) {
         if let Some(path) = rfd::FileDialog::new()
             .set_title("Load profile")
+            .add_filter("Profiles (SliceCraft, Simplify3D)", &["scprofile", "fff", "txt"])
             .add_filter("SliceCraft profile", &["scprofile", "txt"])
+            .add_filter("Simplify3D profile", &["fff"])
             .pick_file()
             && self.run(Command::LoadProfile(path)).is_some()
         {
             self.dialogs.settings = None;
+        }
+    }
+
+    pub(crate) fn compare_profile_dialog(&mut self) {
+        if let Some(path) = rfd::FileDialog::new()
+            .set_title("Compare with a profile")
+            .add_filter("Profiles (SliceCraft, Simplify3D)", &["scprofile", "fff", "txt"])
+            .pick_file()
+            && let Some(Outcome::ProfileCompared { name, diffs }) =
+                self.run(Command::CompareProfile(path))
+        {
+            self.dialogs.compare = Some((name, diffs));
         }
     }
 
@@ -656,12 +982,20 @@ impl SliceCraftApp {
             self.error("Nothing to export: import a model first.");
             return;
         }
-        let Some(path) = rfd::FileDialog::new()
-            .set_title("Export G-code")
-            .add_filter("G-code", &["gcode", "gco", "g"])
-            .set_file_name("slicecraft.gcode")
-            .save_file()
-        else {
+        let binary =
+            self.session.document().settings.output_format == slicecraft_doc::OutputFormat::Binary;
+        let name = format!(
+            "{}.{}",
+            self.session.job_name(),
+            self.session.document().settings.output_format.extension()
+        );
+        let dialog = rfd::FileDialog::new().set_title("Export G-code").set_file_name(name);
+        let dialog = if binary {
+            dialog.add_filter("Binary G-code", &["bgcode"])
+        } else {
+            dialog.add_filter("G-code", &["gcode", "gco", "g"])
+        };
+        let Some(path) = dialog.save_file() else {
             return;
         };
         if self.session.slice_result().is_some() {
@@ -683,6 +1017,52 @@ impl SliceCraftApp {
         self.run(Command::Place { index, transform });
     }
 
+    /// A model and the models grouped with it.
+    pub(crate) fn with_group(&self, index: usize) -> BTreeSet<usize> {
+        let objects = &self.session.document().objects;
+        match objects.get(index).and_then(|o| o.group) {
+            Some(g) => objects
+                .iter()
+                .enumerate()
+                .filter(|(_, o)| o.group == Some(g))
+                .map(|(i, _)| i)
+                .collect(),
+            None => BTreeSet::from([index]),
+        }
+    }
+
+    /// Select a model (and its group); with `add`, toggle it into the selection.
+    pub(crate) fn click_select(&mut self, index: usize, add: bool) {
+        let members = self.with_group(index);
+        if !add {
+            self.selected = members;
+        } else if self.selected.contains(&index) {
+            self.selected.retain(|i| !members.contains(i));
+        } else {
+            self.selected.extend(members);
+        }
+    }
+
+    /// Move a model to `translate`, carrying its group along: one undo step.
+    pub(crate) fn move_with_group(&mut self, index: usize, translate: slicecraft_geom::Vec3) {
+        let objects = &self.session.document().objects;
+        let Some(from) = objects.get(index).map(|o| o.transform.translate) else { return };
+        let d = translate - from;
+        let moves: Vec<(usize, Transform)> = self
+            .with_group(index)
+            .into_iter()
+            .filter_map(|i| {
+                objects.get(i).map(|o| {
+                    let mut t = o.transform;
+                    t.translate =
+                        slicecraft_geom::Vec3::new(t.translate.x + d.x, t.translate.y + d.y, 0.0);
+                    (i, t)
+                })
+            })
+            .collect();
+        self.run(Command::PlaceMany(moves));
+    }
+
     pub(crate) fn remove_selected(&mut self) {
         // remove from the back so indices stay valid
         let indices: Vec<usize> = self.selected.iter().rev().copied().collect();
@@ -696,6 +1076,14 @@ impl SliceCraftApp {
         let indices: Vec<usize> = self.selected.iter().copied().collect();
         for i in indices {
             self.run(Command::Duplicate { index: i });
+        }
+    }
+
+    /// Run a per-model command on every selected model.
+    pub(crate) fn for_selected(&mut self, command: impl Fn(usize) -> Command) {
+        let indices: Vec<usize> = self.selected.iter().copied().collect();
+        for i in indices {
+            self.run(command(i));
         }
     }
 
@@ -723,6 +1111,39 @@ impl SliceCraftApp {
     }
 
     /// Multiply the scale of every selected model by `factor` (unit fixes).
+    /// The preferences' automatic actions on a newly imported model.
+    fn after_import(&mut self, index: usize) {
+        let p = &self.prefs;
+        let Some(o) = self.session.document().objects.get(index) else { return };
+        let mut t = o.transform;
+        let mut changed = false;
+        let [rx, ry, rz] = p.import_rotate;
+        if rx != 0.0 || ry != 0.0 || rz != 0.0 {
+            t.rotate =
+                slicecraft_geom::Vec3::new(t.rotate.x + rx, t.rotate.y + ry, t.rotate.z + rz);
+            changed = true;
+        }
+        if p.import_scale.is_finite() && p.import_scale > 0.0 && p.import_scale != 1.0 {
+            t.scale = t.scale.scale(p.import_scale);
+            changed = true;
+        }
+        let size = o.size();
+        let largest = size.x.max(size.y).max(size.z);
+        let inches = p.inch_check && largest > 0.0 && largest < 10.0;
+        if inches {
+            t.scale = t.scale.scale(25.4);
+            changed = true;
+        }
+        if changed && t.is_valid() {
+            self.run(Command::Place { index, transform: t });
+            if inches {
+                self.info(format!(
+                    "The model was {largest:.2} mm across, so it was read as inches and scaled by 25.4. Undo to keep it small."
+                ));
+            }
+        }
+    }
+
     pub(crate) fn scale_selected(&mut self, factor: f64) {
         let indices: Vec<usize> = self.selected.iter().copied().collect();
         for i in indices {
@@ -840,6 +1261,7 @@ impl SliceCraftApp {
                 if self.preview_cache.as_ref().is_none_or(|(k, _)| *k != key) {
                     let layers =
                         scene::build_preview(&out.layers, &self.session.document().settings);
+                    self.kinds_present = scene::kinds_used(&layers);
                     self.preview_cache = Some((key, layers));
                 }
             }
@@ -889,69 +1311,79 @@ impl SliceCraftApp {
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
-        if self.confirm.is_some() {
+        use crate::keys::Action;
+        if self.confirm.is_some() || self.dialogs.capture.is_some() {
             return;
         }
-        let typing = ctx.memory(|m| m.focused().is_some());
+        // only a text field takes keys; a focused button or list must not
+        // swallow shortcuts
+        let typing = ctx.text_edit_focused();
+        let blocked = typing || self.dialogs.any_open();
         let (cmd, shift) = ctx.input(|i| (i.modifiers.command, i.modifiers.shift));
         let pressed = |k: Key| ctx.input(|i| i.key_pressed(k));
-        if cmd && !shift && pressed(Key::O) {
-            self.open_import_dialog();
+        for action in Action::ALL {
+            if (blocked && !action.global()) || !self.prefs.keys.get(action).pressed(ctx) {
+                continue;
+            }
+            match action {
+                Action::Import => self.open_import_dialog(),
+                Action::OpenProject => self.request(Pending::OpenProject(None)),
+                Action::SaveProject => {
+                    self.save_project(false);
+                }
+                Action::SaveProjectAs => {
+                    self.save_project(true);
+                }
+                Action::NewProject => self.request(Pending::NewProject),
+                Action::ExportGcode => self.export(ctx),
+                Action::Slice => self.start_slice(ctx),
+                Action::PrintSettings => self.open_settings(),
+                Action::Undo => {
+                    self.run(Command::Undo);
+                }
+                Action::Redo => {
+                    self.run(Command::Redo);
+                }
+                Action::SelectAll => self.select_all(),
+                Action::Duplicate => self.duplicate_selected(),
+                Action::Remove => {
+                    if self.mode == Mode::Prepare {
+                        self.remove_selected();
+                    }
+                }
+                Action::SelectTool => self.tool = Tool::Select,
+                Action::MoveTool => self.tool = Tool::Move,
+                Action::RotateTool => self.tool = Tool::Rotate,
+                Action::ScaleTool => self.tool = Tool::Scale,
+                Action::FitView => self.fit_view(),
+            }
         }
-        if cmd && shift && pressed(Key::O) {
-            self.request(Pending::OpenProject(None));
-        }
-        if cmd && pressed(Key::S) {
-            self.save_project(shift);
-        }
-        if cmd && pressed(Key::N) {
-            self.request(Pending::NewProject);
-        }
-        if cmd && pressed(Key::E) {
-            self.export(ctx);
-        }
-        if cmd && pressed(Key::R) {
-            self.start_slice(ctx);
-        }
-        if cmd && pressed(Key::P) {
-            self.open_settings();
-        }
-        if typing || self.dialogs.any_open() {
-            return;
-        }
-        if cmd && pressed(Key::Z) {
-            self.run(if shift { Command::Redo } else { Command::Undo });
-        }
-        if cmd && pressed(Key::Y) {
-            self.run(Command::Redo);
-        }
-        if cmd && pressed(Key::A) {
-            self.select_all();
-        }
-        if cmd && pressed(Key::D) {
-            self.duplicate_selected();
-        }
-        if self.mode == Mode::Prepare && (pressed(Key::Delete) || pressed(Key::Backspace)) {
-            self.remove_selected();
-        }
-        if pressed(Key::Escape) {
-            if self.mode == Mode::Preview {
+        // Escape closes the top window even while windows block other keys
+        if pressed(Key::Escape) && !typing && !egui::Popup::is_any_open(ctx) {
+            if self.dialogs.any_open() {
+                let had_prefs = self.dialogs.preferences;
+                self.dialogs.close_top();
+                // preferences are saved when their window closes, by Esc too
+                if had_prefs && !self.dialogs.preferences {
+                    self.persist();
+                }
+            } else if self.mode == Mode::Preview {
                 self.mode = Mode::Prepare;
             } else {
                 self.selected.clear();
             }
         }
+        if blocked {
+            return;
+        }
+        // fixed extras: Ctrl+Shift+Z redoes, Backspace removes
+        if cmd && shift && pressed(Key::Z) {
+            self.run(Command::Redo);
+        }
+        if self.mode == Mode::Prepare && !cmd && pressed(Key::Backspace) {
+            self.remove_selected();
+        }
         if !cmd {
-            for (k, tool) in [
-                (Key::Q, Tool::Select),
-                (Key::W, Tool::Move),
-                (Key::E, Tool::Rotate),
-                (Key::R, Tool::Scale),
-            ] {
-                if pressed(k) {
-                    self.tool = tool;
-                }
-            }
             for (k, v) in [
                 (Key::Num0, ViewPreset::Iso),
                 (Key::Num1, ViewPreset::Front),
@@ -964,9 +1396,6 @@ impl SliceCraftApp {
                 if pressed(k) {
                     self.view(v);
                 }
-            }
-            if pressed(Key::F) {
-                self.fit_view();
             }
         }
         if self.mode == Mode::Preview {
@@ -1016,11 +1445,7 @@ impl SliceCraftApp {
 
     fn apply_theme(&mut self, ctx: &egui::Context) {
         if self.applied_dark != Some(self.prefs.dark) {
-            ctx.set_visuals(if self.prefs.dark {
-                egui::Visuals::dark()
-            } else {
-                egui::Visuals::light()
-            });
+            crate::theme::apply(ctx, self.prefs.dark);
             self.applied_dark = Some(self.prefs.dark);
         }
     }
@@ -1036,25 +1461,46 @@ impl eframe::App for SliceCraftApp {
         self.dropped_files(&ctx);
         self.shortcuts(&ctx);
         self.refresh_caches();
+        self.refresh_support_preview(&ctx);
+        self.poll_printer(&ctx);
+        crate::network::poll(self, &ctx);
         self.advance_playback(&ctx);
 
-        egui::Panel::top("menu").show(ui, |ui| crate::menus::menu_bar(self, ui));
-        egui::Panel::top("toolbar").show(ui, |ui| crate::menus::toolbar(self, ui));
-        egui::Panel::bottom("status").show(ui, |ui| crate::panels::status_bar(self, ui));
+        let pal = crate::theme::palette(self.prefs.dark);
+        let bar = |x: i8, y: i8| {
+            egui::Frame::new().fill(pal.panel).inner_margin(egui::Margin::symmetric(x, y))
+        };
+        egui::Panel::top("menu")
+            .frame(bar(8, 3))
+            .show_separator_line(false)
+            .show(ui, |ui| crate::menus::menu_bar(self, ui));
+        egui::Panel::top("toolbar")
+            .frame(bar(10, 6))
+            .show(ui, |ui| crate::menus::toolbar(self, ui));
+        egui::Panel::bottom("status")
+            .frame(bar(12, 4))
+            .show(ui, |ui| crate::panels::status_bar(self, ui));
         if self.mode == Mode::Preview {
             egui::Panel::bottom("preview-controls")
+                .frame(bar(14, 6))
                 .show(ui, |ui| crate::panels::preview_controls(self, ui));
         }
-        egui::Panel::left("left").resizable(true).default_size(270.0).show(ui, |ui| {
-            match self.mode {
+        egui::Panel::left("left")
+            .resizable(true)
+            .default_size(310.0)
+            .size_range(270.0..=460.0)
+            .frame(bar(12, 10))
+            .show(ui, |ui| match self.mode {
                 Mode::Prepare => crate::panels::models_panel(self, ui),
                 Mode::Preview => crate::panels::summary_panel(self, ui),
-            }
-        });
-        if self.mode == Mode::Prepare {
-            egui::Panel::right("right").resizable(true).default_size(290.0).show(ui, |ui| {
-                crate::panels::transform_panel(self, ui);
             });
+        if self.mode == Mode::Prepare {
+            egui::Panel::right("right")
+                .resizable(true)
+                .default_size(290.0)
+                .size_range(250.0..=420.0)
+                .frame(bar(12, 10))
+                .show(ui, |ui| crate::panels::transform_panel(self, ui));
         }
         egui::CentralPanel::no_frame().show(ui, |ui| crate::viewport::viewport(self, ui));
         crate::dialogs::show(self, &ctx);
@@ -1066,6 +1512,9 @@ impl eframe::App for SliceCraftApp {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.cancel_slice();
+        if let Some(job) = &self.support_job {
+            job.cancel.store(true, Ordering::Relaxed);
+        }
         self.persist();
     }
 }

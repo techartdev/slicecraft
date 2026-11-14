@@ -12,10 +12,13 @@
 //! ```text
 //! slicecraft-cli commands
 //! slicecraft-cli info  <model.stl|obj>
+//! slicecraft-cli mcp                 (an MCP server on standard input/output)
 //! slicecraft-cli slice [project.scproj] [model]... -o <out.gcode> [options]
 //!   --flavor marlin|reprap|klipper   --layer-height MM   --first-layer MM
 //!   --width MM   --perimeters N   --infill PCT   --top N   --bottom N
 //!   --nozzle C   --bed C   --skirt N   --profile FILE   --json
+//!
+//! `--profile` takes a SliceCraft `.scprofile` or a Simplify3D `.fff`.
 //! ```
 //!
 //! A project file brings its models, placement and profile; `--profile` and
@@ -56,7 +59,7 @@ impl std::fmt::Display for CliError {
     }
 }
 
-const USAGE: &str = "usage: slicecraft-cli commands | info <model> | slice [project.scproj] [model]... -o <out.gcode> [--flavor NAME] [--layer-height MM] [--first-layer MM] [--width MM] [--perimeters N] [--infill PCT] [--top N] [--bottom N] [--nozzle C] [--bed C] [--skirt N] [--profile FILE] [--json]";
+const USAGE: &str = "usage: slicecraft-cli commands | info <model> | mcp | slice [project.scproj] [model]... -o <out.gcode> [--flavor NAME] [--layer-height MM] [--first-layer MM] [--width MM] [--perimeters N] [--infill PCT] [--top N] [--bottom N] [--nozzle C] [--bed C] [--skirt N] [--profile FILE] [--json]";
 
 fn failed(e: impl std::fmt::Display) -> CliError {
     CliError::Failed(e.to_string())
@@ -88,6 +91,13 @@ fn run(args: &[String]) -> Result<(), CliError> {
             Ok(())
         }
         Some("slice") => slice(args.get(1..).unwrap_or(&[])),
+        Some("mcp") => {
+            // an MCP server on standard input and output; messages only on stdout
+            let mut session = Session::new();
+            let stdin = std::io::stdin();
+            slicecraft_mcp::server::serve(&mut session, stdin.lock(), std::io::stdout().lock())
+                .map_err(failed)
+        }
         _ => Err(CliError::Usage("unknown command".into())),
     }
 }
@@ -121,12 +131,25 @@ fn slice(args: &[String]) -> Result<(), CliError> {
     if let Some(i) = args.iter().position(|a| a == "--profile") {
         let path =
             args.get(i + 1).ok_or_else(|| CliError::Usage("--profile needs a file".into()))?;
-        if let Outcome::ProfileLoaded { warnings, .. } =
-            session.execute(Command::LoadProfile(PathBuf::from(path))).map_err(failed)?
-        {
-            for w in warnings {
-                eprintln!("slicecraft-cli: {path}: {w}");
+        match session.execute(Command::LoadProfile(PathBuf::from(path))).map_err(failed)? {
+            Outcome::ProfileLoaded { warnings, .. } => {
+                for w in warnings {
+                    eprintln!("slicecraft-cli: {path}: {w}");
+                }
             }
+            Outcome::ProfileImported { name, report } => {
+                eprintln!(
+                    "slicecraft-cli: {path}: imported \"{name}\" ({}): {} settings applied, {} kept as planned, {} not used",
+                    report.written_by,
+                    report.applied.len(),
+                    report.placeholders.len(),
+                    report.ignored.len()
+                );
+                for n in report.notes {
+                    eprintln!("slicecraft-cli: {path}: {n}");
+                }
+            }
+            _ => {}
         }
     }
     let mut p = session.document().settings.clone();

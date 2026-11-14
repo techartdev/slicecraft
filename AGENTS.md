@@ -96,6 +96,11 @@ A slicer that crashes loses a print and the user's trust. **This outranks featur
   specifications (RepRap/Marlin/Klipper documentation, STL and 3MF specs).
   Its program is never decompiled or disassembled: behaviour is learned from
   running it and from the files it writes.
+  "Strings" means **text a user sees**: labels, menu items, dialog wording, help
+  and messages. Identifiers a person never sees, such as the element names of a
+  `.fff` profile in the importer that reads them, may appear in code; reading
+  another program's files is compatibility, not copying. Our own labels, help,
+  defaults and file formats stay our own.
 - **Assets are original.** Every icon is drawn in code. Any file asset is original,
   public domain/CC0, OSI-licensed or redistributable CC, and **must have a row in
   `ATTRIBUTION.md`**. Fonts live in `storytold/craft-fonts`, never here.

@@ -12,6 +12,7 @@
 //! something a front end can draw.
 
 pub mod paths;
+pub mod patterns;
 pub mod section;
 
 use slicecraft_geom::region::{contour_area, contour_length};
@@ -47,6 +48,8 @@ pub struct Layer {
     pub triangles_considered: usize,
     /// Open chains that could not be closed (a mesh defect), dropped.
     pub dropped_chains: usize,
+    /// Open chains kept to print as lines (only when asked for).
+    pub open: Vec<Vec<Point2>>,
 }
 
 impl Layer {
@@ -63,13 +66,20 @@ impl Layer {
 
 /// Intersect one mesh with the plane at `z` and stitch the result into loops.
 pub fn cross_section(mesh: &Mesh, z: f64) -> Layer {
+    cross_section_with(mesh, z, section::CLOSE_GAP, false)
+}
+
+/// Like [`cross_section`], closing open outlines with gaps up to
+/// `close_gap` mm and, with `keep_open`, keeping the rest as open chains.
+pub fn cross_section_with(mesh: &Mesh, z: f64, close_gap: f64, keep_open: bool) -> Layer {
     let (segs, considered) = section::segments(mesh, z);
-    let stitched = section::stitch(&segs);
+    let stitched = section::stitch_with(&segs, close_gap, keep_open);
     Layer {
         z,
         loops: stitched.loops.into_iter().map(|points| Loop2 { points }).collect(),
         triangles_considered: considered,
         dropped_chains: stitched.dropped_chains,
+        open: stitched.open,
     }
 }
 
