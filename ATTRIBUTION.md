@@ -16,7 +16,7 @@ The repository holds screenshots for the documentation, in `docs/images/`:
 | Asset | Author | Source | Licence |
 |---|---|---|---|
 | `docs/images/*.jpg` (screenshots of SliceCraft) | the SliceCraft contributors | taken from the running program | CC-BY-4.0 |
-| The vase shown in `preview.jpg`, `preview-layers.jpg`, `vase-mode.jpg`, `plate-preview.jpg`, `rotate-tool.jpg`, `section-view.jpg`, `wireframe.jpg`: *Spiral vase* | JJ76 | https://www.thingiverse.com/thing:2795194 | Creative Commons Attribution (CC BY), as the thing page states |
+| The vase shown in `preview.jpg`, `preview-layers.jpg`, `vase-mode.jpg`, `plate-preview.jpg`, `rotate-tool.jpg`, `section-view.jpg`, `wireframe.jpg`: *Spiral vase* | JJ76 | https://www.thingiverse.com/thing:2795194 | CC-BY-4.0 |
 | `docs/images/cube-infill.jpg`, `settings-*.jpg`: models shown | the SliceCraft contributors | `examples/cube.stl` and models named only in the list | original |
 
 The model file itself is not in the repository; the screenshots only show it.
