@@ -15,14 +15,16 @@
 
 pub mod profile;
 pub mod settings;
+pub mod setup;
 
 use slicecraft_geom::{Bounds3, GeomError, Mesh, Triangle, Vec3};
 use std::fmt;
 use std::sync::Arc;
 
 pub use settings::{
-    Flavor, InfillPattern, PerimeterOrder, PrintSettings, SeamMode, SettingKind, SettingSpec,
-    SettingValue, SolidPattern, Tab,
+    BeadShape, BedShape, FillRule, Flavor, HomeCorner, InfillPattern, IslandOrder, OpenOutlines,
+    OutputFormat, PerimeterOrder, PrintSettings, SeamMode, SettingKind, SettingSpec, SettingValue,
+    SolidPattern, SupportPattern, SupportPlacement, SupportStyle, Tab, ThinWalls, WipeFeatures,
 };
 
 /// Largest scale factor a placement may apply on any axis.
@@ -94,6 +96,10 @@ pub struct SceneObject {
     pub mesh: Arc<Mesh>,
     pub transform: Transform,
     pub visible: bool,
+    /// Printed as part, as support, or used to cut the other parts.
+    pub role: ModelRole,
+    /// Models with the same group select and move together.
+    pub group: Option<u32>,
     /// Local reference point: the centre of the mesh's bounding box.
     anchor: Vec3,
 }
@@ -105,7 +111,15 @@ impl SceneObject {
 
     pub fn shared(name: impl Into<String>, mesh: Arc<Mesh>) -> Self {
         let anchor = mesh.bounds().center();
-        Self { name: name.into(), mesh, transform: Transform::default(), visible: true, anchor }
+        Self {
+            name: name.into(),
+            mesh,
+            transform: Transform::default(),
+            visible: true,
+            role: ModelRole::Print,
+            group: None,
+            anchor,
+        }
     }
 
     /// Model-to-bed mapping before the drop: centre, scale, rotate, place.
@@ -167,6 +181,11 @@ impl SceneObject {
         Ok(())
     }
 
+    /// The mesh's reference point: the centre of its bounding box.
+    pub fn anchor(&self) -> Vec3 {
+        self.anchor
+    }
+
     /// Size of the model as placed (after scale and rotation).
     pub fn size(&self) -> Vec3 {
         self.world_bounds().size()
@@ -224,23 +243,234 @@ impl Bed {
     }
 }
 
+/// What a model is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ModelRole {
+    /// An ordinary part.
+    #[default]
+    Print,
+    /// Printed as support material where it stands.
+    Support,
+    /// Not printed: removed from the parts it overlaps.
+    Cutter,
+}
+
+impl ModelRole {
+    pub fn name(self) -> &'static str {
+        match self {
+            ModelRole::Print => "print",
+            ModelRole::Support => "support",
+            ModelRole::Cutter => "cutter",
+        }
+    }
+
+    pub fn from_name(s: &str) -> Option<Self> {
+        [ModelRole::Print, ModelRole::Support, ModelRole::Cutter]
+            .into_iter()
+            .find(|r| r.name() == s)
+    }
+}
+
+/// Most setting zones one document holds.
+pub const MAX_ZONES: usize = 100;
+
+/// Settings that differ from the profile over a height range and, optionally,
+/// only for some models ("several profiles per job").
+#[derive(Debug, Clone, PartialEq)]
+pub struct SettingZone {
+    pub name: String,
+    /// From this height (inclusive) to `z_to` (exclusive), mm.
+    pub z_from: f64,
+    pub z_to: f64,
+    /// Models the zone applies to; empty means every model.
+    pub objects: Vec<usize>,
+    /// Setting key → value, each checked against the schema.
+    pub overrides: std::collections::BTreeMap<String, settings::SettingValue>,
+}
+
+impl Default for SettingZone {
+    fn default() -> Self {
+        Self::new("")
+    }
+}
+
+impl SettingZone {
+    /// The whole height, every model, nothing changed yet.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            z_from: 0.0,
+            z_to: slicecraft_geom::MAX_COORD,
+            objects: Vec::new(),
+            overrides: Default::default(),
+        }
+    }
+
+    /// Every override names a known setting with a value in its range, and the
+    /// heights are finite and ordered.
+    pub fn validate(&self) -> Result<(), DocError> {
+        if !(self.z_from.is_finite() && self.z_to.is_finite() && self.z_from < self.z_to) {
+            return Err(DocError::Setting("a zone needs a height range from low to high"));
+        }
+        let mut probe = PrintSettings::default();
+        for (k, v) in &self.overrides {
+            probe.set(k, v.clone())?;
+        }
+        Ok(())
+    }
+
+    pub fn covers_z(&self, z: f64) -> bool {
+        z >= self.z_from && z < self.z_to
+    }
+
+    /// Make this zone print with `profile` where it differs from `base`: the
+    /// overrides become every such setting a zone can change. The machine,
+    /// the G-code format and the scripts stay with the plate's profile.
+    pub fn take_profile(&mut self, base: &PrintSettings, profile: &PrintSettings) {
+        self.overrides = settings::differences(base, profile)
+            .into_iter()
+            .filter(|(spec, _, _)| zone_can_change(spec))
+            .map(|(spec, _, theirs)| (spec.key.to_string(), theirs))
+            .collect();
+    }
+
+    /// `base` with this zone's overrides applied.
+    pub fn apply(&self, base: &PrintSettings) -> PrintSettings {
+        let mut out = base.clone();
+        for (k, v) in &self.overrides {
+            let _ = out.set(k, v.clone());
+        }
+        out
+    }
+}
+
+/// Whether a setting can differ inside a zone: anything but the machine, the
+/// G-code format and the scripts, which belong to the whole job.
+pub fn zone_can_change(spec: &settings::SettingSpec) -> bool {
+    !matches!(spec.tab, settings::Tab::Machine | settings::Tab::Gcode | settings::Tab::Scripts)
+}
+
+/// Most support edits one document holds.
+pub const MAX_SUPPORT_EDITS: usize = 1000;
+
+/// What a support edit does inside its box.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SupportEditKind {
+    /// Support every downward-facing surface in the box, whatever its angle,
+    /// even with automatic support off.
+    Add,
+    /// No support in the box.
+    Block,
+}
+
+impl SupportEditKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            SupportEditKind::Add => "add",
+            SupportEditKind::Block => "block",
+        }
+    }
+}
+
+/// A box on the bed, in bed coordinates (mm), where support is added or blocked.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SupportEdit {
+    pub kind: SupportEditKind,
+    pub x0: f64,
+    pub y0: f64,
+    pub x1: f64,
+    pub y1: f64,
+    /// Heights the edit applies to; `0` to `MAX_COORD` is the full height.
+    pub z0: f64,
+    pub z1: f64,
+}
+
+impl SupportEdit {
+    /// A full-height box over the rectangle spanned by two corners.
+    pub fn columns(kind: SupportEditKind, a: (f64, f64), b: (f64, f64)) -> Self {
+        Self {
+            kind,
+            x0: a.0.min(b.0),
+            y0: a.1.min(b.1),
+            x1: a.0.max(b.0),
+            y1: a.1.max(b.1),
+            z0: 0.0,
+            z1: slicecraft_geom::MAX_COORD,
+        }
+    }
+
+    /// Finite, ordered, inside the coordinate range and not degenerate.
+    pub fn is_valid(&self) -> bool {
+        let m = slicecraft_geom::MAX_COORD;
+        let all = [self.x0, self.y0, self.x1, self.y1, self.z0, self.z1];
+        all.iter().all(|v| v.is_finite() && v.abs() <= m)
+            && self.x1 - self.x0 >= 0.1
+            && self.y1 - self.y0 >= 0.1
+            && self.z1 > self.z0
+    }
+
+    /// True when the edit applies at height `z`.
+    pub fn covers_z(&self, z: f64) -> bool {
+        z >= self.z0 && z <= self.z1
+    }
+}
+
 /// The whole document.
 #[derive(Debug, Clone, Default)]
 pub struct Document {
     pub bed: Bed,
     pub settings: PrintSettings,
     pub objects: Vec<SceneObject>,
+    /// Boxes where support is added or blocked, in bed coordinates.
+    pub support_edits: Vec<SupportEdit>,
+    /// Settings that change over heights or for some models.
+    pub zones: Vec<SettingZone>,
 }
 
 impl Document {
     /// Replace the profile; the bed follows the profile's machine settings.
     pub fn set_settings(&mut self, settings: PrintSettings) {
-        self.bed = Bed {
-            width: settings.bed_width,
-            depth: settings.bed_depth,
-            height: settings.bed_height,
+        // a round bed's build area is its diameter square, centred
+        let (width, depth) = match settings.bed_shape {
+            settings::BedShape::Circle => (settings.bed_diameter, settings.bed_diameter),
+            settings::BedShape::Rectangle => (settings.bed_width, settings.bed_depth),
         };
+        self.bed = Bed { width, depth, height: settings.bed_height };
         self.settings = settings;
+    }
+
+    /// Add a support edit, refusing invalid boxes and more than `MAX_SUPPORT_EDITS`.
+    pub fn add_support_edit(&mut self, edit: SupportEdit) -> Result<usize, DocError> {
+        if !edit.is_valid() {
+            return Err(DocError::Setting("a support box must be finite and at least 0.1 mm wide"));
+        }
+        if self.support_edits.len() >= MAX_SUPPORT_EDITS {
+            return Err(DocError::Setting("too many support edits"));
+        }
+        self.support_edits.push(edit);
+        Ok(self.support_edits.len() - 1)
+    }
+
+    /// A model is gone: zones forget it and later models move down one.
+    pub fn forget_object(&mut self, index: usize) {
+        for z in &mut self.zones {
+            z.objects.retain(|&i| i != index);
+            for i in &mut z.objects {
+                if *i > index {
+                    *i -= 1;
+                }
+            }
+        }
+    }
+
+    /// The settings of every model on a layer at height `z`: the profile with
+    /// the height zones (those for every model) applied in order.
+    pub fn settings_at(&self, z: f64) -> PrintSettings {
+        let mut s = self.settings.clone();
+        for zone in self.zones.iter().filter(|zn| zn.objects.is_empty() && zn.covers_z(z)) {
+            s = zone.apply(&s);
+        }
+        s
     }
 
     /// Add an object, refusing past `MAX_OBJECTS`. Returns its index.
@@ -325,11 +555,14 @@ impl Document {
             });
         }
         items.sort_by(|a, b| b.depth.total_cmp(&a.depth));
+        // the skirt, brim or raft around the block must land on the bed too
+        let margin = self.settings.adhesion_margin();
+        let usable_width = (self.bed.width - 2.0 * margin).max(0.0);
         let mut rows: Vec<Row> = Vec::new();
         for it in items {
-            let fits = rows.last().is_some_and(|r| {
-                r.members.is_empty() || r.width + gap + it.width <= self.bed.width
-            });
+            let fits = rows
+                .last()
+                .is_some_and(|r| r.members.is_empty() || r.width + gap + it.width <= usable_width);
             if !fits {
                 rows.push(Row::default());
             }
@@ -357,7 +590,7 @@ impl Document {
 
     /// A model that cannot be sliced, and why.
     pub fn sliceable(&self) -> Result<(), DocError> {
-        if !self.objects.iter().any(|o| o.visible) {
+        if !self.objects.iter().any(|o| o.visible && o.role == ModelRole::Print) {
             return Err(DocError::Empty);
         }
         if !self.bed.is_valid() {
@@ -548,6 +781,27 @@ mod tests {
         let p = PrintSettings { bed_width: 300.0, ..PrintSettings::default() };
         doc.set_settings(p);
         assert_eq!(doc.bed.width, 300.0);
+    }
+
+    #[test]
+    fn arrange_leaves_room_for_the_skirt() {
+        // nine 20 mm plates 5 mm apart are exactly 220 mm: a row that fills
+        // the bed edge to edge would push the skirt off it
+        let mut d = Document::default();
+        for i in 0..9 {
+            let Some(mesh) = square_plate(20.0) else { return };
+            assert!(d.add(SceneObject::new(format!("p{i}"), mesh)).is_ok());
+        }
+        d.settings.skirt_enabled = true;
+        d.settings.skirt_distance = 3.0;
+        d.settings.skirt_loops = 2;
+        assert!(d.arrange(5.0).is_ok());
+        let margin = d.settings.adhesion_margin();
+        assert!(margin > 3.0);
+        for o in &d.objects {
+            let b = o.world_bounds();
+            assert!(b.min().x >= margin - 1e-6 && b.max().x <= d.bed.width - margin + 1e-6);
+        }
     }
 
     #[test]

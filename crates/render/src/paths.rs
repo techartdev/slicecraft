@@ -23,16 +23,43 @@ pub enum PathKind {
     InnerPerimeter,
     SolidInfill,
     SparseInfill,
+    /// The body of support.
+    Support,
+    /// Dense support: under or on the model, or at its foot on the bed.
+    SupportInterface,
+    /// The raft under the part.
+    Raft,
+    /// Single lines in thin walls and in gaps the shells leave.
+    GapFill,
+    /// Solid infill over air, straight across.
+    Bridge,
+    /// The exposed top surface.
+    TopSolid,
+    /// A light pass over top surfaces.
+    Ironing,
+    /// The tower each tool primes on after a tool change.
+    PrimeTower,
+    /// The thin wall around the part that wipes idle tools' ooze.
+    OozeShield,
 }
 
 impl PathKind {
-    pub const ALL: [PathKind; 6] = [
+    pub const ALL: [PathKind; 15] = [
         PathKind::Skirt,
         PathKind::Brim,
         PathKind::OuterPerimeter,
         PathKind::InnerPerimeter,
         PathKind::SolidInfill,
         PathKind::SparseInfill,
+        PathKind::Support,
+        PathKind::SupportInterface,
+        PathKind::Raft,
+        PathKind::GapFill,
+        PathKind::Bridge,
+        PathKind::TopSolid,
+        PathKind::Ironing,
+        PathKind::PrimeTower,
+        PathKind::OozeShield,
     ];
 
     pub fn label(self) -> &'static str {
@@ -43,6 +70,15 @@ impl PathKind {
             PathKind::InnerPerimeter => "inner perimeter",
             PathKind::SolidInfill => "solid infill",
             PathKind::SparseInfill => "sparse infill",
+            PathKind::Support => "support",
+            PathKind::SupportInterface => "dense support",
+            PathKind::Raft => "raft",
+            PathKind::GapFill => "gap fill",
+            PathKind::Bridge => "bridge",
+            PathKind::TopSolid => "top surface",
+            PathKind::Ironing => "ironing",
+            PathKind::PrimeTower => "prime tower",
+            PathKind::OozeShield => "ooze shield",
         }
     }
 }
@@ -53,6 +89,8 @@ pub struct ToolPath {
     pub kind: PathKind,
     pub points: Vec<Point2>,
     pub closed: bool,
+    /// The extruder that prints it (0 for single-extruder printers).
+    pub tool: u8,
 }
 
 impl ToolPath {
@@ -83,6 +121,12 @@ pub struct LayerPaths {
     /// Layer thickness, mm.
     pub height: f64,
     pub paths: Vec<ToolPath>,
+    /// `inside_travel[k]`: the travel to `paths[k]` crosses no model outline,
+    /// so it needs no retraction. Missing entries mean "retract as usual".
+    pub inside_travel: Vec<bool>,
+    /// `travel_via[k]`: waypoints the travel to `paths[k]` follows (combing).
+    /// Empty or missing means a straight move.
+    pub travel_via: Vec<Vec<Point2>>,
 }
 
 /// Perimeter shells of `region`, outermost first, and the area left inside the
@@ -97,19 +141,35 @@ pub fn perimeters(
         return Ok((paths, region.clone()));
     }
     for k in 0..count {
-        let shell = region.offset(-(width * 0.5 + f64::from(k) * width))?;
+        let shell = inner_shell(region, k, width)?;
         if shell.is_empty() {
             break;
         }
         let kind = if k == 0 { PathKind::OuterPerimeter } else { PathKind::InnerPerimeter };
         for ring in shell.contours() {
             if ring.len() >= 3 {
-                paths.push(ToolPath { kind, points: ring.clone(), closed: true });
+                paths.push(ToolPath { kind, points: ring.clone(), closed: true, tool: 0 });
             }
         }
     }
     let inner = region.offset(-(f64::from(count) * width))?;
     Ok((paths, inner))
+}
+
+/// How much an inner loop may overlap itself, as a share of the line width,
+/// before the narrow part is left to gap fill instead.
+pub const INNER_LOOP_OVERLAP: f64 = 0.3;
+
+/// The centreline area of shell `k`. Inner shells keep only the part with room
+/// for both sides of the loop (within `INNER_LOOP_OVERLAP`); a loop squeezed
+/// into a narrow wall would print on top of itself.
+pub fn inner_shell(region: &Region, k: u32, width: f64) -> Result<Region, GeomError> {
+    let centre = region.offset(-(width * 0.5 + f64::from(k) * width))?;
+    if k == 0 || centre.is_empty() {
+        return Ok(centre);
+    }
+    let r = width * (1.0 - INNER_LOOP_OVERLAP) * 0.5;
+    centre.offset(-r)?.offset(r)
 }
 
 /// Parallel lines `spacing` apart at `angle` radians, clipped to `region`.
@@ -186,6 +246,7 @@ pub fn line_infill(
                 kind,
                 points: vec![Point2::new(x0, y).rotated(angle), Point2::new(x1, y).rotated(angle)],
                 closed: false,
+                tool: 0,
             });
         }
     }
@@ -193,6 +254,145 @@ pub fn line_infill(
 }
 
 /// Most rings one concentric fill may draw.
+/// Most lines `zigzag` joins in one call; past it the lines stay separate.
+pub const MAX_ZIGZAG_LINES: usize = 4000;
+
+/// Join parallel fill lines into continuous zigzags: each line's end links to
+/// the nearest unused line end within `max_link` when the link stays inside
+/// `region`. Fewer, longer paths mean fewer travel moves and retractions.
+pub fn zigzag(lines: Vec<ToolPath>, region: &Region, max_link: f64) -> Vec<ToolPath> {
+    if lines.len() < 2 || lines.len() > MAX_ZIGZAG_LINES || max_link.is_nan() || max_link <= 0.0 {
+        return lines;
+    }
+    let link2 = max_link * max_link;
+    let ends: Vec<Option<(Point2, Point2)>> =
+        lines.iter().map(|l| Some((*l.points.first()?, *l.points.last()?))).collect();
+    let mut used = vec![false; lines.len()];
+    let mut out = Vec::new();
+    for start in 0..lines.len() {
+        if used.get(start).copied().unwrap_or(true) {
+            continue;
+        }
+        let Some(first) = lines.get(start) else { continue };
+        if let Some(u) = used.get_mut(start) {
+            *u = true;
+        }
+        let kind = first.kind;
+        let mut chain = first.points.clone();
+        while let Some(&end) = chain.last() {
+            let mut best: Option<(f64, usize, bool)> = None;
+            for (j, e) in ends.iter().enumerate() {
+                let (Some((a, b)), false) = (e, used.get(j).copied().unwrap_or(true)) else {
+                    continue;
+                };
+                for (point, reversed) in [(*a, false), (*b, true)] {
+                    let d2 = end.distance_sq(point);
+                    if d2 <= link2 && best.is_none_or(|(bd, _, _)| d2 < bd) {
+                        best = Some((d2, j, reversed));
+                    }
+                }
+            }
+            let Some((_, j, reversed)) = best else { break };
+            let Some(next) = lines.get(j) else { break };
+            let Some(&join_at) = (if reversed { next.points.last() } else { next.points.first() })
+            else {
+                break;
+            };
+            if !region.segment_inside(end, join_at) {
+                // the nearest end is across a boundary: stop this chain here
+                break;
+            }
+            if let Some(u) = used.get_mut(j) {
+                *u = true;
+            }
+            if reversed {
+                chain.extend(next.points.iter().rev().copied());
+            } else {
+                chain.extend(next.points.iter().copied());
+            }
+        }
+        out.push(ToolPath { kind, points: chain, closed: false, tool: 0 });
+    }
+    out
+}
+
+/// Largest outline `comb` walks along; bigger ones fall back to a straight move.
+pub const MAX_COMB_RING: usize = 20_000;
+
+/// A route from `a` to `b` that stays inside `region`: the straight line, with
+/// each stretch that leaves the region replaced by a walk along the outline it
+/// crossed, the shorter way round. Returns the waypoints between `a` and `b`
+/// (empty when the straight line stays inside), or `None` when there is no
+/// such route or it is longer than `max_len`.
+pub fn comb(region: &Region, a: Point2, b: Point2, max_len: f64) -> Option<Vec<Point2>> {
+    if !region.contains(a) || !region.contains(b) {
+        return None;
+    }
+    let rings: Vec<&Vec<Point2>> = region.contours().collect();
+    // every crossing of a→b with an outline edge: (t along a→b, ring, edge, point)
+    let mut hits: Vec<(f64, usize, usize, Point2)> = Vec::new();
+    let (dx, dy) = (b.x - a.x, b.y - a.y);
+    for (r, ring) in rings.iter().enumerate() {
+        let n = ring.len();
+        for i in 0..n {
+            let (Some(&p), Some(&q)) = (ring.get(i), ring.get((i + 1) % n)) else { continue };
+            let (ex, ey) = (q.x - p.x, q.y - p.y);
+            let den = dx * ey - dy * ex;
+            if den.abs() < 1e-12 {
+                continue;
+            }
+            let t = ((p.x - a.x) * ey - (p.y - a.y) * ex) / den;
+            let u = ((p.x - a.x) * dy - (p.y - a.y) * dx) / den;
+            if t > 1e-9 && t < 1.0 - 1e-9 && (0.0..1.0).contains(&u) {
+                hits.push((t, r, i, Point2::new(a.x + t * dx, a.y + t * dy)));
+            }
+        }
+    }
+    if hits.is_empty() {
+        return Some(Vec::new());
+    }
+    if !hits.len().is_multiple_of(2) {
+        return None;
+    }
+    hits.sort_by(|x, y| x.0.total_cmp(&y.0));
+    let mut via = Vec::new();
+    for pair in hits.chunks_exact(2) {
+        let [(_, r0, i0, p0), (_, r1, i1, p1)] = pair else { return None };
+        if r0 != r1 {
+            return None;
+        }
+        let ring = rings.get(*r0)?;
+        let n = ring.len();
+        if n > MAX_COMB_RING {
+            return None;
+        }
+        // forward: vertices i0+1 ..= i1; backward: i0, i0-1, ..., i1+1
+        let forward: Vec<Point2> =
+            (1..=((i1 + n - i0) % n)).filter_map(|k| ring.get((i0 + k) % n).copied()).collect();
+        let backward: Vec<Point2> =
+            (0..((i0 + n - i1) % n)).filter_map(|k| ring.get((i0 + n - k) % n).copied()).collect();
+        let len = |pts: &[Point2]| {
+            let mut at = *p0;
+            let mut total = 0.0;
+            for q in pts.iter().chain(std::iter::once(p1)) {
+                total += at.distance(*q);
+                at = *q;
+            }
+            total
+        };
+        via.push(*p0);
+        via.extend(if len(&forward) <= len(&backward) { forward } else { backward });
+        via.push(*p1);
+    }
+    let mut total = 0.0;
+    let mut at = a;
+    for q in via.iter().chain(std::iter::once(&b)) {
+        total += at.distance(*q);
+        at = *q;
+    }
+    (total <= max_len).then_some(via)
+}
+
 pub const MAX_RINGS: usize = 10_000;
 
 /// Rings following the outline inward, `spacing` apart; the first ring sits
@@ -213,7 +413,7 @@ pub fn concentric_infill(
         }
         for c in ring.contours() {
             if c.len() >= 3 {
-                out.push(ToolPath { kind, points: c.clone(), closed: true });
+                out.push(ToolPath { kind, points: c.clone(), closed: true, tool: 0 });
             }
         }
         ring = ring.offset(-spacing)?;
@@ -276,6 +476,61 @@ pub fn order_paths(mut paths: Vec<ToolPath>, from: Point2) -> (Vec<ToolPath>, Po
     (out, at)
 }
 
+/// Like [`order_paths`], but a move that `crosses` says leaves the part
+/// (and so needs a retraction) costs `penalty` mm more: among the nearest few
+/// next paths, one reachable without leaving the part wins.
+pub fn order_paths_avoiding(
+    mut paths: Vec<ToolPath>,
+    from: Point2,
+    crosses: &dyn Fn(Point2, Point2) -> bool,
+    penalty: f64,
+) -> (Vec<ToolPath>, Point2) {
+    const CANDIDATES: usize = 6;
+    if paths.len() > MAX_PATHS_TO_ORDER / 2 {
+        return order_paths(paths, from);
+    }
+    let mut at = from;
+    let mut out = Vec::with_capacity(paths.len());
+    while !paths.is_empty() {
+        let mut near: Vec<(f64, usize, Choice)> = paths
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let (d, c) = nearest_entry(p, at);
+                (d, i, c)
+            })
+            .collect();
+        near.sort_by(|a, b| a.0.total_cmp(&b.0));
+        near.truncate(CANDIDATES);
+        let mut best: Option<(f64, usize, Choice)> = None;
+        for (d, i, c) in near {
+            let Some(p) = paths.get(i) else { continue };
+            let entry = match c {
+                Choice::Forward => p.points.first(),
+                Choice::Reverse => p.points.last(),
+                Choice::RotateTo(k) => p.points.get(k),
+            };
+            let cost =
+                d.sqrt() + entry.map_or(0.0, |e| if crosses(at, *e) { penalty } else { 0.0 });
+            if best.is_none_or(|(b, _, _)| cost < b) {
+                best = Some((cost, i, c));
+            }
+        }
+        let Some((_, i, c)) = best else { break };
+        let mut p = paths.swap_remove(i);
+        match c {
+            Choice::Forward => {}
+            Choice::Reverse => p.points.reverse(),
+            Choice::RotateTo(k) => p.points.rotate_left(k),
+        }
+        if let Some(e) = p.end() {
+            at = e;
+        }
+        out.push(p);
+    }
+    (out, at)
+}
+
 #[derive(Debug, Clone, Copy)]
 enum Choice {
     Forward,
@@ -312,6 +567,69 @@ mod tests {
             Point2::new(0.0, s),
         ]])
         .ok()
+    }
+
+    #[test]
+    fn comb_walks_around_a_hole_and_stays_inside() {
+        let sq = |x0: f64, s: f64| {
+            vec![
+                Point2::new(x0, x0),
+                Point2::new(x0 + s, x0),
+                Point2::new(x0 + s, x0 + s),
+                Point2::new(x0, x0 + s),
+            ]
+        };
+        let mut hole = sq(4.0, 2.0);
+        hole.reverse();
+        let r = Region::from_loops(&[sq(0.0, 10.0), hole]).unwrap_or_default();
+        let (a, b) = (Point2::new(1.0, 5.0), Point2::new(9.0, 5.0));
+        let via = comb(&r, a, b, 100.0);
+        assert!(via.as_ref().is_some_and(|v| !v.is_empty()), "{via:?}");
+        let mut pts = vec![a];
+        pts.extend(via.unwrap_or_default());
+        pts.push(b);
+        for w in pts.windows(2) {
+            if let [p, q] = w {
+                assert!(r.segment_inside(*p, *q), "left the region: {p:?} {q:?}");
+            }
+        }
+        // a straight line inside needs no waypoints; too short a limit refuses
+        assert_eq!(comb(&r, Point2::new(1.0, 1.0), Point2::new(9.0, 1.0), 100.0), Some(vec![]));
+        assert!(comb(&r, a, b, 8.5).is_none());
+        // a point outside: no route
+        assert!(comb(&r, Point2::new(-1.0, 5.0), b, 100.0).is_none());
+    }
+
+    #[test]
+    fn zigzag_joins_lines_inside_a_square_and_not_across_a_gap() {
+        let sq = |x0: f64, s: f64| {
+            vec![
+                Point2::new(x0, 0.0),
+                Point2::new(x0 + s, 0.0),
+                Point2::new(x0 + s, s),
+                Point2::new(x0, s),
+            ]
+        };
+        let one = Region::from_loops(&[sq(0.0, 10.0)]).unwrap_or_default();
+        let lines = line_infill(&one, 1.0, 0.0, PathKind::Support).unwrap_or_default();
+        let n = lines.len();
+        assert!(n >= 9);
+        let joined = zigzag(lines, &one, 1.5);
+        assert_eq!(joined.len(), 1, "one zigzag through the whole square");
+        assert_eq!(joined.first().map(|p| p.points.len()), Some(2 * n));
+        // two squares 0.5 mm apart: the lines join within each, never across
+        let two = Region::from_loops(&[sq(0.0, 4.0), sq(4.5, 4.0)]).unwrap_or_default();
+        let lines = line_infill(&two, 1.0, std::f64::consts::FRAC_PI_2, PathKind::Support)
+            .unwrap_or_default();
+        let joined = zigzag(lines, &two, 1.5);
+        assert_eq!(joined.len(), 2);
+        for p in &joined {
+            for w in p.points.windows(2) {
+                if let [a, b] = w {
+                    assert!(two.segment_inside(*a, *b), "a link left the region: {a:?} {b:?}");
+                }
+            }
+        }
     }
 
     #[test]
@@ -408,6 +726,7 @@ mod tests {
             kind: PathKind::OuterPerimeter,
             points: vec![Point2::new(0.0, 0.0), Point2::new(1.0, 0.0), Point2::new(1.0, 1.0)],
             closed: true,
+            tool: 0,
         };
         start_near(&mut ring, Point2::new(2.0, 2.0));
         assert_eq!(ring.start(), Some(Point2::new(1.0, 1.0)));
@@ -423,11 +742,13 @@ mod tests {
             kind: PathKind::SolidInfill,
             points: vec![Point2::new(10.0, 0.0), Point2::new(20.0, 0.0)],
             closed: false,
+            tool: 0,
         };
         let b = ToolPath {
             kind: PathKind::SolidInfill,
             points: vec![Point2::new(5.0, 1.0), Point2::new(0.0, 1.0)],
             closed: false,
+            tool: 0,
         };
         let (ordered, end) = order_paths(vec![a, b], Point2::new(0.0, 0.0));
         assert_eq!(ordered.first().and_then(|p| p.start()), Some(Point2::new(0.0, 1.0)));
@@ -446,6 +767,7 @@ mod tests {
                 Point2::new(0.0, 1.0),
             ],
             closed: true,
+            tool: 0,
         };
         let (ordered, end) = order_paths(vec![ring], Point2::new(5.0, 5.0));
         assert_eq!(ordered.first().and_then(|p| p.start()), Some(Point2::new(1.0, 1.0)));

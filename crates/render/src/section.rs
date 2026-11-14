@@ -94,6 +94,8 @@ pub struct Stitched {
     pub loops: Vec<Vec<Point2>>,
     /// Chains that could not be closed and were dropped (a mesh defect).
     pub dropped_chains: usize,
+    /// Chains that could not be closed, kept when asked for (else empty).
+    pub open: Vec<Vec<Point2>>,
 }
 
 /// Join directed segments into closed loops.
@@ -103,6 +105,13 @@ pub struct Stitched {
 /// `JOIN_TOLERANCE` (in either direction), then close chains whose own gap is
 /// under `CLOSE_GAP`. Whatever is still open is dropped and counted.
 pub fn stitch(segs: &[Segment]) -> Stitched {
+    stitch_with(segs, CLOSE_GAP, false)
+}
+
+/// Like [`stitch`]: chains whose own gap is up to `close_gap` mm are closed
+/// (0 closes none), and with `keep_open` what stays open is returned in
+/// `open` instead of being dropped.
+pub fn stitch_with(segs: &[Segment], close_gap: f64, keep_open: bool) -> Stitched {
     let mut starts: HashMap<Key, Vec<usize>> = HashMap::with_capacity(segs.len());
     for (i, s) in segs.iter().enumerate() {
         starts.entry(key(s.a)).or_default().push(i);
@@ -150,25 +159,28 @@ pub fn stitch(segs: &[Segment]) -> Stitched {
     }
 
     let mut dropped = 0usize;
+    let mut kept = Vec::new();
+    let close_gap = if close_gap.is_finite() { close_gap.max(0.0) } else { 0.0 };
     if !open.is_empty() {
         if open.len() <= MAX_OPEN_CHAINS_TO_JOIN {
             join_open_chains(&mut open);
         }
         for chain in open {
             match (chain.first(), chain.last()) {
-                (Some(a), Some(b)) if chain.len() >= 3 && a.distance(*b) <= CLOSE_GAP => {
+                (Some(a), Some(b)) if chain.len() >= 3 && a.distance(*b) <= close_gap.max(1e-9) => {
                     let mut ring = chain;
                     if ring.first().zip(ring.last()).is_some_and(|(a, b)| a.same(*b)) {
                         ring.pop();
                     }
                     loops.push(ring);
                 }
+                _ if keep_open && chain.len() >= 2 => kept.push(chain),
                 _ => dropped += 1,
             }
         }
     }
     loops.retain(|l| l.len() >= 3);
-    Stitched { loops, dropped_chains: dropped }
+    Stitched { loops, dropped_chains: dropped, open: kept }
 }
 
 /// Greedily append chains whose start (or reversed end) meets another chain's end.
@@ -207,6 +219,89 @@ fn join_open_chains(open: &mut Vec<Vec<Point2>>) {
             }
         }
     }
+}
+
+/// Outlines are simplified to this tolerance (mm) after slicing: a vertex
+/// that moves the outline by less is dropped. Far finer than a nozzle can
+/// draw; it only removes the dense facets of finely tessellated curves, which
+/// otherwise turn into many thousands of tiny G-code moves.
+pub const SIMPLIFY_TOLERANCE: f64 = 0.01;
+
+fn distance_to_segment(p: Point2, a: Point2, b: Point2) -> f64 {
+    let (dx, dy) = (b.x - a.x, b.y - a.y);
+    let len2 = dx * dx + dy * dy;
+    let t = if len2 > 0.0 {
+        (((p.x - a.x) * dx + (p.y - a.y) * dy) / len2).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let (cx, cy) = (a.x + t * dx, a.y + t * dy);
+    ((p.x - cx).powi(2) + (p.y - cy).powi(2)).sqrt()
+}
+
+/// Douglas–Peucker on an open polyline, without recursion: the ends are
+/// always kept, and a point stays when dropping it would move the line by
+/// more than `tol`.
+pub fn simplify_line(points: &[Point2], tol: f64) -> Vec<Point2> {
+    let n = points.len();
+    if n < 3 || !(tol.is_finite() && tol > 0.0) {
+        return points.to_vec();
+    }
+    let mut keep = vec![false; n];
+    keep[0] = true;
+    keep[n - 1] = true;
+    let mut stack = vec![(0usize, n - 1)];
+    while let Some((lo, hi)) = stack.pop() {
+        if hi <= lo + 1 {
+            continue;
+        }
+        let (Some(&a), Some(&b)) = (points.get(lo), points.get(hi)) else { continue };
+        let mut far = (0.0, lo);
+        for (k, p) in points.iter().enumerate().take(hi).skip(lo + 1) {
+            let d = distance_to_segment(*p, a, b);
+            if d > far.0 {
+                far = (d, k);
+            }
+        }
+        if far.0 > tol {
+            if let Some(k) = keep.get_mut(far.1) {
+                *k = true;
+            }
+            stack.push((lo, far.1));
+            stack.push((far.1, hi));
+        }
+    }
+    points.iter().zip(keep).filter(|(_, k)| *k).map(|(p, _)| *p).collect()
+}
+
+/// [`simplify_line`] for a closed ring (first point not repeated at the end).
+/// The ring is split at its first point and the point farthest from it, so
+/// both halves keep their shape. A ring that would fall below three points is
+/// returned unchanged.
+pub fn simplify_ring(points: &[Point2], tol: f64) -> Vec<Point2> {
+    let n = points.len();
+    if n < 4 {
+        return points.to_vec();
+    }
+    let Some(&first) = points.first() else { return points.to_vec() };
+    let mut far = (0.0, 0usize);
+    for (k, p) in points.iter().enumerate() {
+        let d = (p.x - first.x).powi(2) + (p.y - first.y).powi(2);
+        if d > far.0 {
+            far = (d, k);
+        }
+    }
+    let split = far.1;
+    if split == 0 || split >= n {
+        return points.to_vec();
+    }
+    let mut a = simplify_line(&points[..=split], tol);
+    let mut back: Vec<Point2> = points[split..].to_vec();
+    back.push(first);
+    let b = simplify_line(&back, tol);
+    // a ends at the split point and b starts there; b ends at the first point
+    a.extend(b.iter().skip(1).take(b.len().saturating_sub(2)));
+    if a.len() < 3 { points.to_vec() } else { a }
 }
 
 #[cfg(test)]
@@ -274,5 +369,51 @@ mod tests {
     #[test]
     fn stitching_nothing_is_fine() {
         assert_eq!(stitch(&[]), Stitched::default());
+    }
+
+    #[test]
+    fn dense_circles_simplify_and_keep_their_shape() {
+        // a 10 mm circle as 3600 points: facets far below the tolerance
+        let n = 3600;
+        let ring: Vec<Point2> = (0..n)
+            .map(|k| {
+                let a = k as f64 / n as f64 * std::f64::consts::TAU;
+                Point2::new(10.0 * a.cos(), 10.0 * a.sin())
+            })
+            .collect();
+        let s = simplify_ring(&ring, SIMPLIFY_TOLERANCE);
+        assert!(s.len() < n / 5, "{} points left", s.len());
+        assert!(s.len() >= 3);
+        // every original point stays within the tolerance of the result
+        for p in &ring {
+            let d = (0..s.len())
+                .map(|k| distance_to_segment(*p, s[k], s[(k + 1) % s.len()]))
+                .fold(f64::INFINITY, f64::min);
+            assert!(d <= SIMPLIFY_TOLERANCE + 1e-9, "moved by {d}");
+        }
+        // area kept
+        let area = |r: &[Point2]| {
+            (0..r.len())
+                .map(|k| r[k].x * r[(k + 1) % r.len()].y - r[(k + 1) % r.len()].x * r[k].y)
+                .sum::<f64>()
+                / 2.0
+        };
+        assert!((area(&s) - area(&ring)).abs() / area(&ring) < 1e-3);
+    }
+
+    #[test]
+    fn small_rings_and_bad_tolerances_are_left_alone() {
+        let tri = vec![Point2::new(0.0, 0.0), Point2::new(1.0, 0.0), Point2::new(0.0, 1.0)];
+        assert_eq!(simplify_ring(&tri, 0.01), tri);
+        let sq = vec![
+            Point2::new(0.0, 0.0),
+            Point2::new(0.5, 0.0),
+            Point2::new(1.0, 0.0),
+            Point2::new(1.0, 1.0),
+            Point2::new(0.0, 1.0),
+        ];
+        assert_eq!(simplify_ring(&sq, 0.01).len(), 4);
+        assert_eq!(simplify_line(&sq, f64::NAN), sq);
+        assert!(simplify_line(&[], 0.01).is_empty());
     }
 }

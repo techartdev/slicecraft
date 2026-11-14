@@ -7,27 +7,46 @@
 
 use crate::camera::{Frame, Projected};
 use eframe::egui::{Color32, Mesh, Pos2, Shape};
-use slicecraft_doc::{Document, PrintSettings};
+use slicecraft_doc::{Document, ModelRole, PrintSettings};
 use slicecraft_geom::{Bounds3, MeshReport, Vec3};
 use slicecraft_io::path_speed;
 use slicecraft_render::{LayerPaths, PathKind};
 use std::collections::BTreeSet;
 
 /// Most model triangles drawn per frame; larger models are thinned evenly.
-pub const MAX_DRAWN_TRIANGLES: usize = 400_000;
+pub const MAX_DRAWN_TRIANGLES: usize = 1_500_000;
 /// Most toolpath segments drawn per frame, newest layers first.
-pub const MAX_DRAWN_SEGMENTS: usize = 200_000;
+pub const MAX_DRAWN_SEGMENTS: usize = 3_000_000;
 
 pub const MODEL: Color32 = Color32::from_rgb(0x6f, 0xa8, 0xdc);
 pub const MODEL_SELECTED: Color32 = Color32::from_rgb(0xf2, 0xa6, 0x4b);
 pub const MODEL_OUTSIDE: Color32 = Color32::from_rgb(0xd9, 0x55, 0x55);
+/// A model printed as support.
+pub const MODEL_SUPPORT: Color32 = Color32::from_rgb(0xb8, 0xb8, 0xb0);
+/// A model that cuts the others.
+pub const MODEL_CUTTER: Color32 = Color32::from_rgb(0xc0, 0x60, 0xc8);
 pub const TRAVEL: Color32 = Color32::from_rgb(0x9a, 0xa4, 0xb4);
 pub const RETRACTION: Color32 = Color32::from_rgb(0xff, 0x4f, 0x8b);
-const BED: Color32 = Color32::from_rgb(0x2b, 0x2e, 0x33);
-const GRID_MINOR: Color32 = Color32::from_rgb(0x3a, 0x3e, 0x45);
-const GRID_MAJOR: Color32 = Color32::from_rgb(0x50, 0x55, 0x5e);
-const BED_EDGE: Color32 = Color32::from_rgb(0x8a, 0x90, 0x9a);
-const VOLUME: Color32 = Color32::from_rgba_premultiplied(0x40, 0x44, 0x4a, 0x60);
+/// The bed's colours: plate, minor grid, major grid, edge, build volume.
+fn bed_colours(dark: bool) -> [Color32; 5] {
+    if dark {
+        [
+            Color32::from_rgb(0x2b, 0x2e, 0x33),
+            Color32::from_rgb(0x3a, 0x3e, 0x45),
+            Color32::from_rgb(0x50, 0x55, 0x5e),
+            Color32::from_rgb(0x8a, 0x90, 0x9a),
+            Color32::from_rgba_premultiplied(0x40, 0x44, 0x4a, 0x60),
+        ]
+    } else {
+        [
+            Color32::from_rgb(0xf4, 0xf5, 0xf7),
+            Color32::from_rgb(0xdc, 0xe0, 0xe6),
+            Color32::from_rgb(0xbd, 0xc4, 0xce),
+            Color32::from_rgb(0x7d, 0x86, 0x92),
+            Color32::from_rgba_premultiplied(0x50, 0x58, 0x64, 0x50),
+        ]
+    }
+}
 
 /// Feature colours, shared by the view and its legend.
 pub fn kind_color(kind: PathKind) -> Color32 {
@@ -38,6 +57,15 @@ pub fn kind_color(kind: PathKind) -> Color32 {
         PathKind::InnerPerimeter => Color32::from_rgb(0xf0, 0xd0, 0x50),
         PathKind::SolidInfill => Color32::from_rgb(0xb8, 0x6b, 0xe8),
         PathKind::SparseInfill => Color32::from_rgb(0xe0, 0x56, 0x56),
+        PathKind::Support => Color32::from_rgb(0x9a, 0xa4, 0xae),
+        PathKind::SupportInterface => Color32::from_rgb(0x5c, 0x8a, 0x6e),
+        PathKind::Raft => Color32::from_rgb(0x8a, 0x7a, 0x5c),
+        PathKind::GapFill => Color32::from_rgb(0xe8, 0x8a, 0xc0),
+        PathKind::Bridge => Color32::from_rgb(0x3c, 0xb4, 0xe6),
+        PathKind::TopSolid => Color32::from_rgb(0xd0, 0x4a, 0x9a),
+        PathKind::Ironing => Color32::from_rgb(0xf0, 0xf0, 0xa0),
+        PathKind::PrimeTower => Color32::from_rgb(0x9a, 0x7a, 0xd8),
+        PathKind::OozeShield => Color32::from_rgb(0x7a, 0x9a, 0xb0),
     }
 }
 
@@ -79,6 +107,12 @@ pub struct Builder {
 }
 
 impl Builder {
+    /// Quads drawn so far, for tests (a line is one quad).
+    #[cfg(test)]
+    fn line_count(&self) -> usize {
+        self.mesh.indices.len() / 6
+    }
+
     pub fn tri(&mut self, a: Pos2, b: Pos2, c: Pos2, color: Color32) {
         let i = self.mesh.vertices.len() as u32;
         self.mesh.colored_vertex(a, color);
@@ -146,7 +180,14 @@ impl Default for BedStyle {
 }
 
 /// The bed plate, its grid and the build volume outline.
-pub fn bed(out: &mut Builder, f: &Frame, width: f64, depth: f64, height: f64, style: BedStyle) {
+pub fn bed(
+    out: &mut Builder,
+    f: &Frame,
+    (width, depth, height): (f64, f64, f64),
+    style: BedStyle,
+    dark: bool,
+) {
+    let [plate, grid_minor, grid_major, edge, volume] = bed_colours(dark);
     let c = [
         Vec3::new(0.0, 0.0, 0.0),
         Vec3::new(width, 0.0, 0.0),
@@ -168,8 +209,8 @@ pub fn bed(out: &mut Builder, f: &Frame, width: f64, depth: f64, height: f64, st
                 f.project(Vec3::new(x0, y1, 0.0)),
             ];
             if let [Some(a), Some(b), Some(cc), Some(d)] = q {
-                out.tri(pos(a), pos(b), pos(cc), BED);
-                out.tri(pos(a), pos(cc), pos(d), BED);
+                out.tri(pos(a), pos(b), pos(cc), plate);
+                out.tri(pos(a), pos(cc), pos(d), plate);
             }
         }
     }
@@ -179,22 +220,22 @@ pub fn bed(out: &mut Builder, f: &Frame, width: f64, depth: f64, height: f64, st
         let lines_y = (depth / step).floor() as usize;
         for k in 1..=lines_x.min(2000) {
             let x = k as f64 * step;
-            let col = if k % 5 == 0 { GRID_MAJOR } else { GRID_MINOR };
+            let col = if k % 5 == 0 { grid_major } else { grid_minor };
             out.world_line(f, Vec3::new(x, 0.0, 0.0), Vec3::new(x, depth, 0.0), 1.0, col);
         }
         for k in 1..=lines_y.min(2000) {
             let y = k as f64 * step;
-            let col = if k % 5 == 0 { GRID_MAJOR } else { GRID_MINOR };
+            let col = if k % 5 == 0 { grid_major } else { grid_minor };
             out.world_line(f, Vec3::new(0.0, y, 0.0), Vec3::new(width, y, 0.0), 1.0, col);
         }
     }
     for k in 0..4 {
         if let (Some(&a), Some(&b)) = (c.get(k), c.get((k + 1) % 4)) {
-            out.world_line(f, a, b, 1.5, BED_EDGE);
+            out.world_line(f, a, b, 1.5, edge);
             if style.volume {
                 let up = Vec3::new(0.0, 0.0, height);
-                out.world_line(f, a + up, b + up, 1.0, VOLUME);
-                out.world_line(f, a, a + up, 1.0, VOLUME);
+                out.world_line(f, a + up, b + up, 1.0, volume);
+                out.world_line(f, a, a + up, 1.0, volume);
             }
         }
     }
@@ -224,6 +265,7 @@ pub struct ObjectGeometry {
     pub bounds: Bounds3,
     pub outside_bed: bool,
     pub visible: bool,
+    pub role: ModelRole,
     /// Facts about the placed mesh, for the analysis window.
     pub report: MeshReport,
 }
@@ -243,6 +285,7 @@ impl ModelGeometry {
                     bounds: world.bounds(),
                     outside_bed: o.visible && outside.contains(&o.name),
                     visible: o.visible,
+                    role: o.role,
                     report: world.report(),
                 }
             })
@@ -269,10 +312,105 @@ impl ModelGeometry {
 #[derive(Debug, Clone, Copy)]
 pub struct ModelStyle<'a> {
     pub selected: &'a BTreeSet<usize>,
+    /// Support to draw in the same depth order as the models.
+    pub support: &'a [Prism],
     /// 1 = opaque, lower ghosts the models.
     pub alpha: f32,
     /// Hide everything above this height (a section view).
     pub cut_z: Option<f64>,
+    /// Draw triangle edges instead of shaded faces.
+    pub wireframe: bool,
+}
+
+/// A vertical prism: an outline extruded from `z0` to `z1`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Prism {
+    pub outline: Vec<slicecraft_geom::Point2>,
+    pub z0: f64,
+    pub z1: f64,
+}
+
+impl Prism {
+    /// Footprint box: (x0, y0, x1, y1).
+    pub fn footprint(&self) -> Option<(f64, f64, f64, f64)> {
+        let mut it = self.outline.iter();
+        let first = it.next()?;
+        let mut b = (first.x, first.y, first.x, first.y);
+        for p in it {
+            b = (b.0.min(p.x), b.1.min(p.y), b.2.max(p.x), b.3.max(p.y));
+        }
+        Some(b)
+    }
+
+    /// Distance along the ray to where it enters the prism's box, if it does.
+    pub fn hit(&self, origin: Vec3, dir: Vec3) -> Option<f64> {
+        let (x0, y0, x1, y1) = self.footprint()?;
+        let mut t0 = 0.0f64;
+        let mut t1 = f64::INFINITY;
+        for (o, d, lo, hi) in [
+            (origin.x, dir.x, x0, x1),
+            (origin.y, dir.y, y0, y1),
+            (origin.z, dir.z, self.z0, self.z1),
+        ] {
+            if d.abs() < 1e-12 {
+                if o < lo || o > hi {
+                    return None;
+                }
+                continue;
+            }
+            let (a, b) = ((lo - o) / d, (hi - o) / d);
+            t0 = t0.max(a.min(b));
+            t1 = t1.min(a.max(b));
+            if t0 > t1 {
+                return None;
+            }
+        }
+        Some(t0)
+    }
+}
+
+/// Most support prisms drawn; past it the preview is thinned.
+pub const MAX_PRISMS: usize = 40_000;
+
+/// Stack support layers into prisms: an outline that repeats on consecutive
+/// layers (pillars always do) becomes one tall prism.
+pub fn support_prisms(layers: &[slicecraft_engine::SupportPreviewLayer]) -> Vec<Prism> {
+    use std::collections::HashMap;
+    let key = |ring: &[slicecraft_geom::Point2]| -> Vec<(i64, i64)> {
+        ring.iter()
+            .map(|p| ((p.x * 1000.0).round() as i64, (p.y * 1000.0).round() as i64))
+            .collect()
+    };
+    let mut done = Vec::new();
+    // open prisms: outline key -> (prism, top layer index)
+    let mut open: HashMap<Vec<(i64, i64)>, (Prism, usize)> = HashMap::new();
+    for l in layers {
+        let (bottom, top, index) = (l.slot.top - l.slot.height, l.slot.top, l.slot.index);
+        let mut next = HashMap::new();
+        for poly in &l.area.polygons {
+            let k = key(&poly.outer);
+            let prism = match open.remove(&k) {
+                Some((mut p, last)) if last + 1 == index => {
+                    p.z1 = top;
+                    p
+                }
+                Some((p, _)) => {
+                    done.push(p);
+                    Prism { outline: poly.outer.clone(), z0: bottom, z1: top }
+                }
+                None => Prism { outline: poly.outer.clone(), z0: bottom, z1: top },
+            };
+            next.insert(k, (prism, index));
+        }
+        done.extend(open.into_values().map(|(p, _)| p));
+        open = next;
+        if done.len() > MAX_PRISMS {
+            break;
+        }
+    }
+    done.extend(open.into_values().map(|(p, _)| p));
+    done.truncate(MAX_PRISMS);
+    done
 }
 
 /// Shaded, depth-sorted model triangles.
@@ -283,51 +421,278 @@ pub fn models(out: &mut Builder, f: &Frame, geo: &ModelGeometry, style: ModelSty
     let eye = f.eye();
     let mut drawn: Vec<(f64, [Pos2; 3], Color32)> =
         Vec::with_capacity(total.min(MAX_DRAWN_TRIANGLES));
+    let mut outline: Vec<(Pos2, Pos2)> = Vec::new();
     for (oi, o) in geo.objects.iter().enumerate() {
         let base = if o.outside_bed {
             MODEL_OUTSIDE
         } else if style.selected.contains(&oi) {
             MODEL_SELECTED
         } else {
-            MODEL
+            match o.role {
+                ModelRole::Print => MODEL,
+                ModelRole::Support => MODEL_SUPPORT,
+                ModelRole::Cutter => MODEL_CUTTER,
+            }
         };
-        let alpha = if o.visible { style.alpha } else { style.alpha * 0.25 };
-        for (ti, (v, n)) in o.triangles.iter().enumerate() {
+        let see_through = if o.role == ModelRole::Cutter { 0.45 } else { 1.0 };
+        let alpha = if o.visible { style.alpha * see_through } else { style.alpha * 0.25 };
+        for (ti, (whole, n)) in o.triangles.iter().enumerate() {
             if ti % stride != 0 {
                 continue;
             }
-            if let Some(cut) = style.cut_z
-                && v.iter().all(|p| p.z > cut)
-            {
-                continue;
-            }
-            let centroid = (v[0] + v[1] + v[2]).scale(1.0 / 3.0);
-            let k = match n {
-                Some(n) => {
-                    if n.dot(eye - centroid) < 0.0 {
-                        // inside faces show only through a section cut, darker
-                        if style.cut_z.is_none() {
-                            continue;
-                        }
-                        0.25
-                    } else {
-                        0.32 + 0.68 * n.dot(light).max(0.0)
+            // a section view keeps what is below the cut; triangles across it
+            // are clipped, and the cut edge is drawn as the section outline
+            let pieces = match style.cut_z {
+                Some(cut) => {
+                    let (pieces, edge) = clip_below(whole, cut);
+                    if let Some((a, b)) = edge
+                        && o.visible
+                        && let Some((pa, pb)) = f.project_segment(a, b)
+                    {
+                        outline.push((pos(pa), pos(pb)));
                     }
+                    pieces
                 }
+                None => vec![*whole],
+            };
+            for v in &pieces {
+                let centroid = (v[0] + v[1] + v[2]).scale(1.0 / 3.0);
+                if style.wireframe {
+                    let (Some(a), Some(b), Some(c)) =
+                        (f.project(v[0]), f.project(v[1]), f.project(v[2]))
+                    else {
+                        continue;
+                    };
+                    let col = base.gamma_multiply(alpha * 0.8);
+                    out.line(pos(a), pos(b), 1.0, col);
+                    out.line(pos(b), pos(c), 1.0, col);
+                    out.line(pos(c), pos(a), 1.0, col);
+                    continue;
+                }
+                let k = match n {
+                    Some(n) => {
+                        if n.dot(f.toward_viewer(centroid)) < 0.0 {
+                            // inside faces show only through a section cut, darker
+                            if style.cut_z.is_none() {
+                                continue;
+                            }
+                            0.25
+                        } else {
+                            0.32 + 0.68 * n.dot(light).max(0.0)
+                        }
+                    }
+                    None => 0.6,
+                };
+                let (Some(a), Some(b), Some(c)) =
+                    (f.project(v[0]), f.project(v[1]), f.project(v[2]))
+                else {
+                    continue;
+                };
+                let depth = (a.depth + b.depth + c.depth) / 3.0;
+                let col = shade(base, k).gamma_multiply(alpha);
+                drawn.push((depth, [pos(a), pos(b), pos(c)], col));
+            }
+        }
+    }
+    let support_base = kind_color(PathKind::Support);
+    for prism in style.support {
+        if let Some(cut) = style.cut_z
+            && prism.z0 > cut
+        {
+            continue;
+        }
+        let z1 = style.cut_z.map_or(prism.z1, |c| prism.z1.min(c));
+        let n = prism.outline.len();
+        for i in 0..n {
+            let (Some(a), Some(b)) = (prism.outline.get(i), prism.outline.get((i + 1) % n)) else {
+                continue;
+            };
+            // outer rings run counter-clockwise: the outward normal is (dy, -dx)
+            let normal = Vec3::new(b.y - a.y, a.x - b.x, 0.0).normalized();
+            let corners = [
+                Vec3::new(a.x, a.y, prism.z0),
+                Vec3::new(b.x, b.y, prism.z0),
+                Vec3::new(b.x, b.y, z1),
+                Vec3::new(a.x, a.y, z1),
+            ];
+            let centre = (corners[0] + corners[2]).scale(0.5);
+            let k = match normal {
+                Some(nv) if nv.dot(eye - centre) < 0.0 => continue,
+                Some(nv) => 0.35 + 0.65 * nv.dot(light).max(0.0),
                 None => 0.6,
             };
-            let (Some(a), Some(b), Some(c)) = (f.project(v[0]), f.project(v[1]), f.project(v[2]))
-            else {
-                continue;
-            };
-            let depth = (a.depth + b.depth + c.depth) / 3.0;
-            let col = shade(base, k).gamma_multiply(alpha);
-            drawn.push((depth, [pos(a), pos(b), pos(c)], col));
+            let col = shade(support_base, k).gamma_multiply(0.9);
+            let pr: Vec<_> = corners.iter().filter_map(|c| f.project(*c)).collect();
+            let [p0, p1, p2, p3] = pr.as_slice() else { continue };
+            let depth = (p0.depth + p1.depth + p2.depth + p3.depth) / 4.0;
+            drawn.push((depth, [pos(*p0), pos(*p1), pos(*p2)], col));
+            drawn.push((depth, [pos(*p0), pos(*p2), pos(*p3)], col));
+        }
+        // the top, for convex outlines (every pillar)
+        if n >= 3 && is_convex(&prism.outline) {
+            let top: Vec<_> =
+                prism.outline.iter().filter_map(|p| f.project(Vec3::new(p.x, p.y, z1))).collect();
+            if let Some((first, rest)) = top.split_first() {
+                let col = shade(support_base, 0.95).gamma_multiply(0.9);
+                for w in rest.windows(2) {
+                    if let [b, c] = w {
+                        let depth = (first.depth + b.depth + c.depth) / 3.0;
+                        drawn.push((depth, [pos(*first), pos(*b), pos(*c)], col));
+                    }
+                }
+            }
         }
     }
     drawn.sort_by(|x, y| y.0.total_cmp(&x.0));
     for (_, [a, b, c], col) in drawn {
         out.tri(a, b, c, col);
+    }
+    for (a, b) in outline {
+        out.line(a, b, 2.5, SECTION_OUTLINE);
+    }
+}
+
+/// The outline a section view cuts through the visible models, for the GPU
+/// view (which clips the models itself).
+pub fn section_outline(out: &mut Builder, f: &Frame, geo: &ModelGeometry, cut: f64) {
+    for o in geo.objects.iter().filter(|o| o.visible) {
+        if o.bounds.is_empty() || o.bounds.min().z > cut || o.bounds.max().z < cut {
+            continue;
+        }
+        for (v, _) in &o.triangles {
+            let lo = v[0].z.min(v[1].z).min(v[2].z);
+            let hi = v[0].z.max(v[1].z).max(v[2].z);
+            if lo > cut || hi <= cut {
+                continue;
+            }
+            if let (_, Some((a, b))) = clip_below(v, cut)
+                && let Some((pa, pb)) = f.project_segment(a, b)
+            {
+                out.line(pos(pa), pos(pb), 2.5, SECTION_OUTLINE);
+            }
+        }
+    }
+}
+
+/// Where the nozzle is after the moves shown on `last` (all of them, or the
+/// first `moves_on_last`), and the retraction marks of that layer.
+pub fn nozzle_at(
+    layers: &[PreviewLayer],
+    last: usize,
+    moves_on_last: Option<usize>,
+) -> Option<(Vec3, &[Vec3])> {
+    let layer = layers.get(last.min(layers.len().checked_sub(1)?))?;
+    let n = moves_on_last.unwrap_or(usize::MAX).min(layer.segs.len());
+    let head = n.checked_sub(1).and_then(|i| layer.segs.get(i)).map(|s| s.b)?;
+    Some((head, &layer.retractions))
+}
+
+/// The colour of the outline a section view cuts through the models.
+pub const SECTION_OUTLINE: Color32 = Color32::from_rgb(0xff, 0xd8, 0x4a);
+
+/// The part of a triangle at or below `z`, as triangles, and the segment
+/// where the plane cuts it (when it does).
+pub fn clip_below(v: &[Vec3; 3], z: f64) -> (Vec<[Vec3; 3]>, Option<(Vec3, Vec3)>) {
+    let below = |p: &Vec3| p.z <= z;
+    let n_below = v.iter().filter(|p| below(p)).count();
+    match n_below {
+        3 => return (vec![*v], None),
+        0 => return (Vec::new(), None),
+        _ => {}
+    }
+    let mut poly: Vec<Vec3> = Vec::with_capacity(4);
+    let mut cut: Vec<Vec3> = Vec::with_capacity(2);
+    for i in 0..3 {
+        let (a, b) = (v[i], v[(i + 1) % 3]);
+        if below(&a) {
+            poly.push(a);
+        }
+        if below(&a) != below(&b) {
+            let t = (z - a.z) / (b.z - a.z);
+            let p = a + (b - a).scale(t);
+            poly.push(p);
+            cut.push(p);
+        }
+    }
+    let edge = match cut.as_slice() {
+        [a, b] => Some((*a, *b)),
+        _ => None,
+    };
+    let mut tris = Vec::with_capacity(2);
+    if let Some((first, rest)) = poly.split_first() {
+        for w in rest.windows(2) {
+            if let [b, c] = w {
+                tris.push([*first, *b, *c]);
+            }
+        }
+    }
+    (tris, edge)
+}
+
+fn is_convex(ring: &[slicecraft_geom::Point2]) -> bool {
+    let n = ring.len();
+    let mut sign = 0.0f64;
+    for i in 0..n {
+        let (Some(a), Some(b), Some(c)) =
+            (ring.get(i), ring.get((i + 1) % n), ring.get((i + 2) % n))
+        else {
+            return false;
+        };
+        let cross = (b.x - a.x) * (c.y - b.y) - (b.y - a.y) * (c.x - b.x);
+        if cross.abs() < 1e-12 {
+            continue;
+        }
+        if sign == 0.0 {
+            sign = cross.signum();
+        } else if cross.signum() != sign {
+            return false;
+        }
+    }
+    true
+}
+
+/// Support edit boxes: a tinted footprint on the bed and the edges of the box
+/// up to `height`.
+pub fn support_edits(
+    out: &mut Builder,
+    f: &Frame,
+    edits: &[slicecraft_doc::SupportEdit],
+    height: f64,
+) {
+    for e in edits {
+        let col = match e.kind {
+            slicecraft_doc::SupportEditKind::Add => Color32::from_rgb(0x4c, 0xc0, 0x6a),
+            slicecraft_doc::SupportEditKind::Block => Color32::from_rgb(0xe0, 0x50, 0x50),
+        };
+        let (z0, z1) = (e.z0.max(0.0), e.z1.min(height));
+        let c = [(e.x0, e.y0), (e.x1, e.y0), (e.x1, e.y1), (e.x0, e.y1)];
+        let fill: Vec<_> =
+            c.iter().filter_map(|(x, y)| f.project(Vec3::new(*x, *y, z0 + 0.05))).collect();
+        if let [a, b, cc, d] = fill.as_slice() {
+            let tint = col.gamma_multiply(0.25);
+            out.tri(pos(*a), pos(*b), pos(*cc), tint);
+            out.tri(pos(*a), pos(*cc), pos(*d), tint);
+        }
+        for i in 0..4 {
+            let (Some(&(ax, ay)), Some(&(bx, by))) = (c.get(i), c.get((i + 1) % 4)) else {
+                continue;
+            };
+            out.world_line(f, Vec3::new(ax, ay, z0), Vec3::new(bx, by, z0), 2.0, col);
+            out.world_line(
+                f,
+                Vec3::new(ax, ay, z1),
+                Vec3::new(bx, by, z1),
+                1.0,
+                col.gamma_multiply(0.6),
+            );
+            out.world_line(
+                f,
+                Vec3::new(ax, ay, z0),
+                Vec3::new(ax, ay, z1),
+                1.0,
+                col.gamma_multiply(0.6),
+            );
+        }
     }
 }
 
@@ -346,6 +711,10 @@ pub struct PreviewSeg {
     pub kind: SegKind,
     /// Feed speed, mm/s.
     pub speed: f32,
+    /// The tool that prints it.
+    pub tool: u8,
+    /// Plastic pushed through the nozzle, mm³/s.
+    pub flow: f32,
 }
 
 /// A layer's moves in print order.
@@ -382,21 +751,28 @@ pub fn build_preview(layers: &[LayerPaths], s: &PrintSettings) -> Vec<PreviewLay
                     b: s0,
                     kind: SegKind::Travel,
                     speed: s.travel_speed as f32,
+                    tool: p.tool,
+                    flow: 0.0,
                 });
             }
             first_in_layer = false;
             let speed = path_speed(s, p.kind, l.index) as f32;
             let kind = SegKind::Path(p.kind);
+            let tool = p.tool;
+            let width = slicecraft_io::gcode::layer_line_width(s, l.index);
+            let flow = (f64::from(speed)
+                * slicecraft_io::gcode::bead_area(width, l.height)
+                * slicecraft_io::gcode::kind_flow(s, p.kind)) as f32;
             for w in p.points.windows(2) {
                 if let (Some(&a), Some(&b)) = (w.first(), w.get(1)) {
-                    pl.segs.push(PreviewSeg { a: at(a), b: at(b), kind, speed });
+                    pl.segs.push(PreviewSeg { a: at(a), b: at(b), kind, speed, tool, flow });
                 }
             }
             if p.closed
                 && p.points.len() > 2
                 && let (Some(&a), Some(&b)) = (p.points.last(), p.points.first())
             {
-                pl.segs.push(PreviewSeg { a: at(a), b: at(b), kind, speed });
+                pl.segs.push(PreviewSeg { a: at(a), b: at(b), kind, speed, tool, flow });
             }
             last = p.end().map(at);
         }
@@ -407,11 +783,11 @@ pub fn build_preview(layers: &[LayerPaths], s: &PrintSettings) -> Vec<PreviewLay
 
 /// Which toolpath features are drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct KindFilter(pub [bool; 6]);
+pub struct KindFilter(pub [bool; PathKind::ALL.len()]);
 
 impl Default for KindFilter {
     fn default() -> Self {
-        Self([true; 6])
+        Self([true; PathKind::ALL.len()])
     }
 }
 
@@ -428,18 +804,78 @@ pub enum Coloring {
     Feature,
     Speed,
     Height,
+    Tool,
+    Flow,
 }
 
 impl Coloring {
-    pub const ALL: [Coloring; 3] = [Coloring::Feature, Coloring::Speed, Coloring::Height];
+    pub const ALL: [Coloring; 5] =
+        [Coloring::Feature, Coloring::Speed, Coloring::Height, Coloring::Tool, Coloring::Flow];
 
     pub fn label(self) -> &'static str {
         match self {
             Coloring::Feature => "Feature type",
             Coloring::Speed => "Speed",
             Coloring::Height => "Height (Z)",
+            Coloring::Tool => "Tool",
+            Coloring::Flow => "Flow rate",
         }
     }
+}
+
+/// A colour per tool, repeating after eight.
+pub fn tool_color(tool: u8) -> Color32 {
+    const TOOLS: [Color32; 8] = [
+        Color32::from_rgb(0xe8, 0x8a, 0x3c),
+        Color32::from_rgb(0x4c, 0x9b, 0xe8),
+        Color32::from_rgb(0x6c, 0xc4, 0x5a),
+        Color32::from_rgb(0xd9, 0x5c, 0xc8),
+        Color32::from_rgb(0xe8, 0xd2, 0x4c),
+        Color32::from_rgb(0x5c, 0xd6, 0xd0),
+        Color32::from_rgb(0xb0, 0x7a, 0x50),
+        Color32::from_rgb(0xa8, 0xa8, 0xb8),
+    ];
+    TOOLS.get(usize::from(tool) % TOOLS.len()).copied().unwrap_or(Color32::GRAY)
+}
+
+/// Flow range over a whole slice, mm³/s, for the flow colouring.
+pub fn flow_range(layers: &[PreviewLayer]) -> (f32, f32) {
+    let mut lo = f32::INFINITY;
+    let mut hi = f32::NEG_INFINITY;
+    for s in layers.iter().flat_map(|l| l.segs.iter()) {
+        if matches!(s.kind, SegKind::Path(_)) && s.flow.is_finite() {
+            lo = lo.min(s.flow);
+            hi = hi.max(s.flow);
+        }
+    }
+    if lo.is_finite() && hi.is_finite() { (lo, hi) } else { (0.0, 1.0) }
+}
+
+/// The tools a slice uses, ascending.
+/// For each kind in `PathKind::ALL`, whether any move of the job has it.
+pub fn kinds_used(layers: &[PreviewLayer]) -> Vec<bool> {
+    let mut used = vec![false; PathKind::ALL.len()];
+    for s in layers.iter().flat_map(|l| l.segs.iter()) {
+        if let SegKind::Path(k) = s.kind
+            && let Some(i) = PathKind::ALL.iter().position(|x| *x == k)
+            && let Some(u) = used.get_mut(i)
+        {
+            *u = true;
+        }
+    }
+    used
+}
+
+pub fn tools_used(layers: &[PreviewLayer]) -> Vec<u8> {
+    let mut t: Vec<u8> = layers
+        .iter()
+        .flat_map(|l| l.segs.iter())
+        .filter(|s| matches!(s.kind, SegKind::Path(_)))
+        .map(|s| s.tool)
+        .collect();
+    t.sort_unstable();
+    t.dedup();
+    t
 }
 
 /// Everything that decides what the toolpath view shows.
@@ -455,6 +891,7 @@ pub struct PreviewStyle {
     pub show_retractions: bool,
     pub width_mm: f64,
     pub speed_range: (f32, f32),
+    pub flow_range: (f32, f32),
     pub z_range: (f64, f64),
 }
 
@@ -468,17 +905,7 @@ pub fn toolpaths(
 ) -> Option<Vec3> {
     let last = style.last_layer.min(layers.len().checked_sub(1)?);
     let first = style.first_layer.min(last);
-    // newest first until the budget is spent, then paint bottom-up
-    let mut budget = MAX_DRAWN_SEGMENTS;
-    let mut start = last + 1;
-    for i in (first..=last).rev() {
-        let n = layers.get(i).map_or(0, |l| l.segs.len());
-        if n > budget {
-            break;
-        }
-        budget -= n;
-        start = i;
-    }
+    let start = first_drawn_layer(layers, first, last);
     let (s_lo, s_hi) = style.speed_range;
     let (z_lo, z_hi) = style.z_range;
     let mut head = None;
@@ -487,6 +914,7 @@ pub fn toolpaths(
         let is_last = i == last;
         let dim = if is_last { 1.0 } else { 0.6 };
         let limit = if is_last { style.moves_on_last.unwrap_or(usize::MAX) } else { usize::MAX };
+        let mut run = Run::default();
         for (n, seg) in layer.segs.iter().enumerate() {
             if n >= limit {
                 break;
@@ -509,18 +937,27 @@ pub fn toolpaths(
                             ramp(f64::from((seg.speed - s_lo) / (s_hi - s_lo).max(1e-3)))
                         }
                         Coloring::Height => ramp((layer.z - z_lo) / (z_hi - z_lo).max(1e-6)),
+                        Coloring::Tool => tool_color(seg.tool),
+                        Coloring::Flow => {
+                            let (f_lo, f_hi) = style.flow_range;
+                            ramp(f64::from((seg.flow - f_lo) / (f_hi - f_lo).max(1e-3)))
+                        }
                     }
                 }
             };
-            let Some((pa, pb)) = f.project_segment(seg.a, seg.b) else { continue };
+            let Some((pa, pb)) = f.project_segment(seg.a, seg.b) else {
+                run.flush(out);
+                continue;
+            };
             let w = if seg.kind == SegKind::Travel {
                 1.0
             } else {
                 let px = style.width_mm * f.scale_at((pa.depth + pb.depth) / 2.0);
                 (if is_last { px.clamp(1.5, 12.0) } else { px.clamp(1.0, 10.0) }) as f32
             };
-            out.line(pos(pa), pos(pb), w, shade(color, dim));
+            run.add(out, pos(pa), pos(pb), w, shade(color, dim));
         }
+        run.flush(out);
         if style.show_retractions && is_last {
             for r in &layer.retractions {
                 if let Some(p) = f.project(*r) {
@@ -530,6 +967,71 @@ pub fn toolpaths(
         }
     }
     head
+}
+
+/// The lowest layer drawn: counting down from `last`, layers are kept while
+/// their moves fit the drawing budget. Simplified outlines keep real jobs far
+/// below it; a job above it shows its top layers whole rather than every
+/// layer cut short.
+pub fn first_drawn_layer(layers: &[PreviewLayer], first: usize, last: usize) -> usize {
+    let mut budget = MAX_DRAWN_SEGMENTS;
+    let mut start = last.saturating_add(1);
+    for i in (first..=last).rev() {
+        let n = layers.get(i).map_or(0, |l| l.segs.len());
+        if n > budget {
+            break;
+        }
+        budget -= n;
+        start = i;
+    }
+    start
+}
+
+/// Consecutive moves of one colour that are each shorter than a pixel or two
+/// on screen are drawn as one line: a dense curve costs a few lines, not
+/// thousands, and looks the same.
+#[derive(Default)]
+struct Run {
+    from: Option<Pos2>,
+    to: Pos2,
+    width: f32,
+    color: Color32,
+}
+
+/// Moves shorter than this on screen (px) join the run before them.
+const MERGE_PX: f32 = 1.5;
+/// A run is drawn once it is this long (px), so curves stay curves.
+const RUN_PX: f32 = 4.0;
+
+impl Run {
+    fn add(&mut self, out: &mut Builder, a: Pos2, b: Pos2, width: f32, color: Color32) {
+        let joins = self.from.is_some()
+            && self.color == color
+            && (self.width - width).abs() < 0.25
+            && (self.to - a).length() < 0.5
+            && (b - a).length() < MERGE_PX;
+        if joins {
+            self.to = b;
+            if let Some(from) = self.from
+                && (self.to - from).length() >= RUN_PX
+            {
+                self.flush(out);
+            }
+            return;
+        }
+        self.flush(out);
+        if (b - a).length() < MERGE_PX {
+            *self = Run { from: Some(a), to: b, width, color };
+        } else {
+            out.line(a, b, width, color);
+        }
+    }
+
+    fn flush(&mut self, out: &mut Builder) {
+        if let Some(from) = self.from.take() {
+            out.line(from, self.to, self.width, self.color);
+        }
+    }
 }
 
 /// The nozzle marker: a small cone over `at`.
@@ -600,14 +1102,113 @@ mod tests {
                         Point2::new(1.0, 1.0),
                     ],
                     closed: true,
+                    tool: 0,
                 },
                 ToolPath {
                     kind: PathKind::SparseInfill,
                     points: vec![Point2::new(30.0, 0.0), Point2::new(40.0, 0.0)],
                     closed: false,
+                    tool: 0,
                 },
             ],
+            inside_travel: Vec::new(),
+            travel_via: Vec::new(),
         }]
+    }
+
+    #[test]
+    fn a_section_keeps_what_is_below_the_cut() {
+        let t = [Vec3::new(0.0, 0.0, 0.0), Vec3::new(10.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 10.0)];
+        let (low, edge) = clip_below(&t, 5.0);
+        assert!(!low.is_empty());
+        for tri in &low {
+            assert!(tri.iter().all(|p| p.z <= 5.0 + 1e-9));
+        }
+        let Some((a, b)) = edge else { return };
+        assert!((a.z - 5.0).abs() < 1e-9 && (b.z - 5.0).abs() < 1e-9);
+        // area below the cut: the triangle minus the top quarter
+        let area = |q: &[Vec3; 3]| (q[1] - q[0]).cross(q[2] - q[0]).length() / 2.0;
+        let kept: f64 = low.iter().map(area).sum();
+        assert!((kept - 50.0 * 0.75).abs() < 1e-6, "{kept}");
+        assert!(clip_below(&t, -1.0).0.is_empty());
+        assert_eq!(clip_below(&t, 20.0).0.len(), 1);
+    }
+
+    #[test]
+    fn every_layer_of_a_large_job_is_drawn() {
+        // 300 layers of 5000 moves: 1.5 million, more than the old budget
+        let seg = PreviewSeg {
+            a: Vec3::ZERO,
+            b: Vec3::new(0.01, 0.0, 0.0),
+            kind: SegKind::Path(PathKind::OuterPerimeter),
+            speed: 30.0,
+            tool: 0,
+            flow: 1.0,
+        };
+        let layer = PreviewLayer { segs: vec![seg; 5000], ..Default::default() };
+        let layers = vec![layer; 300];
+        assert_eq!(first_drawn_layer(&layers, 0, 299), 0);
+        // past the budget the top layers are kept whole
+        let huge = vec![PreviewLayer { segs: vec![seg; 1_000_000], ..Default::default() }; 5];
+        let start = first_drawn_layer(&huge, 0, 4);
+        assert!(start > 0 && start <= 4);
+    }
+
+    #[test]
+    fn tiny_moves_merge_into_few_lines() {
+        let mut out = Builder::default();
+        let mut run = Run::default();
+        let c = Color32::RED;
+        for k in 0..1000 {
+            let x = k as f32 * 0.1;
+            run.add(&mut out, Pos2::new(x, 0.0), Pos2::new(x + 0.1, 0.0), 2.0, c);
+        }
+        run.flush(&mut out);
+        // 100 px of line in 0.1 px steps: about 25 lines of 4 px, not 1000
+        assert!(out.line_count() <= 30, "{}", out.line_count());
+        assert!(out.line_count() >= 20);
+    }
+
+    #[test]
+    fn only_the_kinds_a_job_prints_are_listed() {
+        let layers = build_preview(&two_paths(), &PrintSettings::default());
+        let used = kinds_used(&layers);
+        assert_eq!(used.len(), PathKind::ALL.len());
+        let on: Vec<PathKind> =
+            PathKind::ALL.iter().zip(&used).filter(|(_, u)| **u).map(|(k, _)| *k).collect();
+        assert_eq!(on, vec![PathKind::OuterPerimeter, PathKind::SparseInfill]);
+        assert!(kinds_used(&[]).iter().all(|u| !u));
+    }
+
+    #[test]
+    fn repeated_outlines_stack_into_one_prism() {
+        use slicecraft_engine::SupportPreviewLayer;
+        use slicecraft_engine::pipeline::LayerSlot;
+        use slicecraft_geom::{Point2, Region};
+        let sq = |x: f64| {
+            Region::from_loops(&[vec![
+                Point2::new(x, 0.0),
+                Point2::new(x + 2.0, 0.0),
+                Point2::new(x + 2.0, 2.0),
+                Point2::new(x, 2.0),
+            ]])
+            .unwrap_or_default()
+        };
+        let layer = |index: usize, area: Region| SupportPreviewLayer {
+            slot: LayerSlot { index, top: (index + 1) as f64 * 0.2, height: 0.2 },
+            area,
+        };
+        // one pillar on layers 0-2, a second only on layer 1, and a gap at 3
+        let layers = vec![
+            layer(0, sq(0.0)),
+            layer(1, sq(0.0).union(&sq(5.0)).unwrap_or_default()),
+            layer(2, sq(0.0)),
+            layer(4, sq(0.0)),
+        ];
+        let prisms = support_prisms(&layers);
+        assert_eq!(prisms.len(), 3, "{prisms:?}");
+        assert!(prisms.iter().any(|p| (p.z0 - 0.0).abs() < 1e-9 && (p.z1 - 0.6).abs() < 1e-9));
+        assert!(prisms.iter().any(|p| (p.z0 - 0.8).abs() < 1e-9 && (p.z1 - 1.0).abs() < 1e-9));
     }
 
     #[test]

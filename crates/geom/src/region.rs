@@ -56,6 +56,30 @@ fn to_pt(p: &Point2) -> Pt {
     [p.x, p.y]
 }
 
+/// How loops from a cross-section become solid areas.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FillMode {
+    /// Overlapping bodies merge; holes are holes (non-zero winding).
+    #[default]
+    Merge,
+    /// Every crossing of an outline toggles inside and outside (even-odd).
+    Alternate,
+    /// Everything inside any outline is solid, holes included.
+    Outlines,
+}
+
+/// Twice-signed shoelace area halved: positive for counter-clockwise rings.
+pub fn signed_area(ring: &[Point2]) -> f64 {
+    let n = ring.len();
+    let mut a = 0.0;
+    for i in 0..n {
+        if let (Some(p), Some(q)) = (ring.get(i), ring.get((i + 1) % n)) {
+            a += p.x * q.y - q.x * p.y;
+        }
+    }
+    a / 2.0
+}
+
 fn ring_to_pts(ring: &[Point2]) -> Vec<Pt> {
     ring.iter().map(to_pt).collect()
 }
@@ -110,6 +134,37 @@ impl Region {
     /// Non-zero rather than even-odd so that overlapping bodies in one mesh merge
     /// instead of cancelling, and a mesh with every facet inverted still fills.
     pub fn from_loops(loops: &[Contour]) -> Result<Self, GeomError> {
+        Self::from_loops_mode(loops, FillMode::Merge)
+    }
+
+    /// Like [`Region::from_loops`], with a choice of how nested and
+    /// overlapping loops become solid.
+    pub fn from_loops_mode(loops: &[Contour], mode: FillMode) -> Result<Self, GeomError> {
+        let rule = match mode {
+            FillMode::Merge | FillMode::Outlines => FillRule::NonZero,
+            FillMode::Alternate => FillRule::EvenOdd,
+        };
+        let oriented: Vec<Contour>;
+        let loops = if mode == FillMode::Outlines {
+            // every loop counter-clockwise: holes become solid too
+            oriented = loops
+                .iter()
+                .map(|l| {
+                    let mut l = l.clone();
+                    if crate::region::signed_area(&l) < 0.0 {
+                        l.reverse();
+                    }
+                    l
+                })
+                .collect();
+            oriented.as_slice()
+        } else {
+            loops
+        };
+        Self::from_loops_rule(loops, rule)
+    }
+
+    fn from_loops_rule(loops: &[Contour], rule: FillRule) -> Result<Self, GeomError> {
         let subj: Vec<Vec<Pt>> =
             loops.iter().filter(|l| l.len() >= 3).map(|l| ring_to_pts(l)).collect();
         if subj.is_empty() {
@@ -117,7 +172,7 @@ impl Region {
         }
         let clip: Vec<Vec<Pt>> = Vec::new();
         let shapes = subj
-            .overlay_with_fixed_scale(&clip, OverlayRule::Subject, FillRule::NonZero, GRID_SCALE)
+            .overlay_with_fixed_scale(&clip, OverlayRule::Subject, rule, GRID_SCALE)
             .map_err(|_| GeomError::RegionRange)?;
         Ok(Self::from_shapes(shapes))
     }
@@ -154,6 +209,81 @@ impl Region {
             return Ok(Self::new());
         }
         self.boolean(other, OverlayRule::Intersect)
+    }
+
+    /// True when `p` is inside the region or within `ON_EDGE` of its boundary.
+    pub fn contains(&self, p: Point2) -> bool {
+        let mut inside = false;
+        for ring in self.contours() {
+            let n = ring.len();
+            for i in 0..n {
+                let (Some(&a), Some(&b)) = (ring.get(i), ring.get((i + 1) % n)) else { continue };
+                if distance_to_segment(p, a, b) <= ON_EDGE {
+                    return true;
+                }
+                // even-odd: holes are separate rings, so parity is exact
+                if (a.y > p.y) != (b.y > p.y) {
+                    let x = a.x + (p.y - a.y) * (b.x - a.x) / (b.y - a.y);
+                    if x > p.x {
+                        inside = !inside;
+                    }
+                }
+            }
+        }
+        inside
+    }
+
+    /// True when the straight move from `a` to `b` stays inside the region:
+    /// it crosses no boundary edge and its midpoint is inside. Touching the
+    /// boundary, as a move along an edge does, counts as inside.
+    pub fn segment_inside(&self, a: Point2, b: Point2) -> bool {
+        for ring in self.contours() {
+            let n = ring.len();
+            for i in 0..n {
+                let (Some(&c), Some(&d)) = (ring.get(i), ring.get((i + 1) % n)) else { continue };
+                if segments_cross(a, b, c, d) {
+                    return false;
+                }
+            }
+        }
+        self.contains(Point2::new((a.x + b.x) / 2.0, (a.y + b.y) / 2.0))
+    }
+
+    /// True when the straight move from `a` to `b` crosses the region's
+    /// boundary: it enters or leaves the region. Touching is not crossing.
+    pub fn crosses_boundary(&self, a: Point2, b: Point2) -> bool {
+        let (lo_x, hi_x) = (a.x.min(b.x), a.x.max(b.x));
+        let (lo_y, hi_y) = (a.y.min(b.y), a.y.max(b.y));
+        self.contours().any(|ring| {
+            let n = ring.len();
+            (0..n).any(|i| {
+                let (Some(&c), Some(&d)) = (ring.get(i), ring.get((i + 1) % n)) else {
+                    return false;
+                };
+                // cheap reject before the orientation test
+                if c.x.max(d.x) < lo_x
+                    || c.x.min(d.x) > hi_x
+                    || c.y.max(d.y) < lo_y
+                    || c.y.min(d.y) > hi_y
+                {
+                    return false;
+                }
+                segments_cross(a, b, c, d)
+            })
+        })
+    }
+
+    /// Everything inside an outer outline, holes filled. Polygons that lay
+    /// in a hole merge into the one around them.
+    pub fn without_holes(&self) -> Result<Self, GeomError> {
+        let filled = Region {
+            polygons: self
+                .polygons
+                .iter()
+                .map(|p| Polygon { outer: p.outer.clone(), holes: Vec::new() })
+                .collect(),
+        };
+        filled.union(&Region::new())
     }
 
     /// Drop polygons whose area is below `min_area` mm².
@@ -195,9 +325,82 @@ impl Region {
     }
 }
 
+/// Distance within which a point counts as on a boundary, mm.
+const ON_EDGE: f64 = 1e-6;
+
+fn distance_to_segment(p: Point2, a: Point2, b: Point2) -> f64 {
+    let (dx, dy) = (b.x - a.x, b.y - a.y);
+    let len2 = dx * dx + dy * dy;
+    let t = if len2 > 0.0 {
+        (((p.x - a.x) * dx + (p.y - a.y) * dy) / len2).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let (qx, qy) = (a.x + t * dx - p.x, a.y + t * dy - p.y);
+    (qx * qx + qy * qy).sqrt()
+}
+
+/// Proper crossing: each segment has its ends strictly on both sides of the
+/// other. Touching at an end or running along each other is not a crossing.
+fn segments_cross(a: Point2, b: Point2, c: Point2, d: Point2) -> bool {
+    let orient =
+        |p: Point2, q: Point2, r: Point2| (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x);
+    let eps = 1e-9;
+    let (d1, d2) = (orient(c, d, a), orient(c, d, b));
+    let (d3, d4) = (orient(a, b, c), orient(a, b, d));
+    ((d1 > eps && d2 < -eps) || (d1 < -eps && d2 > eps))
+        && ((d3 > eps && d4 < -eps) || (d3 < -eps && d4 > eps))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn filling_holes_keeps_the_outside() {
+        let sq = |x0: f64, x1: f64| {
+            vec![Point2::new(x0, x0), Point2::new(x1, x0), Point2::new(x1, x1), Point2::new(x0, x1)]
+        };
+        let mut hole = sq(2.0, 8.0);
+        hole.reverse();
+        // a ring with an island in its hole
+        let r = Region::from_loops(&[sq(0.0, 10.0), hole, sq(4.0, 6.0)]);
+        assert!(r.is_ok());
+        let Ok(r) = r else { return };
+        assert_eq!(r.polygons.len(), 2);
+        let Ok(filled) = r.without_holes() else { return };
+        assert_eq!(filled.polygons.len(), 1);
+        assert!(filled.polygons.iter().all(|p| p.holes.is_empty()));
+        assert!((filled.area() - 100.0).abs() < 1e-6, "{}", filled.area());
+    }
+
+    #[test]
+    fn fill_modes_treat_nested_loops_differently() {
+        let sq = |h: f64, ccw: bool| {
+            let mut v = vec![
+                Point2::new(-h, -h),
+                Point2::new(h, -h),
+                Point2::new(h, h),
+                Point2::new(-h, h),
+            ];
+            if !ccw {
+                v.reverse();
+            }
+            v
+        };
+        let area = |loops: &[Contour], m: FillMode| {
+            Region::from_loops_mode(loops, m).map_or(-1.0, |r| r.area())
+        };
+        // a proper hole: clockwise inside counter-clockwise
+        let holed = [sq(5.0, true), sq(2.0, false)];
+        assert!((area(&holed, FillMode::Merge) - 84.0).abs() < 1e-6);
+        assert!((area(&holed, FillMode::Outlines) - 100.0).abs() < 1e-6);
+        // two bodies, one inside the other, both counter-clockwise
+        let nested = [sq(5.0, true), sq(2.0, true)];
+        assert!((area(&nested, FillMode::Merge) - 100.0).abs() < 1e-6);
+        assert!((area(&nested, FillMode::Alternate) - 84.0).abs() < 1e-6);
+        assert!(signed_area(&sq(1.0, true)) > 0.0 && signed_area(&sq(1.0, false)) < 0.0);
+    }
 
     fn square(x0: f64, y0: f64, s: f64) -> Contour {
         vec![
@@ -215,6 +418,34 @@ mod tests {
 
     fn close(a: f64, b: f64) -> bool {
         (a - b).abs() < 1e-3
+    }
+
+    #[test]
+    fn contains_and_segment_inside_respect_holes_and_edges() {
+        // a 10 mm square with a 4 mm hole in the middle
+        let mut hole = square(3.0, 3.0, 4.0);
+        hole.reverse();
+        let r = Region::from_loops(&[square(0.0, 0.0, 10.0), hole]).unwrap_or_default();
+        assert!(r.contains(Point2::new(1.0, 1.0)));
+        assert!(!r.contains(Point2::new(5.0, 5.0)), "in the hole");
+        assert!(!r.contains(Point2::new(11.0, 1.0)));
+        assert!(r.contains(Point2::new(0.0, 5.0)), "on the edge counts");
+        // along the left edge: inside; across the hole: not
+        assert!(r.segment_inside(Point2::new(0.0, 1.0), Point2::new(0.0, 9.0)));
+        assert!(!r.segment_inside(Point2::new(1.0, 5.0), Point2::new(9.0, 5.0)));
+        // two separate squares: a link between them leaves the region
+        let two =
+            Region::from_loops(&[square(0.0, 0.0, 2.0), square(2.5, 0.0, 2.0)]).unwrap_or_default();
+        assert!(!two.segment_inside(Point2::new(2.0, 1.0), Point2::new(2.5, 1.0)));
+        assert!(
+            two.crosses_boundary(Point2::new(1.0, 1.0), Point2::new(3.5, 1.0)),
+            "from one into the other"
+        );
+        assert!(
+            !two.crosses_boundary(Point2::new(5.0, 1.0), Point2::new(5.0, 9.0)),
+            "outside both"
+        );
+        assert!(!two.crosses_boundary(Point2::new(0.5, 0.5), Point2::new(1.5, 1.5)), "inside one");
     }
 
     #[test]

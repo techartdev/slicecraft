@@ -69,7 +69,8 @@ pub fn unquote(s: &str) -> Option<String> {
     Some(out)
 }
 
-fn format_value(kind: SettingKind, v: &SettingValue) -> String {
+/// A setting value as profile text.
+pub fn format_value(kind: SettingKind, v: &SettingValue) -> String {
     match (kind, v) {
         (SettingKind::Choice(opts), SettingValue::Choice(i)) => {
             opts.get(*i).map_or_else(|| i.to_string(), |s| s.to_string())
@@ -82,7 +83,8 @@ fn format_value(kind: SettingKind, v: &SettingValue) -> String {
     }
 }
 
-fn parse_value(kind: SettingKind, raw: &str) -> Option<SettingValue> {
+/// Profile text back into a setting value of `kind`.
+pub fn parse_value(kind: SettingKind, raw: &str) -> Option<SettingValue> {
     match kind {
         SettingKind::Float { .. } => raw.parse::<f64>().ok().map(SettingValue::Float),
         SettingKind::Int { .. } => raw.parse::<i64>().ok().map(SettingValue::Int),

@@ -84,14 +84,9 @@ impl InfillPattern {
 
     /// Patterns the slicer draws today; the others fall back to rectilinear.
     pub fn is_implemented(self) -> bool {
-        matches!(
-            self,
-            InfillPattern::Rectilinear
-                | InfillPattern::Lines
-                | InfillPattern::Grid
-                | InfillPattern::Triangles
-                | InfillPattern::Concentric
-        )
+        // every pattern is drawn; kept so callers can still ask
+        let _ = self;
+        true
     }
 }
 
@@ -138,6 +133,197 @@ impl SeamMode {
     const NAMES: &'static [&'static str] = &["nearest", "aligned to a point", "scattered"];
 }
 
+/// Where support may stand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SupportPlacement {
+    /// On the bed and on the model.
+    Everywhere,
+    /// Only columns that reach the bed.
+    BedOnly,
+}
+
+impl SupportPlacement {
+    pub const ALL: [SupportPlacement; 2] =
+        [SupportPlacement::Everywhere, SupportPlacement::BedOnly];
+    const NAMES: &'static [&'static str] = &["everywhere", "from the bed only"];
+}
+
+/// The printable area's outline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BedShape {
+    Rectangle,
+    Circle,
+}
+
+impl BedShape {
+    pub const ALL: [BedShape; 2] = [BedShape::Rectangle, BedShape::Circle];
+    const NAMES: &'static [&'static str] = &["rectangle", "circle"];
+}
+
+/// The cross-section the extrusion volume is computed for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BeadShape {
+    /// Width × height: the same volume as the reference, so tuned flow
+    /// multipliers carry over.
+    Rectangle,
+    /// A rectangle with rounded sides, closer to a squashed bead.
+    Rounded,
+}
+
+impl BeadShape {
+    pub const ALL: [BeadShape; 2] = [BeadShape::Rectangle, BeadShape::Rounded];
+    const NAMES: &'static [&'static str] = &["rectangle", "rounded sides"];
+}
+
+/// What to print where two walls do not fit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThinWalls {
+    /// Only full loops.
+    Off,
+    /// One line along parts of the model too thin for a loop.
+    SingleLine,
+    /// That, and single lines in gaps between the walls and the infill.
+    GapFill,
+}
+
+impl ThinWalls {
+    pub const ALL: [ThinWalls; 3] = [ThinWalls::Off, ThinWalls::SingleLine, ThinWalls::GapFill];
+}
+
+/// Where the nozzle rests after homing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HomeCorner {
+    FrontLeft,
+    FrontRight,
+    BackLeft,
+    BackRight,
+    Centre,
+}
+
+impl HomeCorner {
+    pub const ALL: [HomeCorner; 5] = [
+        HomeCorner::FrontLeft,
+        HomeCorner::FrontRight,
+        HomeCorner::BackLeft,
+        HomeCorner::BackRight,
+        HomeCorner::Centre,
+    ];
+
+    /// The point on a `width` × `depth` bed, in bed coordinates.
+    pub fn point(self, width: f64, depth: f64) -> (f64, f64) {
+        match self {
+            HomeCorner::FrontLeft => (0.0, 0.0),
+            HomeCorner::FrontRight => (width, 0.0),
+            HomeCorner::BackLeft => (0.0, depth),
+            HomeCorner::BackRight => (width, depth),
+            HomeCorner::Centre => (width / 2.0, depth / 2.0),
+        }
+    }
+}
+
+/// What to do with outlines a damaged mesh leaves open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenOutlines {
+    /// Close those with a small gap; drop the rest.
+    CloseGaps,
+    /// Keep only outlines the mesh closes itself.
+    Drop,
+    /// Close small gaps, and print what stays open as single lines.
+    Lines,
+}
+
+impl OpenOutlines {
+    pub const ALL: [OpenOutlines; 3] =
+        [OpenOutlines::CloseGaps, OpenOutlines::Drop, OpenOutlines::Lines];
+}
+
+/// How nested and overlapping outlines become solid areas.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FillRule {
+    Merge,
+    Alternate,
+    Outlines,
+}
+
+impl FillRule {
+    pub const ALL: [FillRule; 3] = [FillRule::Merge, FillRule::Alternate, FillRule::Outlines];
+}
+
+/// The file the G-code is written as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputFormat {
+    Plain,
+    Binary,
+}
+
+impl OutputFormat {
+    pub const ALL: [OutputFormat; 2] = [OutputFormat::Plain, OutputFormat::Binary];
+
+    pub fn extension(self) -> &'static str {
+        match self {
+            OutputFormat::Plain => "gcode",
+            OutputFormat::Binary => "bgcode",
+        }
+    }
+}
+
+/// Which paths end with a wipe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WipeFeatures {
+    OuterWalls,
+    AllWalls,
+    Everything,
+}
+
+impl WipeFeatures {
+    pub const ALL: [WipeFeatures; 3] =
+        [WipeFeatures::OuterWalls, WipeFeatures::AllWalls, WipeFeatures::Everything];
+}
+
+/// The order islands (separate parts of a layer) are printed in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IslandOrder {
+    /// Finish one island, then go to the nearest next one: fewest travels.
+    Nearest,
+    /// The same order on every layer (left to right, front to back).
+    Consistent,
+    /// Each feature on every island before the next feature.
+    ByFeature,
+}
+
+impl IslandOrder {
+    pub const ALL: [IslandOrder; 3] =
+        [IslandOrder::Nearest, IslandOrder::Consistent, IslandOrder::ByFeature];
+}
+
+/// How support areas are built.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SupportStyle {
+    /// Separate square pillars on a grid: less contact, each snaps off alone.
+    Pillars,
+    /// The exact area under the overhang: holds every point of the surface.
+    Areas,
+}
+
+impl SupportStyle {
+    pub const ALL: [SupportStyle; 2] = [SupportStyle::Pillars, SupportStyle::Areas];
+    const NAMES: &'static [&'static str] = &["pillars", "areas"];
+}
+
+/// Shape of the support body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SupportPattern {
+    /// Parallel lines in one direction, stacked on every layer.
+    Lines,
+    /// Lines in two directions on every layer.
+    Grid,
+}
+
+impl SupportPattern {
+    pub const ALL: [SupportPattern; 2] = [SupportPattern::Lines, SupportPattern::Grid];
+    const NAMES: &'static [&'static str] = &["lines", "grid"];
+}
+
 /// The print profile: the settings the slicer uses as typed fields, and every
 /// other setting in `extra`.
 #[derive(Debug, Clone, PartialEq)]
@@ -148,6 +334,9 @@ pub struct PrintSettings {
     pub extrusion_width_auto: bool,
     pub extrusion_width: f64,
     pub extrusion_multiplier: f64,
+    pub bead_shape: BeadShape,
+    /// First-layer line width, % of the normal width.
+    pub first_layer_width_percent: f64,
     pub retract_enabled: bool,
     pub retract_length: f64,
     pub retract_speed: f64,
@@ -155,6 +344,34 @@ pub struct PrintSettings {
     /// Travel moves shorter than this do not retract, mm.
     pub retract_min_travel: f64,
     pub retract_on_layer_change: bool,
+    /// Extra filament pushed (or held back) after a retraction, mm.
+    pub retract_extra_restart: f64,
+    /// Stop extruding a little before a path ends that is followed by a retraction.
+    pub coast_enabled: bool,
+    pub coast_distance: f64,
+    /// Move back along a finished path before retracting.
+    pub wipe_enabled: bool,
+    pub wipe_distance: f64,
+    /// Write E as increments (M83).
+    pub relative_extrusion: bool,
+    /// Retract with G10/G11, leaving length and speed to the firmware.
+    pub firmware_retraction: bool,
+    /// Slow a layer down so it takes at least this long, s (0 = off).
+    pub min_layer_time: f64,
+    /// The slowest that slowdown may go, mm/s.
+    pub min_layer_speed: f64,
+    /// Run the fan at full speed on layers quicker than this, s (0 = off).
+    pub fan_boost_below_seconds: f64,
+    /// Start the fan at full power for a moment before a lower speed.
+    pub fan_kickstart: bool,
+    /// Skip a retraction when less than this was extruded since the last, mm.
+    pub retract_min_extrusion: f64,
+    /// Retract only on travel that crosses the model's outline.
+    pub retract_only_outside: bool,
+    /// Route travel around holes inside the part instead of across them.
+    pub avoid_crossing_walls: bool,
+    /// Longest combed route, relative to the straight one.
+    pub travel_detour_limit: f64,
     // layer
     pub layer_height: f64,
     pub first_layer_height: f64,
@@ -162,6 +379,8 @@ pub struct PrintSettings {
     pub solid_layers_top: u32,
     pub solid_layers_bottom: u32,
     pub perimeter_order: PerimeterOrder,
+    pub island_order: IslandOrder,
+    pub thin_walls: ThinWalls,
     pub seam_mode: SeamMode,
     pub seam_x: f64,
     pub seam_y: f64,
@@ -184,6 +403,44 @@ pub struct PrintSettings {
     /// How far infill reaches into the innermost perimeter, % of the width.
     pub infill_overlap: f64,
     pub infill_before_perimeters: bool,
+    /// Grow (or shrink) outer contours and holes, mm.
+    pub outer_size_offset: f64,
+    pub hole_size_offset: f64,
+    /// Print sparse infill once per this many layers, that much thicker.
+    pub infill_every_layers: u32,
+    /// One continuous rising outer wall above the bottom layers.
+    pub vase_mode: bool,
+    /// Layer heights that follow the surface slope.
+    pub adaptive_layers: bool,
+    pub adaptive_min_height: f64,
+    pub adaptive_max_height: f64,
+    pub adaptive_quality: u32,
+    /// Walls shorter than this print slower, mm (0 = off).
+    pub short_wall_length: f64,
+    /// Cap on melt rate, mm³/s (0 = off).
+    pub max_volumetric_flow: f64,
+    /// Print solid areas over air as bridges: straight across, own flow, speed and fan.
+    pub bridging_enabled: bool,
+    pub bridge_flow_percent: f64,
+    pub bridge_speed_percent: f64,
+    pub bridge_fan_percent: f64,
+    /// Top surfaces: flow, speed (of solid speed) and fan, %.
+    pub top_flow_percent: f64,
+    pub top_speed_percent: f64,
+    pub top_fan_percent: f64,
+    /// A light extra pass over top surfaces.
+    pub ironing_enabled: bool,
+    pub ironing_spacing: f64,
+    pub ironing_flow: f64,
+    /// Lay top-surface lines one after another in one direction.
+    pub monotonic_solid: bool,
+    /// Denser infill layers under top surfaces.
+    pub dense_layers: u32,
+    pub dense_percentage: f64,
+    /// Sparse islands smaller than this are printed solid, mm².
+    pub solid_min_area: f64,
+    /// Grow solid areas into the sparse infill, mm.
+    pub solid_expansion: f64,
     // temperature
     pub nozzle_temperature: f64,
     pub bed_temperature: f64,
@@ -223,6 +480,131 @@ pub struct PrintSettings {
     pub gcode_offset_x: f64,
     pub gcode_offset_y: f64,
     pub gcode_offset_z: f64,
+    /// Comment each feature and layer in the G-code.
+    pub verbose_comments: bool,
+    /// The extruder (tool) that prints; a model zone may pick another.
+    pub tool_number: u32,
+    pub prime_tower_enabled: bool,
+    /// Side of the square prime tower, mm.
+    pub prime_tower_size: f64,
+    /// Centre of the prime tower on the bed, mm.
+    pub prime_tower_x: f64,
+    pub prime_tower_y: f64,
+    pub ooze_shield_enabled: bool,
+    /// Gap between the part and the ooze shield, mm.
+    pub ooze_shield_distance: f64,
+    /// How far from vertical the shield may lean in to follow the part, degrees.
+    pub ooze_shield_angle: f64,
+    /// Temperature a waiting tool drops to, °C (0 leaves it hot).
+    pub standby_temperature: f64,
+    /// Inserted at every tool change ({old} and {new} name the tools).
+    pub tool_change_script: String,
+    /// Filament pulled back before a tool change, mm.
+    pub tool_change_retract: f64,
+    /// Speed of that retraction, mm/s.
+    pub tool_change_speed: f64,
+    /// Sparse infill line width, % of the line width.
+    pub infill_width_percent: f64,
+    /// Sparse infill lines shorter than this are left out, mm.
+    pub infill_min_length: f64,
+    /// Solid layers turn this far from the infill angle, degrees.
+    pub solid_angle_offset: f64,
+    /// Heated chamber target, °C (0 = none).
+    pub chamber_temperature: f64,
+    /// The part fan rises to full over this many layers.
+    pub fan_ramp_layers: u32,
+    /// A solid reinforcement every this many layers (0 = none).
+    pub solid_every_layers: u32,
+    /// Layers in each reinforcement.
+    pub solid_every_count: u32,
+    /// Support body printed once per this many layers, that much thicker.
+    pub support_every_layers: u32,
+    /// Lines of "layer temperature": the nozzle changes as that layer starts.
+    pub temperature_schedule: String,
+    /// Speed of the last solid layers of the print, %.
+    pub top_layer_speed_percent: f64,
+    /// Inserted after every retraction.
+    pub retract_script: String,
+    /// Inserted where a height zone's settings take over.
+    pub profile_change_script: String,
+    /// Where the nozzle rests after homing (the first travel starts there).
+    pub homing_corner: HomeCorner,
+    /// Which paths end with a wipe.
+    pub wipe_features: WipeFeatures,
+    /// Narrowest gap filled with a single line, % of the line width.
+    pub single_line_min_width: f64,
+    /// Widest gap filled with one line rather than two, % of the line width.
+    pub single_line_max_width: f64,
+    pub open_outline_mode: OpenOutlines,
+    /// Open outlines with a gap up to this are closed, mm.
+    pub slice_close_gap: f64,
+    pub fill_rule: FillRule,
+    /// Travel over a finished top surface always retracts.
+    pub retract_over_tops: bool,
+    /// A tool left idle this long drops to its standby temperature, s.
+    pub idle_after_seconds: f64,
+    /// Print each model to the top before starting the next.
+    pub sequential_printing: bool,
+    /// Plain or binary G-code.
+    pub output_format: OutputFormat,
+    /// How far the print head reaches around the nozzle, mm.
+    pub head_clearance: f64,
+    /// Height under the gantry: models printed earlier must be lower, mm.
+    pub gantry_height: f64,
+    /// Embed a preview image this many pixels square (0 = none).
+    pub thumbnail_size: u32,
+    /// Replace runs of short segments on a circle with G2/G3 arcs.
+    pub arc_fitting: bool,
+    /// A program run on the finished file (only from the window).
+    pub post_process: String,
+    /// The printer's 0,0 is the middle of the bed.
+    pub origin_center: bool,
+    /// Rectangle or circle.
+    pub bed_shape: BedShape,
+    pub bed_diameter: f64,
+    /// Acceleration for the time estimate, mm/s² (0 = ignore).
+    pub max_acceleration: f64,
+    // raft
+    pub raft_enabled: bool,
+    pub raft_base_layers: u32,
+    pub raft_top_layers: u32,
+    /// How far the raft reaches past the part, mm.
+    pub raft_margin: f64,
+    /// Air gap between the raft and the part, mm.
+    pub raft_gap: f64,
+    /// Density of the raft's base layers, %.
+    pub raft_infill: f64,
+    // support
+    pub support_enabled: bool,
+    pub support_placement: SupportPlacement,
+    pub support_style: SupportStyle,
+    /// Side of one pillar's grid cell, mm.
+    pub support_pillar_size: f64,
+    /// Surfaces flatter than this, measured from vertical, get support. Degrees.
+    pub support_angle: f64,
+    /// Density of the support body, %.
+    pub support_infill: f64,
+    pub support_pattern: SupportPattern,
+    /// Horizontal gap between support and model, mm.
+    pub support_xy_gap: f64,
+    /// Empty layers between the top of support and the model above it.
+    pub support_top_gap_layers: u32,
+    /// Empty layers between the model and support standing on it.
+    pub support_bottom_gap_layers: u32,
+    /// Dense layers directly under supported surfaces.
+    pub support_interface_layers: u32,
+    /// Density of those layers, %.
+    pub support_interface_infill: f64,
+    /// Dense layers where support stands on the model.
+    pub support_floor_layers: u32,
+    /// Solid layers at the foot of support on the bed.
+    pub support_base_layers: u32,
+    /// Grows (or shrinks) every supported area, mm.
+    pub support_expansion: f64,
+    /// Perimeters around support areas.
+    pub support_outlines: u32,
+    /// Support speed, % of the default speed.
+    pub support_speed_percent: f64,
     /// Placeholder settings, by key. Missing keys read as their default.
     pub extra: BTreeMap<String, SettingValue>,
 }
@@ -235,18 +617,37 @@ impl Default for PrintSettings {
             extrusion_width_auto: false,
             extrusion_width: 0.45,
             extrusion_multiplier: 1.0,
+            bead_shape: BeadShape::Rectangle,
+            first_layer_width_percent: 100.0,
             retract_enabled: true,
             retract_length: 1.0,
             retract_speed: 35.0,
             retract_lift: 0.0,
             retract_min_travel: 2.0,
             retract_on_layer_change: true,
+            retract_extra_restart: 0.0,
+            coast_enabled: false,
+            coast_distance: 0.2,
+            wipe_enabled: false,
+            wipe_distance: 4.0,
+            relative_extrusion: false,
+            firmware_retraction: false,
+            min_layer_time: 0.0,
+            min_layer_speed: 10.0,
+            fan_boost_below_seconds: 0.0,
+            fan_kickstart: false,
+            retract_min_extrusion: 0.0,
+            retract_only_outside: true,
+            avoid_crossing_walls: true,
+            travel_detour_limit: 3.0,
             layer_height: 0.2,
             first_layer_height: 0.3,
             perimeter_count: 2,
             solid_layers_top: 4,
             solid_layers_bottom: 3,
             perimeter_order: PerimeterOrder::InsideOut,
+            island_order: IslandOrder::Nearest,
+            thin_walls: ThinWalls::GapFill,
             seam_mode: SeamMode::Nearest,
             seam_x: 0.0,
             seam_y: 300.0,
@@ -263,6 +664,31 @@ impl Default for PrintSettings {
             infill_alternate: true,
             infill_overlap: 15.0,
             infill_before_perimeters: false,
+            outer_size_offset: 0.0,
+            hole_size_offset: 0.0,
+            infill_every_layers: 1,
+            vase_mode: false,
+            adaptive_layers: false,
+            adaptive_min_height: 0.08,
+            adaptive_max_height: 0.28,
+            adaptive_quality: 5,
+            short_wall_length: 0.0,
+            max_volumetric_flow: 0.0,
+            bridging_enabled: true,
+            bridge_flow_percent: 100.0,
+            bridge_speed_percent: 70.0,
+            bridge_fan_percent: 100.0,
+            top_flow_percent: 100.0,
+            top_speed_percent: 100.0,
+            top_fan_percent: 100.0,
+            ironing_enabled: false,
+            ironing_spacing: 0.1,
+            ironing_flow: 10.0,
+            monotonic_solid: false,
+            dense_layers: 0,
+            dense_percentage: 50.0,
+            solid_min_area: 0.0,
+            solid_expansion: 0.0,
             nozzle_temperature: 210.0,
             bed_temperature: 60.0,
             first_layer_nozzle_temperature: 210.0,
@@ -289,6 +715,74 @@ impl Default for PrintSettings {
             gcode_offset_x: 0.0,
             gcode_offset_y: 0.0,
             gcode_offset_z: 0.0,
+            verbose_comments: true,
+            tool_number: 0,
+            prime_tower_enabled: false,
+            prime_tower_size: 12.0,
+            prime_tower_x: 20.0,
+            prime_tower_y: 20.0,
+            ooze_shield_enabled: false,
+            ooze_shield_distance: 2.0,
+            ooze_shield_angle: 30.0,
+            standby_temperature: 175.0,
+            tool_change_script: String::new(),
+            tool_change_retract: 10.0,
+            tool_change_speed: 15.0,
+            infill_width_percent: 100.0,
+            infill_min_length: 0.0,
+            solid_angle_offset: 0.0,
+            chamber_temperature: 0.0,
+            fan_ramp_layers: 0,
+            solid_every_layers: 0,
+            solid_every_count: 2,
+            support_every_layers: 1,
+            temperature_schedule: String::new(),
+            top_layer_speed_percent: 100.0,
+            retract_script: String::new(),
+            profile_change_script: String::new(),
+            homing_corner: HomeCorner::FrontLeft,
+            wipe_features: WipeFeatures::OuterWalls,
+            single_line_min_width: 30.0,
+            single_line_max_width: 150.0,
+            open_outline_mode: OpenOutlines::CloseGaps,
+            slice_close_gap: 1.0,
+            fill_rule: FillRule::Merge,
+            retract_over_tops: false,
+            idle_after_seconds: 120.0,
+            sequential_printing: false,
+            output_format: OutputFormat::Plain,
+            head_clearance: 35.0,
+            gantry_height: 25.0,
+            thumbnail_size: 0,
+            arc_fitting: false,
+            post_process: String::new(),
+            origin_center: false,
+            bed_shape: BedShape::Rectangle,
+            bed_diameter: 200.0,
+            max_acceleration: 0.0,
+            raft_enabled: false,
+            raft_base_layers: 2,
+            raft_top_layers: 2,
+            raft_margin: 3.0,
+            raft_gap: 0.15,
+            raft_infill: 85.0,
+            support_enabled: false,
+            support_placement: SupportPlacement::Everywhere,
+            support_style: SupportStyle::Pillars,
+            support_pillar_size: 2.0,
+            support_angle: 45.0,
+            support_infill: 25.0,
+            support_pattern: SupportPattern::Lines,
+            support_xy_gap: 0.4,
+            support_top_gap_layers: 1,
+            support_bottom_gap_layers: 1,
+            support_interface_layers: 0,
+            support_interface_infill: 70.0,
+            support_floor_layers: 0,
+            support_base_layers: 0,
+            support_expansion: 0.0,
+            support_outlines: 0,
+            support_speed_percent: 100.0,
             extra: BTreeMap::new(),
         }
     }
@@ -366,6 +860,20 @@ pub enum SettingKind {
     Choice(&'static [&'static str]),
     /// Free text, such as a G-code script.
     Text,
+}
+
+/// Every setting whose value differs between `a` and `b`: (setting, a's value, b's value).
+pub fn differences(
+    a: &PrintSettings,
+    b: &PrintSettings,
+) -> Vec<(&'static SettingSpec, SettingValue, SettingValue)> {
+    SETTINGS
+        .iter()
+        .filter_map(|s| {
+            let (x, y) = (a.get(s.key)?, b.get(s.key)?);
+            (x != y).then_some((s, x, y))
+        })
+        .collect()
 }
 
 /// A setting's value.
@@ -554,6 +1062,23 @@ impl PrintSettings {
         if self.extrusion_width_auto { self.nozzle_diameter * 1.125 } else { self.extrusion_width }
     }
 
+    /// How far skirt, brim or raft reach outside the models (mm), for keeping
+    /// them on the bed when models are laid out.
+    pub fn adhesion_margin(&self) -> f64 {
+        let w = self.line_width();
+        let mut m: f64 = 0.0;
+        if self.skirt_enabled {
+            m = m.max(self.skirt_distance + f64::from(self.skirt_loops.min(100)) * w);
+        }
+        if self.brim_enabled {
+            m = m.max(f64::from(self.brim_loops.min(200)) * w);
+        }
+        if self.raft_enabled {
+            m = m.max(self.raft_margin);
+        }
+        if m.is_finite() { m.clamp(0.0, 50.0) } else { 0.0 }
+    }
+
     /// Effective retraction length (zero when retraction is off).
     pub fn retraction(&self) -> f64 {
         if self.retract_enabled { self.retract_length } else { 0.0 }
@@ -724,6 +1249,16 @@ pub static SETTINGS: &[SettingSpec] = &[
         bind_f!(extrusion_multiplier),
     ),
     row(
+        "bead_shape",
+        "Bead shape",
+        Extruder,
+        "Nozzle",
+        SettingKind::Choice(BeadShape::NAMES),
+        Dc(0),
+        "How extrusion volume is computed. Rectangle matches Simplify3D, so flow multipliers tuned there carry over.",
+        bind_e!(bead_shape, BeadShape),
+    ),
+    row(
         "tool_number",
         "Tool number",
         Extruder,
@@ -731,7 +1266,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         i(0, 15, ""),
         Di(0),
         "Which tool this extruder drives on a multi-tool printer.",
-        None,
+        bind_u!(tool_number),
     ),
     row(
         "retract_enabled",
@@ -771,7 +1306,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(-5.0, 5.0, 0.05, MM),
         Df(0.0),
         "Push more (or less) than was retracted when resuming.",
-        None,
+        bind_f!(retract_extra_restart),
     ),
     row(
         "retract_lift",
@@ -811,7 +1346,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         B,
         Db(false),
         "Stop extruding a little before the end of each path.",
-        None,
+        bind_b!(coast_enabled),
     ),
     row(
         "coast_distance",
@@ -821,7 +1356,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(0.0, 5.0, 0.05, MM),
         Df(0.2),
         "Length of path printed without extrusion.",
-        None,
+        bind_f!(coast_distance),
     ),
     row(
         "wipe_enabled",
@@ -831,7 +1366,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         B,
         Db(false),
         "Move along the finished path after retracting.",
-        None,
+        bind_b!(wipe_enabled),
     ),
     row(
         "wipe_distance",
@@ -841,7 +1376,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(0.0, 20.0, 0.1, MM),
         Df(4.0),
         "Length of the wipe move.",
-        None,
+        bind_f!(wipe_distance),
     ),
     // ----------------------------------------------------------- Layer
     row(
@@ -872,7 +1407,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(50.0, 300.0, 1.0, PCT),
         Df(100.0),
         "Line width on the first layer, relative to the normal width.",
-        None,
+        bind_f!(first_layer_width_percent),
     ),
     row(
         "adaptive_layers",
@@ -882,7 +1417,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         B,
         Db(false),
         "Thinner layers where the surface slopes gently.",
-        None,
+        bind_b!(adaptive_layers),
     ),
     row(
         "perimeter_count",
@@ -962,7 +1497,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         B,
         Db(false),
         "One continuous rising wall, no top, no infill (vase mode).",
-        None,
+        bind_b!(vase_mode),
     ),
     // ----------------------------------------------------------- Adhesion
     row(
@@ -1033,7 +1568,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         B,
         Db(false),
         "Print the part on a disposable lattice.",
-        None,
+        bind_b!(raft_enabled),
     ),
     row(
         "raft_base_layers",
@@ -1043,7 +1578,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         i(1, 10, ""),
         Di(2),
         "Thick, wide layers at the bottom of the raft.",
-        None,
+        bind_u!(raft_base_layers),
     ),
     row(
         "raft_top_layers",
@@ -1053,7 +1588,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         i(1, 10, ""),
         Di(2),
         "Dense layers the part sits on.",
-        None,
+        bind_u!(raft_top_layers),
     ),
     row(
         "raft_margin",
@@ -1063,7 +1598,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(0.0, 30.0, 0.5, MM),
         Df(3.0),
         "How far the raft extends past the part.",
-        None,
+        bind_f!(raft_margin),
     ),
     row(
         "raft_gap",
@@ -1073,7 +1608,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(0.0, 2.0, 0.01, MM),
         Df(0.15),
         "Air gap between raft and part.",
-        None,
+        bind_f!(raft_gap),
     ),
     row(
         "raft_infill",
@@ -1083,7 +1618,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(1.0, 100.0, 1.0, PCT),
         Df(85.0),
         "Density of the raft layers.",
-        None,
+        bind_f!(raft_infill),
     ),
     row(
         "prime_tower_enabled",
@@ -1093,7 +1628,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         B,
         Db(false),
         "A tower that primes each tool after a change.",
-        None,
+        bind_b!(prime_tower_enabled),
     ),
     row(
         "prime_tower_size",
@@ -1103,7 +1638,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(2.0, 100.0, 1.0, MM),
         Df(12.0),
         "Side of the tower.",
-        None,
+        bind_f!(prime_tower_size),
     ),
     row(
         "prime_tower_x",
@@ -1113,7 +1648,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(-10_000.0, 10_000.0, 1.0, MM),
         Df(20.0),
         "Where the tower stands.",
-        None,
+        bind_f!(prime_tower_x),
     ),
     row(
         "prime_tower_y",
@@ -1123,7 +1658,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(-10_000.0, 10_000.0, 1.0, MM),
         Df(20.0),
         "Where the tower stands.",
-        None,
+        bind_f!(prime_tower_y),
     ),
     row(
         "ooze_shield_enabled",
@@ -1133,7 +1668,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         B,
         Db(false),
         "A thin wall around the part that catches ooze from idle tools.",
-        None,
+        bind_b!(ooze_shield_enabled),
     ),
     row(
         "ooze_shield_distance",
@@ -1143,7 +1678,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(0.5, 50.0, 0.5, MM),
         Df(2.0),
         "Gap between the part and the shield.",
-        None,
+        bind_f!(ooze_shield_distance),
     ),
     row(
         "ooze_shield_angle",
@@ -1153,7 +1688,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(0.0, 89.0, 1.0, DEG),
         Df(30.0),
         "How steeply the shield may follow the part.",
-        None,
+        bind_f!(ooze_shield_angle),
     ),
     // ----------------------------------------------------------- Infill
     row(
@@ -1173,7 +1708,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         "Sparse infill",
         SettingKind::Choice(InfillPattern::NAMES),
         Dc(0),
-        "Shape of the sparse infill. Honeycomb and gyroid fall back to rectilinear for now.",
+        "Shape of the sparse infill. Gyroid, cubic and octahedral are strong in every direction; honeycomb and wiggle are classic looks.",
         bind_e!(infill_pattern, InfillPattern),
     ),
     row(
@@ -1224,7 +1759,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(50.0, 300.0, 1.0, PCT),
         Df(100.0),
         "Infill line width, relative to the normal width.",
-        None,
+        bind_f!(infill_width_percent),
     ),
     row(
         "infill_every_layers",
@@ -1234,7 +1769,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         i(1, 10, "layers"),
         Di(1),
         "Print sparse infill once per this many layers, thicker.",
-        None,
+        bind_u!(infill_every_layers),
     ),
     row(
         "infill_min_length",
@@ -1244,7 +1779,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(0.0, 20.0, 0.1, MM),
         Df(0.0),
         "Skip infill lines shorter than this.",
-        None,
+        bind_f!(infill_min_length),
     ),
     row(
         "solid_pattern",
@@ -1264,7 +1799,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(-180.0, 180.0, 1.0, DEG),
         Df(0.0),
         "Turn solid layers relative to the infill angle.",
-        None,
+        bind_f!(solid_angle_offset),
     ),
     row(
         "dense_layers",
@@ -1274,7 +1809,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         i(0, 20, ""),
         Di(0),
         "Layers of denser infill below the top skin.",
-        None,
+        bind_u!(dense_layers),
     ),
     row(
         "dense_percentage",
@@ -1284,7 +1819,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(0.0, 100.0, 1.0, PCT),
         Df(50.0),
         "Density of those layers.",
-        None,
+        bind_f!(dense_percentage),
     ),
     row(
         "ironing_enabled",
@@ -1294,7 +1829,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         B,
         Db(false),
         "Pass the hot nozzle over top surfaces to smooth them.",
-        None,
+        bind_b!(ironing_enabled),
     ),
     row(
         "ironing_spacing",
@@ -1304,7 +1839,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(0.01, 1.0, 0.01, MM),
         Df(0.1),
         "Distance between ironing passes.",
-        None,
+        bind_f!(ironing_spacing),
     ),
     row(
         "ironing_flow",
@@ -1314,7 +1849,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(0.0, 50.0, 1.0, PCT),
         Df(10.0),
         "Material pushed while ironing.",
-        None,
+        bind_f!(ironing_flow),
     ),
     // ----------------------------------------------------------- Support
     row(
@@ -1325,17 +1860,27 @@ pub static SETTINGS: &[SettingSpec] = &[
         B,
         Db(false),
         "Hold up overhangs with removable structures.",
-        None,
+        bind_b!(support_enabled),
     ),
     row(
         "support_type",
         "Support placement",
         Support,
         "Support",
-        SettingKind::Choice(&["everywhere", "from the bed only"]),
+        SettingKind::Choice(SupportPlacement::NAMES),
         Dc(0),
         "Whether support may stand on the model.",
-        None,
+        bind_e!(support_placement, SupportPlacement),
+    ),
+    row(
+        "support_style",
+        "Support style",
+        Support,
+        "Support",
+        SettingKind::Choice(SupportStyle::NAMES),
+        Dc(0),
+        "Pillars: separate blocks on a grid that break away one by one and use less material. Areas: the exact shape under the overhang.",
+        bind_e!(support_style, SupportStyle),
     ),
     row(
         "support_angle",
@@ -1345,7 +1890,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(0.0, 90.0, 1.0, DEG),
         Df(45.0),
         "Surfaces flatter than this (from vertical) get support.",
-        None,
+        bind_f!(support_angle),
     ),
     row(
         "support_infill",
@@ -1355,17 +1900,17 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(1.0, 100.0, 1.0, PCT),
         Df(25.0),
         "Density of the support body.",
-        None,
+        bind_f!(support_infill),
     ),
     row(
         "support_pattern",
         "Support pattern",
         Support,
         "Support",
-        SettingKind::Choice(&["lines", "grid"]),
+        SettingKind::Choice(SupportPattern::NAMES),
         Dc(0),
         "Shape of the support body.",
-        None,
+        bind_e!(support_pattern, SupportPattern),
     ),
     row(
         "support_xy_gap",
@@ -1375,7 +1920,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(0.0, 5.0, 0.05, MM),
         Df(0.4),
         "Space between support and the walls of the part.",
-        None,
+        bind_f!(support_xy_gap),
     ),
     row(
         "support_top_gap_layers",
@@ -1385,7 +1930,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         i(0, 10, ""),
         Di(1),
         "Empty layers between support and the part above it.",
-        None,
+        bind_u!(support_top_gap_layers),
     ),
     row(
         "support_bottom_gap_layers",
@@ -1395,7 +1940,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         i(0, 10, ""),
         Di(1),
         "Empty layers between the part and support standing on it.",
-        None,
+        bind_u!(support_bottom_gap_layers),
     ),
     row(
         "support_interface_layers",
@@ -1403,9 +1948,9 @@ pub static SETTINGS: &[SettingSpec] = &[
         Support,
         "Interface",
         i(0, 10, ""),
-        Di(2),
+        Di(0),
         "Dense layers directly under supported surfaces.",
-        None,
+        bind_u!(support_interface_layers),
     ),
     row(
         "support_interface_infill",
@@ -1415,7 +1960,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(1.0, 100.0, 1.0, PCT),
         Df(70.0),
         "Density of the interface layers.",
-        None,
+        bind_f!(support_interface_infill),
     ),
     row(
         "support_base_layers",
@@ -1425,7 +1970,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         i(0, 10, ""),
         Di(0),
         "Wider, denser layers where support meets the bed.",
-        None,
+        bind_u!(support_base_layers),
     ),
     row(
         "support_expansion",
@@ -1435,17 +1980,17 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(-5.0, 10.0, 0.1, MM),
         Df(0.0),
         "Grow support areas by this much.",
-        None,
+        bind_f!(support_expansion),
     ),
     row(
         "support_pillar_size",
-        "Pillar resolution",
+        "Pillar size",
         Support,
-        "Base",
+        "Support",
         f(0.5, 20.0, 0.5, MM),
-        Df(4.0),
-        "Grid size support areas are built from.",
-        None,
+        Df(2.0),
+        "Grid cell of one pillar. Smaller pillars follow small details; larger ones print faster.",
+        bind_f!(support_pillar_size),
     ),
     // ----------------------------------------------------------- Temperature
     row(
@@ -1506,7 +2051,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(0.0, 100.0, 1.0, CEL),
         Df(0.0),
         "Heated chamber target (0 = none).",
-        None,
+        bind_f!(chamber_temperature),
     ),
     row(
         "standby_temperature",
@@ -1516,7 +2061,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(0.0, 400.0, 1.0, CEL),
         Df(175.0),
         "Temperature a waiting tool drops to.",
-        None,
+        bind_f!(standby_temperature),
     ),
     // ----------------------------------------------------------- Cooling
     row(
@@ -1547,7 +2092,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         i(0, 50, "layers"),
         Di(0),
         "Raise the fan gradually over this many layers.",
-        None,
+        bind_u!(fan_ramp_layers),
     ),
     row(
         "bridge_fan_percent",
@@ -1557,7 +2102,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(0.0, 100.0, 1.0, PCT),
         Df(100.0),
         "Fan duty while bridging.",
-        None,
+        bind_f!(bridge_fan_percent),
     ),
     row(
         "min_layer_time",
@@ -1567,7 +2112,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(0.0, 120.0, 1.0, "s"),
         Df(0.0),
         "Slow down so each layer takes at least this long.",
-        None,
+        bind_f!(min_layer_time),
     ),
     row(
         "min_layer_speed",
@@ -1577,7 +2122,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(1.0, 100.0, 1.0, MMS),
         Df(10.0),
         "Never slow below this.",
-        None,
+        bind_f!(min_layer_speed),
     ),
     // ----------------------------------------------------------- Speeds
     row(
@@ -1628,7 +2173,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(5.0, 200.0, 1.0, PCT),
         Df(100.0),
         "Support speed, relative to the default speed.",
-        None,
+        bind_f!(support_speed_percent),
     ),
     row(
         "bridge_speed_percent",
@@ -1638,7 +2183,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(5.0, 200.0, 1.0, PCT),
         Df(70.0),
         "Bridge speed, relative to the default speed.",
-        None,
+        bind_f!(bridge_speed_percent),
     ),
     row(
         "first_layer_speed",
@@ -1689,7 +2234,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         B,
         Db(false),
         "Write E as increments (M83) instead of positions.",
-        None,
+        bind_b!(relative_extrusion),
     ),
     row(
         "firmware_retraction",
@@ -1699,7 +2244,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         B,
         Db(false),
         "Let the firmware retract (G10/G11).",
-        None,
+        bind_b!(firmware_retraction),
     ),
     row(
         "arc_fitting",
@@ -1709,7 +2254,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         B,
         Db(false),
         "Replace runs of short segments with G2/G3 arcs.",
-        None,
+        bind_b!(arc_fitting),
     ),
     row(
         "verbose_comments",
@@ -1719,7 +2264,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         B,
         Db(true),
         "Comment each feature and layer.",
-        None,
+        bind_b!(verbose_comments),
     ),
     row(
         "thumbnail_size",
@@ -1729,7 +2274,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         i(0, 512, "px"),
         Di(0),
         "Embed a preview image of this size (0 = none).",
-        None,
+        bind_u!(thumbnail_size),
     ),
     row(
         "post_process",
@@ -1739,7 +2284,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         SettingKind::Text,
         Dt(""),
         "A program to run on the finished file (never run by agents).",
-        None,
+        bind_t!(post_process),
     ),
     // ----------------------------------------------------------- Scripts
     row(
@@ -1749,7 +2294,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         "Scripts",
         SettingKind::Text,
         Dt(""),
-        "Replaces the built-in start sequence when not empty. Placeholders: {nozzle} {bed} {first_nozzle} {first_bed}.",
+        "Runs after heat-up and replaces the built-in homing when not empty; a script that sets temperatures itself skips the heat-up. Placeholders: {nozzle} {bed} {first_nozzle} {first_bed}.",
         bind_t!(start_script),
     ),
     row(
@@ -1780,7 +2325,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         SettingKind::Text,
         Dt(""),
         "Inserted at every tool change.",
-        None,
+        bind_t!(tool_change_script),
     ),
     // ----------------------------------------------------------- Machine
     row(
@@ -1818,10 +2363,10 @@ pub static SETTINGS: &[SettingSpec] = &[
         "Bed shape",
         Machine,
         "Build volume",
-        SettingKind::Choice(&["rectangle", "circle"]),
+        SettingKind::Choice(BedShape::NAMES),
         Dc(0),
         "Shape of the printable area.",
-        None,
+        bind_e!(bed_shape, BedShape),
     ),
     row(
         "origin_center",
@@ -1831,7 +2376,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         B,
         Db(false),
         "The printer's 0,0 is the middle of the bed (deltas).",
-        None,
+        bind_b!(origin_center),
     ),
     row("tool_count", "Tools", Machine, "Tools", i(1, 8, ""), Di(1), "Number of extruders.", None),
     row(
@@ -1842,7 +2387,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(0.0, 50_000.0, 100.0, "mm/s²"),
         Df(0.0),
         "Used for the time estimate (0 = ignore).",
-        None,
+        bind_f!(max_acceleration),
     ),
     // ----------------------------------------------------------- Material
     row(
@@ -1882,19 +2427,19 @@ pub static SETTINGS: &[SettingSpec] = &[
         Advanced,
         "Travel",
         B,
-        Db(false),
+        Db(true),
         "Route travel inside the part instead of across its outline.",
-        None,
+        bind_b!(avoid_crossing_walls),
     ),
     row(
         "retract_only_outside",
-        "Retract only over gaps",
+        "Retract only when crossing outlines",
         Advanced,
         "Travel",
         B,
-        Db(false),
-        "Skip retraction when travel stays inside the part.",
-        None,
+        Db(true),
+        "Retract only when a travel crosses the part's outline. Travel inside the part or between support pillars leaves any string where it cannot be seen.",
+        bind_b!(retract_only_outside),
     ),
     row(
         "thin_walls",
@@ -1902,19 +2447,9 @@ pub static SETTINGS: &[SettingSpec] = &[
         Advanced,
         "Walls",
         SettingKind::Choice(&["off", "single line", "gap fill"]),
-        Dc(0),
-        "What to print where two walls do not fit.",
-        None,
-    ),
-    row(
-        "gap_fill",
-        "Fill gaps between walls",
-        Advanced,
-        "Walls",
-        B,
-        Db(false),
-        "Fill slivers left between perimeters and infill.",
-        None,
+        Dc(2),
+        "Single line: one line down parts too thin for a loop. Gap fill: also the gaps the walls leave.",
+        bind_e!(thin_walls, ThinWalls),
     ),
     row(
         "bridging_enabled",
@@ -1922,9 +2457,9 @@ pub static SETTINGS: &[SettingSpec] = &[
         Advanced,
         "Bridging",
         B,
-        Db(false),
+        Db(true),
         "Print unsupported spans as straight bridges.",
-        None,
+        bind_b!(bridging_enabled),
     ),
     row(
         "bridge_flow_percent",
@@ -1934,7 +2469,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(10.0, 200.0, 1.0, PCT),
         Df(100.0),
         "Flow while bridging.",
-        None,
+        bind_f!(bridge_flow_percent),
     ),
     row(
         "slice_close_gap",
@@ -1944,17 +2479,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(0.0, 5.0, 0.05, MM),
         Df(1.0),
         "Repair open outlines with gaps this small.",
-        None,
-    ),
-    row(
-        "merge_overlapping",
-        "Merge overlapping bodies",
-        Advanced,
-        "Slicing",
-        B,
-        Db(true),
-        "Treat overlapping parts of one model as one solid.",
-        None,
+        bind_f!(slice_close_gap),
     ),
     // ---- additions from the feature inventory (docs/research/02) ----
     row(
@@ -1965,7 +2490,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(0.01, 1.0, 0.01, MM),
         Df(0.08),
         "Lower bound for adaptive layer heights.",
-        None,
+        bind_f!(adaptive_min_height),
     ),
     row(
         "adaptive_max_height",
@@ -1975,7 +2500,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(0.01, 2.0, 0.01, MM),
         Df(0.28),
         "Upper bound for adaptive layer heights.",
-        None,
+        bind_f!(adaptive_max_height),
     ),
     row(
         "adaptive_quality",
@@ -1985,7 +2510,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         i(1, 10, ""),
         Di(5),
         "Higher follows curved surfaces more closely.",
-        None,
+        bind_u!(adaptive_quality),
     ),
     row(
         "outer_size_offset",
@@ -1995,7 +2520,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(-2.0, 2.0, 0.01, MM),
         Df(0.0),
         "Grow (or shrink) outer walls to correct the printed size.",
-        None,
+        bind_f!(outer_size_offset),
     ),
     row(
         "hole_size_offset",
@@ -2005,7 +2530,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(-2.0, 2.0, 0.01, MM),
         Df(0.0),
         "Grow (or shrink) holes separately from outer walls.",
-        None,
+        bind_f!(hole_size_offset),
     ),
     row(
         "island_order",
@@ -2019,7 +2544,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         ]),
         Dc(0),
         "How separate parts of a layer are visited.",
-        None,
+        bind_e!(island_order, IslandOrder),
     ),
     row(
         "solid_min_area",
@@ -2029,7 +2554,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(0.0, 1000.0, 1.0, "mm²"),
         Df(0.0),
         "Infill regions smaller than this print solid.",
-        None,
+        bind_f!(solid_min_area),
     ),
     row(
         "solid_expansion",
@@ -2039,7 +2564,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(0.0, 10.0, 0.1, MM),
         Df(0.0),
         "Grow solid areas into the sparse infill for anchoring.",
-        None,
+        bind_f!(solid_expansion),
     ),
     row(
         "monotonic_solid",
@@ -2049,7 +2574,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         B,
         Db(false),
         "Lay solid lines strictly side by side for an even top surface.",
-        None,
+        bind_b!(monotonic_solid),
     ),
     row(
         "top_flow_percent",
@@ -2059,7 +2584,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(10.0, 200.0, 1.0, PCT),
         Df(100.0),
         "Flow on the exposed top layer.",
-        None,
+        bind_f!(top_flow_percent),
     ),
     row(
         "top_speed_percent",
@@ -2069,7 +2594,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(5.0, 200.0, 1.0, PCT),
         Df(100.0),
         "Speed on the exposed top layer.",
-        None,
+        bind_f!(top_speed_percent),
     ),
     row(
         "top_fan_percent",
@@ -2079,7 +2604,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(0.0, 100.0, 1.0, PCT),
         Df(100.0),
         "Fan on the exposed top layer.",
-        None,
+        bind_f!(top_fan_percent),
     ),
     row(
         "solid_every_layers",
@@ -2089,7 +2614,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         i(0, 1000, "layers"),
         Di(0),
         "Insert solid layers at this interval for stiffness (0 = off).",
-        None,
+        bind_u!(solid_every_layers),
     ),
     row(
         "solid_every_count",
@@ -2099,7 +2624,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         i(1, 20, "layers"),
         Di(2),
         "How many solid layers each reinforcement has.",
-        None,
+        bind_u!(solid_every_count),
     ),
     row(
         "support_outlines",
@@ -2109,7 +2634,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         i(0, 5, ""),
         Di(0),
         "Perimeters around support areas.",
-        None,
+        bind_u!(support_outlines),
     ),
     row(
         "support_every_layers",
@@ -2119,7 +2644,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         i(1, 5, "layers"),
         Di(1),
         "Print support once per this many layers, thicker.",
-        None,
+        bind_u!(support_every_layers),
     ),
     row(
         "support_floor_layers",
@@ -2129,7 +2654,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         i(0, 10, ""),
         Di(0),
         "Dense layers where support stands on the part.",
-        None,
+        bind_u!(support_floor_layers),
     ),
     row(
         "temperature_schedule",
@@ -2139,7 +2664,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         SettingKind::Text,
         Dt(""),
         "One 'layer temperature' pair per line, e.g. '30 205'.",
-        None,
+        bind_t!(temperature_schedule),
     ),
     row(
         "idle_after_seconds",
@@ -2149,7 +2674,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(1.0, 3600.0, 1.0, "s"),
         Df(120.0),
         "How long a tool waits before cooling down.",
-        None,
+        bind_f!(idle_after_seconds),
     ),
     row(
         "fan_boost_below_seconds",
@@ -2159,7 +2684,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(0.0, 300.0, 1.0, "s"),
         Df(0.0),
         "Run the fan harder on layers faster than this (0 = off).",
-        None,
+        bind_f!(fan_boost_below_seconds),
     ),
     row(
         "fan_kickstart",
@@ -2169,7 +2694,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         B,
         Db(false),
         "Spin the fan at full power briefly before a low speed.",
-        None,
+        bind_b!(fan_kickstart),
     ),
     row(
         "top_layer_speed_percent",
@@ -2179,7 +2704,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(5.0, 200.0, 1.0, PCT),
         Df(100.0),
         "Speed of the last solid layers, relative to the default speed.",
-        None,
+        bind_f!(top_layer_speed_percent),
     ),
     row(
         "short_wall_length",
@@ -2189,7 +2714,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(0.0, 500.0, 1.0, MM),
         Df(0.0),
         "Short perimeters print slower so they can cool (0 = off).",
-        None,
+        bind_f!(short_wall_length),
     ),
     row(
         "max_volumetric_flow",
@@ -2199,7 +2724,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(0.0, 100.0, 0.5, "mm³/s"),
         Df(0.0),
         "Slow down where the hot end cannot melt fast enough (0 = off).",
-        None,
+        bind_f!(max_volumetric_flow),
     ),
     row(
         "gcode_offset_x",
@@ -2236,14 +2761,10 @@ pub static SETTINGS: &[SettingSpec] = &[
         "File format",
         Gcode,
         "Output",
-        SettingKind::Choice(&[
-            "plain G-code",
-            "binary G-code (planned)",
-            "printer-specific (planned)",
-        ]),
+        SettingKind::Choice(&["plain G-code", "binary G-code (.bgcode)"]),
         Dc(0),
-        "Which file is written.",
-        None,
+        "Which file is written. Binary G-code is smaller and carries the preview and print facts in blocks.",
+        bind_e!(output_format, OutputFormat),
     ),
     row(
         "retract_script",
@@ -2253,7 +2774,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         SettingKind::Text,
         Dt(""),
         "Inserted at every retraction.",
-        None,
+        bind_t!(retract_script),
     ),
     row(
         "profile_change_script",
@@ -2263,7 +2784,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         SettingKind::Text,
         Dt(""),
         "Inserted where one profile hands over to the next.",
-        None,
+        bind_t!(profile_change_script),
     ),
     row(
         "homing_corner",
@@ -2273,7 +2794,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         SettingKind::Choice(&["front left", "front right", "back left", "back right", "centre"]),
         Dc(0),
         "Where the nozzle rests after homing.",
-        None,
+        bind_e!(homing_corner, HomeCorner),
     ),
     row(
         "bed_diameter",
@@ -2283,7 +2804,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(10.0, 2000.0, 1.0, MM),
         Df(200.0),
         "Diameter of a round bed.",
-        None,
+        bind_f!(bed_diameter),
     ),
     row(
         "tool_change_retract",
@@ -2293,7 +2814,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(0.0, 100.0, 0.5, MM),
         Df(10.0),
         "Filament pulled back before a tool change.",
-        None,
+        bind_f!(tool_change_retract),
     ),
     row(
         "tool_change_speed",
@@ -2303,7 +2824,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(1.0, 200.0, 1.0, MMS),
         Df(15.0),
         "Speed of the tool change retraction.",
-        None,
+        bind_f!(tool_change_speed),
     ),
     row(
         "wipe_features",
@@ -2313,7 +2834,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         SettingKind::Choice(&["outer walls", "all walls", "every feature"]),
         Dc(0),
         "Which paths end with a wipe.",
-        None,
+        bind_e!(wipe_features, WipeFeatures),
     ),
     row(
         "retract_over_tops",
@@ -2323,7 +2844,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         B,
         Db(false),
         "Avoid scars on finished top surfaces.",
-        None,
+        bind_b!(retract_over_tops),
     ),
     row(
         "retract_min_extrusion",
@@ -2333,7 +2854,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(0.0, 50.0, 0.1, MM),
         Df(0.0),
         "Skip a retraction when little was printed since the last one.",
-        None,
+        bind_f!(retract_min_extrusion),
     ),
     row(
         "travel_detour_limit",
@@ -2343,7 +2864,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         f(1.0, 10.0, 0.1, "×"),
         Df(3.0),
         "Longest detour, relative to the direct route, when avoiding walls.",
-        None,
+        bind_f!(travel_detour_limit),
     ),
     row(
         "single_line_min_width",
@@ -2351,9 +2872,9 @@ pub static SETTINGS: &[SettingSpec] = &[
         Advanced,
         "Walls",
         f(10.0, 100.0, 1.0, PCT),
-        Df(50.0),
+        Df(30.0),
         "Narrowest single-line wall, relative to the line width.",
-        None,
+        bind_f!(single_line_min_width),
     ),
     row(
         "single_line_max_width",
@@ -2361,9 +2882,9 @@ pub static SETTINGS: &[SettingSpec] = &[
         Advanced,
         "Walls",
         f(100.0, 300.0, 1.0, PCT),
-        Df(200.0),
+        Df(150.0),
         "Widest single-line wall, relative to the line width.",
-        None,
+        bind_f!(single_line_max_width),
     ),
     row(
         "open_outline_mode",
@@ -2373,7 +2894,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         SettingKind::Choice(&["close small gaps", "drop them", "print as lines"]),
         Dc(0),
         "What to do with outlines a damaged mesh leaves open.",
-        None,
+        bind_e!(open_outline_mode, OpenOutlines),
     ),
     row(
         "fill_rule",
@@ -2387,7 +2908,37 @@ pub static SETTINGS: &[SettingSpec] = &[
         ]),
         Dc(0),
         "How nested and overlapping outlines become solid areas.",
-        None,
+        bind_e!(fill_rule, FillRule),
+    ),
+    row(
+        "sequential_printing",
+        "One model at a time",
+        Advanced,
+        "Sequential printing",
+        B,
+        Db(false),
+        "Print each model to the top before starting the next. Models must stand apart by the head clearance, and all but the last must fit under the gantry.",
+        bind_b!(sequential_printing),
+    ),
+    row(
+        "head_clearance",
+        "Head clearance",
+        Advanced,
+        "Sequential printing",
+        f(1.0, 300.0, 1.0, MM),
+        Df(35.0),
+        "How far the print head reaches around the nozzle; models stand at least this far apart.",
+        bind_f!(head_clearance),
+    ),
+    row(
+        "gantry_height",
+        "Gantry height",
+        Advanced,
+        "Sequential printing",
+        f(1.0, 2000.0, 1.0, MM),
+        Df(25.0),
+        "Clearance under the gantry; every model but the last must be lower.",
+        bind_f!(gantry_height),
     ),
 ];
 
@@ -2443,13 +2994,20 @@ mod tests {
 
     #[test]
     fn placeholders_are_stored_and_reported() {
+        // any boolean setting the slicer does not use yet
+        let Some(spec) =
+            SETTINGS.iter().find(|s| !s.implemented() && matches!(s.kind, SettingKind::Bool))
+        else {
+            return;
+        };
         let mut p = PrintSettings::default();
         assert!(p.unused_changes().is_empty());
-        assert!(p.set("support_enabled", SettingValue::Bool(true)).is_ok());
-        assert_eq!(p.get("support_enabled"), Some(SettingValue::Bool(true)));
-        assert_eq!(p.unused_changes(), vec!["Generate support"]);
+        let on = SettingValue::Bool(spec.default.value() != SettingValue::Bool(true));
+        assert!(p.set(spec.key, on.clone()).is_ok());
+        assert_eq!(p.get(spec.key), Some(on));
+        assert_eq!(p.unused_changes(), vec![spec.label]);
         // setting it back to the default forgets it
-        assert!(p.set("support_enabled", SettingValue::Bool(false)).is_ok());
+        assert!(p.set(spec.key, spec.default.value()).is_ok());
         assert!(p.extra.is_empty());
     }
 

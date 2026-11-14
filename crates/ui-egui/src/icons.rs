@@ -42,6 +42,14 @@ pub enum Icon {
     Machine,
     Analyze,
     Repair,
+    Eye,
+    EyeOff,
+    Play,
+    Pause,
+    StepBack,
+    StepForward,
+    Plus,
+    Wireframe,
 }
 
 /// Map a point on the 20×20 design grid into `r`.
@@ -301,35 +309,93 @@ pub fn paint(p: &Painter, r: Rect, icon: Icon, c: Color32) {
             line(p, r, &[(4.0, 16.0), (12.0, 8.0)], s);
             p.circle_stroke(at(r, 14.0, 6.0), r.width() * 3.5 / 20.0, s);
         }
+        Icon::Eye | Icon::EyeOff => {
+            let upper: Vec<(f32, f32)> = (0..=12)
+                .map(|i| {
+                    let t = i as f32 / 12.0;
+                    (2.0 + 16.0 * t, 10.0 - 6.0 * (std::f32::consts::PI * t).sin())
+                })
+                .collect();
+            let lower: Vec<(f32, f32)> = upper.iter().map(|&(x, y)| (x, 20.0 - y)).collect();
+            line(p, r, &upper, s);
+            line(p, r, &lower, s);
+            p.circle_filled(at(r, 10.0, 10.0), r.width() * 2.6 / 20.0, c);
+            if icon == Icon::EyeOff {
+                line(p, r, &[(3.0, 17.0), (17.0, 3.0)], s);
+            }
+        }
+        Icon::Play => {
+            closed(p, r, &[(6.0, 4.0), (16.0, 10.0), (6.0, 16.0)], Stroke::NONE, c);
+        }
+        Icon::Pause => {
+            closed(p, r, &[(5.0, 4.0), (8.5, 4.0), (8.5, 16.0), (5.0, 16.0)], Stroke::NONE, c);
+            closed(p, r, &[(11.5, 4.0), (15.0, 4.0), (15.0, 16.0), (11.5, 16.0)], Stroke::NONE, c);
+        }
+        Icon::StepBack => {
+            closed(p, r, &[(16.0, 4.0), (8.0, 10.0), (16.0, 16.0)], Stroke::NONE, c);
+            line(p, r, &[(5.5, 4.0), (5.5, 16.0)], s);
+        }
+        Icon::StepForward => {
+            closed(p, r, &[(4.0, 4.0), (12.0, 10.0), (4.0, 16.0)], Stroke::NONE, c);
+            line(p, r, &[(14.5, 4.0), (14.5, 16.0)], s);
+        }
+        Icon::Wireframe => {
+            cube(p, r, s, None, hi);
+            let thin = Stroke::new(s.width * 0.6, c.gamma_multiply(0.75));
+            line(p, r, &[(4.0, 7.0), (12.0, 17.0)], thin);
+            line(p, r, &[(12.0, 7.0), (16.0, 13.0)], thin);
+            line(p, r, &[(4.0, 7.0), (16.0, 3.0)], thin);
+        }
+        Icon::Plus => {
+            line(p, r, &[(10.0, 4.0), (10.0, 16.0)], s);
+            line(p, r, &[(4.0, 10.0), (16.0, 10.0)], s);
+        }
     }
 }
 
 /// A square toolbar button with an icon. Disabled buttons still show their
-/// tooltip, so a planned feature explains itself.
+/// tooltip, so a greyed-out button explains itself.
 pub fn button(ui: &mut Ui, icon: Icon, tooltip: &str, enabled: bool, active: bool) -> Response {
-    let size = Vec2::splat(28.0);
+    sized(ui, icon, tooltip, enabled, active, 32.0)
+}
+
+/// [`button`] at a chosen size.
+pub fn sized(
+    ui: &mut Ui,
+    icon: Icon,
+    tooltip: &str,
+    enabled: bool,
+    active: bool,
+    side: f32,
+) -> Response {
+    let size = Vec2::splat(side);
     // a disabled button senses hover only, so it can never report a click
     let sense = if enabled { Sense::click() } else { Sense::hover() };
     let (rect, resp) = ui.allocate_exact_size(size, sense);
-    let visuals = ui.visuals();
+    let p = crate::theme::of(ui);
     let hovered = resp.hovered() && enabled;
     let bg = if active {
-        visuals.selection.bg_fill
+        p.accent
+    } else if resp.is_pointer_button_down_on() && enabled {
+        p.input
     } else if hovered {
-        visuals.widgets.hovered.bg_fill
+        p.hover
     } else {
         Color32::TRANSPARENT
     };
-    ui.painter().rect_filled(rect, CornerRadius::same(4), bg);
+    ui.painter().rect_filled(rect, CornerRadius::same(7), bg);
     let color = if !enabled {
-        visuals.weak_text_color().gamma_multiply(0.6)
+        p.dim.gamma_multiply(0.5)
     } else if active {
-        visuals.selection.stroke.color
+        p.on_accent
     } else {
-        visuals.text_color()
+        p.text
     };
-    paint(ui.painter(), rect.shrink(4.0), icon, color);
-    let tip = if enabled { tooltip.to_string() } else { format!("{tooltip} (planned)") };
-    let resp = resp.on_hover_text(tip);
+    paint(ui.painter(), rect.shrink(side * 0.22), icon, color);
+    let label = tooltip.to_string();
+    resp.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Button, enabled, active, &label)
+    });
+    let resp = resp.on_hover_text(tooltip);
     if enabled { resp } else { resp.on_hover_cursor(egui::CursorIcon::NotAllowed) }
 }

@@ -46,27 +46,27 @@ Status: **done** = works and is tested · **partial** = works with stated limits
 | Capability | Evidence | SliceCraft | Phase |
 |---|---|---|---|
 | Import STL / OBJ | public | done | P1 |
-| Import 3MF | public | placeholder (refused with a message) | P1 |
+| Import 3MF | public | done (ZIP64, units, components, one model per build item) | P1 |
 | Drag-and-drop import | public | done | P1 |
-| Preview an existing G-code file | public | placeholder | P5 |
-| Export models (STL/OBJ/3MF) | public | placeholder | P2 |
+| Preview an existing G-code file | public | done (features from SliceCraft, Simplify3D, Cura, PrusaSlicer comments) | P5 |
+| Export models (STL/OBJ/3MF) | public | done | P2 |
 | Project file holding models, placement, settings, supports | public | done (models, placement, visibility, profile; supports when they exist) | P2 |
 | Recent projects | public | done | P2 |
 | Ask before dropping unsaved changes | public | done (new, open, quit) | P2 |
 | Reload a model when its file changes | public | — | P6 |
-| Detect and correct inch/cm models | public | partial (manual unit correction) | P1 |
-| Automatic actions on every import (rotate/scale/offset) | public | placeholder (preferences) | P6 |
+| Detect and correct inch/cm models | public | done (inch detection on import as a preference; manual unit correction) | P1 |
+| Automatic actions on every import (rotate/scale/offset) | public | done (rotate, scale, inch detection; no offset) | P6 |
 | Select, move, rotate, scale tools; multi-select | public | done | P1 |
 | Exact position/rotation/scale per axis, uniform toggle | public, screenshots | done | P1 |
 | Rotate in 90° steps | public | done | P1 |
 | Arrange all models on the bed | public | done (row packing) | P1 |
 | Drop to bed | public | done (always on the bed) | P1 |
-| Lay a face flat on the bed | public | placeholder | P2 |
+| Lay a face flat on the bed | public | done (largest flat face) | P2 |
 | Mirror X/Y/Z | public | done | P1 |
 | Copy/duplicate | public | done | P1 |
-| Group / ungroup / combine / separate parts | public | placeholder | P2 |
+| Group / ungroup / combine / separate parts | public | done: combine (merge), separate (split), group and ungroup | P2 |
 | Scale to the largest size that fits | observed | done | P1 |
-| Model role: print / support / cutter | observed | placeholder | P4 |
+| Model role: print / support / cutter | observed | done | P4 |
 | Out-of-bounds warning | public | done | P1 |
 | Undo / redo | public | done | P1 |
 | Visibility per model | public | done (also excludes from slicing) | P1 |
@@ -77,13 +77,13 @@ Status: **done** = works and is tested · **partial** = works with stated limits
 |---|---|---|---|
 | Mesh statistics (volume, area, errors) | public | done (`Mesh::report`) | P2 |
 | Find non-manifold edges / open edges | public | done (counts) | P2 |
-| Find self-intersections | public | placeholder | P2 |
-| Repair flipped faces / flip a whole surface | public | placeholder | P2 |
-| Remove duplicate and orphaned faces | public | placeholder | P2 |
-| Reduce triangle count | public | placeholder | P2 |
-| Repair during slicing: close open outlines, choose how overlaps fill | public | partial (closes gaps ≤ 1 mm, non-zero fill); the choices are placeholders | P2 |
+| Find self-intersections | public | done (count) | P2 |
+| Repair flipped faces / flip a whole surface | public | done (per part, plus weld, degenerate removal, hole filling) | P2 |
+| Remove duplicate and orphaned faces | public | partial (repair welds and drops degenerate faces; duplicates are not searched for) | P2 |
+| Reduce triangle count | public | done (vertex clustering) | P2 |
+| Repair during slicing: close open outlines, choose how overlaps fill | public | done (close gaps up to a set width, drop, or print open outlines as lines; merge, alternate or fill every outline) | P2 |
 | Cross-section view | public | partial (horizontal cut of the model view) | P2 |
-| Display modes: wireframe, normals, points | public | placeholder | P6 |
+| Display modes: wireframe, normals, points | public | partial (wireframe) | P6 |
 
 ### 3.3 Processes, profiles and assistants
 
@@ -91,34 +91,35 @@ Status: **done** = works and is tested · **partial** = works with stated limits
 |---|---|---|---|
 | Named profile; presets | public | done (4 built-in presets) | P2 |
 | Save / load profile files | public | done (own text format) | P2 |
+| Import Simplify3D `.fff` profiles (4.x and 5.x) | operator request | done, with an import report ([R9](09-fff-profiles.md)) | P2 |
 | Search settings by name; show changed settings | public | done | P2 |
 | Revert a setting to its default | public | done | P2 |
-| Compare two profiles | public | — | P2 |
-| Several profiles per job, each for chosen models | public | placeholder | P5 |
-| Profiles switching at heights (variable settings, start/stop Z) | public | placeholder | P5 |
-| Sequential printing (one object at a time) with clearance | observed | — | P5 |
+| Compare two profiles | public | done (current profile against a `.scprofile` or `.fff` file; take values one by one or all) | P2 |
+| Several profiles per job, each for chosen models | public | done as model zones (walls, infill, solid layers per model) | P5 |
+| Profiles switching at heights (variable settings, start/stop Z) | public | done as height zones (any setting) | P5 |
+| Sequential printing (one object at a time) with clearance | observed | done (shortest first; refused when models stand closer than the head clearance or a model other than the last is above the gantry) | P5 |
 | Quick-apply groups (material, quality) | public | partial (quick panel + presets) | P2 |
-| Printer setup assistant and printer database | public | placeholder | P6 |
+| Printer setup assistant and printer database | public | done: assistant plus 11 starting points from makers' published build sizes (a short list, not a database of hundreds) | P6 |
 | Pre-slice checks with warnings | public | partial (validation + slice notes) | P2 |
 
 ### 3.4 Settings, by tab (counts are SliceCraft's schema)
 
 | Tab (ours) | Reference covers | SliceCraft: settings / used by the slicer |
 |---|---|---|
-| Extruder | nozzle, width (auto/manual), flow, retraction, restart extra, Z lift, coast, wipe, tool change | 18 / 10 |
-| Layers | layer height, first-layer height/width/speed, adaptive heights, size compensation, walls, solid layers, seam strategy, wall and island order, vase mode | 18 / 9 |
-| Adhesion | skirt/brim, raft, prime tower, ooze shield (with shapes and auto-stop) | 19 / 6 |
-| Infill | ~11 sparse patterns, rotation, width, combine layers, overlap, minimum length, dense layers, solid pattern and rotation, small-area solid, expansion, ordered (monotonic) lines, top-surface flow/speed/fan, ironing, reinforcement layers | 24 / 7 |
-| Support | placement, overhang angle, pattern and density, walls, base and dense layers, expansion, clearances, every-N layers, manual editing | 16 / 0 |
-| Temperature | several controllers (nozzle, bed, chamber), per-layer schedules, idle cool-down | 9 / 5 |
-| Cooling | several fans, per-layer schedules, kick-start, quick-layer boost, bridge and top fan | 8 / 2 |
-| Speeds | default and per-feature percentages, travel XY/Z, acceleration and jerk for estimates, slow-downs for quick layers, short walls and flow limits | 12 / 7 |
-| G-code | output formats, firmware options, relative E, thumbnails, coordinate offsets, toolhead offsets | 11 / 4 |
-| Scripts | start, end, layer change, retraction, tool change, profile change, post-processing, variables and conditionals | 6 / 3 |
-| Machine | build volume (box or cylinder), origin, homing, tools | 9 / 3 |
+| Extruder | nozzle, width (auto/manual), flow, retraction, restart extra, Z lift, coast, wipe, tool change | 19 / 19 |
+| Layers | layer height, first-layer height/width/speed, adaptive heights, size compensation, walls, solid layers, seam strategy, wall and island order, vase mode | 18 / 18 |
+| Adhesion | skirt/brim, raft, prime tower, ooze shield (with shapes and auto-stop) | 19 / 19 |
+| Infill | ~11 sparse patterns, rotation, width, combine layers, overlap, minimum length, dense layers, solid pattern and rotation, small-area solid, expansion, ordered (monotonic) lines, top-surface flow/speed/fan, ironing, reinforcement layers | 24 / 24 |
+| Support | placement, overhang angle, pattern and density, walls, base and dense layers, expansion, clearances, every-N layers, manual editing | 17 / 17 |
+| Temperature | several controllers (nozzle, bed, chamber), per-layer schedules, idle cool-down | 9 / 9 |
+| Cooling | several fans, per-layer schedules, kick-start, quick-layer boost, bridge and top fan | 8 / 8 |
+| Speeds | default and per-feature percentages, travel XY/Z, acceleration and jerk for estimates, slow-downs for quick layers, short walls and flow limits | 12 / 12 |
+| G-code | output formats, firmware options, relative E, thumbnails, coordinate offsets, toolhead offsets | 11 / 11 |
+| Scripts | start, end, layer change, retraction, tool change, profile change, post-processing, variables and conditionals | 6 / 6 |
+| Machine | build volume (box or cylinder), origin, homing, tools | 8 / 8 |
 | Material | filament diameter, density, price | 3 / 3 |
-| Advanced | thin walls, single-line walls, retraction rules, wipe scope, travel detours, slicing repair modes | 16 / 0 |
-| **Total** | — | **169 / 59** |
+| Advanced | thin walls, single-line walls, retraction rules, wipe scope, travel detours, slicing repair modes, sequential printing | 17 / 17 |
+| **Total** | — | **171 / 171** |
 
 The reference's settings are grouped differently in places (bridging and filament
 properties sit on an "other" tab; machine geometry on the output tab); SliceCraft's
@@ -132,22 +133,30 @@ grouping is its own.
 | Seam: nearest / aligned to a point / scattered; preferred regions | public | partial (no preferred regions) | P3 |
 | Solid top/bottom layers | public | done | P3 |
 | Sparse patterns: rectilinear, one-direction lines, grid, triangles, concentric | public | done | P3 |
-| Sparse patterns: honeycomb (2 kinds), gyroid, wiggle, sinusoidal, cubic, octahedral | public | placeholder (fall back to rectilinear, with a note) | P3 |
+| Reinforcement: solid layers every N layers; support every N layers | public | done | P3 |
+| Sparse patterns: honeycomb, gyroid, wiggle, cubic, octahedral | public | done (`render::patterns`, clipped polylines; one honeycomb kind) | P3 |
 | Solid patterns: rectilinear, one-direction, concentric | public | done | P3 |
 | Infill before walls | public | done | P3 |
 | Skirt (several loops, several layers), brim | public | done | P4 |
-| Raft, prime tower, ooze shield | public | placeholder | P4 |
-| Thin walls, gap fill, single-line walls | public | placeholder | P3 |
-| Adaptive layer heights | public | placeholder | P3 |
-| Dimensional (hole/outer) compensation | public | placeholder | P3 |
-| Bridging detection and modifiers | public | placeholder | P4 |
-| Ironing, ordered top lines, top-surface modifiers | public | placeholder | P4 |
-| Automatic support, manual add/remove, blockers | public | placeholder | P4 |
+| Raft | public | done (base and top layers, margin, air gap) | P4 |
+| Prime tower, ooze shield | public | done (tower shared by the tools; shield with a slope; no auto-stop count, no shapes) | P5 |
+| Several tools: per-model tool, tool changes, idle temperature | public | done (per-tool temperatures and offsets —) | P5 |
+| Thin walls, gap fill, single-line walls | public | done (constant line width) | P3 |
+| Adaptive layer heights | public | done (adaptive, and by height zones) | P3 |
+| Dimensional (hole/outer) compensation | public | done | P3 |
+| Bridging detection and modifiers | public | done for solid areas (flow, speed, fan; straight across the short span); not for perimeters | P4 |
+| Ironing, ordered top lines, top-surface modifiers | public | done | P4 |
+| Automatic support | public | done: pillars (default) or areas, own design ([R5](05-support.md)) | P4 |
+| Retract only when crossing outlines | public | done (on by default) | P4 |
+| Avoid crossing outlines (combing) with a detour limit | public | done (on by default) | P4 |
+| Island order: nearest, consistent, all at once | public | done (nearest by default) | P3 |
+| Support preview before slicing | public | done (background, pillars drawn as prisms) | P4 |
+| Manual support add/remove, blockers | public | done: boxes on the bed, and a click adds or removes one pillar | P4 |
 | Retraction with Z lift, first-layer temperatures, wait-for-heat, scripts | public | done | P4 |
-| Coast, wipe, extra restart, retraction rules | public | placeholder | P4 |
+| Coast, wipe, extra restart, retraction rules | public | done (wipe after outer walls, all walls or everything; retract over top surfaces) | P4 |
 | Fan from a layer | public | done | P4 |
-| Per-layer temperature and fan schedules; slow-downs for quick layers | public | placeholder | P4 |
-| Multi-extrusion (per-feature tools, offsets, tool-change sequences, wizard) | public | placeholder | P5 |
+| Per-layer temperature and fan schedules; slow-downs for quick layers | public | done (temperature by layer, fan ramp, minimum layer time, fan boost) | P4 |
+| Multi-extrusion (per-feature tools, offsets, tool-change sequences, wizard) | public | partial: per-model tools through model zones, tool-change sequence and script; no per-feature tools or tool offsets | P5 |
 | Coordinate offsets in output | public | done | P5 |
 
 ### 3.6 Preview and analysis
@@ -158,12 +167,12 @@ grouping is its own.
 | Preview by move (line), playback with speed | public | done | P5 |
 | Colour by feature type | public | done | P5 |
 | Colour by speed, by layer height/Z | public | done | P5 |
-| Colour by tool, by profile, by flow rate | public | placeholder | P5 |
+| Colour by tool, by profile, by flow rate | public | done for tool and flow rate; not by profile | P5 |
 | Show travel, retractions, nozzle with position | public | done | P5 |
 | Feature toggles in the legend | public | done | P5 |
 | Build summary: time, length, volume, weight, cost, size, counts | public, screenshots | done | P5 |
 | Per-feature breakdown | public | partial (extruded length by feature) | P5 |
-| Acceleration-aware time estimate | public | placeholder | P5 |
+| Acceleration-aware time estimate | public | done (turn-weighted) | P5 |
 | Live preview following a running print | public | — | P6 |
 
 ### 3.7 Printing and machine control
@@ -171,10 +180,11 @@ grouping is its own.
 | Capability | Evidence | SliceCraft | Phase |
 |---|---|---|---|
 | Export G-code to disk | public | done | P5 |
-| Printer-specific binary formats, thumbnails | public | placeholder | P5 |
-| USB printing, network printing (several firmware families), discovery | public | placeholder | P6 |
-| Control panel: connect, jog, home, temperatures, fan, terminal, pause/stop | public | placeholder window | P6 |
-| Several printers at once | public | — | P6 |
+| Printer-specific binary formats, thumbnails | public | thumbnails done; binary G-code (`.bgcode`, uncompressed, from the published specification; not yet tried on a printer) | P5 |
+| USB printing, network printing (several firmware families), discovery | public | done: USB serial (simulated-printer tests), OctoPrint and Moonraker upload; no discovery | P6 |
+| Print camera | public | done (JPEG snapshots) | P6 |
+| Control panel: connect, jog, home, temperatures, fan, terminal, pause/stop | public | done | P6 |
+| Several printers at once | public | done (several USB connections; one controlled, the others report progress; simulated printers only) | P6 |
 | Bed levelling assistant | public | — | P6 |
 
 ### 3.8 Application
@@ -183,16 +193,16 @@ grouping is its own.
 |---|---|---|---|
 | Menus: file, edit, view, model, repair, supports, slice, machine, help | observed | done (our own grouping) | P6 |
 | View presets (7 directions), fit all / fit selection | public | done | P6 |
-| Perspective / orthographic | observed | placeholder | P6 |
+| Perspective / orthographic | observed | done | P6 |
 | Toggle grid, build volume, axes | observed | done | P6 |
 | Light/dark theme | public | done | P6 |
 | Camera options: invert zoom, orbit speed | observed | done | P6 |
 | Camera schemes of other CAD tools, 3D mouse | public | — | P6 |
-| Keyboard shortcuts list; shortcut editor | public | partial (list only) | P6 |
+| Keyboard shortcuts list; shortcut editor | public | done (18 rebindable actions, clash warning) | P6 |
 | Preferences that persist | public | done (preferences, recent projects, last profile) | P6 |
-| Language selection | public | placeholder | P6 |
+| Language selection | public | done: English and Bulgarian for menus, panels, dialogs, setting names and choices; help texts and status messages stay English | P6 |
 | Workspace tabs | observed | — | P6 |
-| Agent control (CLI, MCP) | absent in the reference | partial (CLI done, MCP dispatch done, no transport) | P5 |
+| Agent control (CLI, MCP) | absent in the reference | done (CLI; MCP server over stdio with 32 tools) | P5 |
 
 ## 4. What this changes in SliceCraft
 
@@ -210,11 +220,11 @@ grouping is its own.
 
 1. Which sparse patterns matter enough to build first after rectilinear/grid/
    triangles? (Gyroid is the most requested in reviews.)
-2. Support: pillar-grid (as the reference) or a region-based design? (R5.)
-3. Several profiles per job: per-model, per-height, or both from the start?
+2. Support: pillar-grid (as the reference) or a region-based design? Answered: region-based, pillars possible later ([R5](05-support.md)).
+3. Several profiles per job: per-model, per-height, or both from the start? Answered: both, as setting zones.
 4. Should SliceCraft read the reference's project or profile files for migration?
-   That would need a clean-room format study of its own and is out of scope until the
-   operator decides.
+   Profiles: **yes**, decided by the operator on 2026-11-13 and done ([R9](09-fff-profiles.md)).
+   Project files (`.factory`): still open.
 5. Preferences persistence: answered for now with two text files in the platform's
    per-user folder (`ui-egui::config`). Move to `craft-platform` / `craft-docpath`
    when SliceCraft joins the suite.

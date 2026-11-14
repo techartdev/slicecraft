@@ -21,6 +21,8 @@
 //! scale = 1 1 1
 //! triangles = 1284
 //! mesh = AAAAAAAA…
+//! [support]
+//! block = 100 90 120 110 0 100000
 //! ```
 //!
 //! Everything read is hostile: the header must match, sizes are checked before
@@ -31,7 +33,11 @@
 use crate::IoError;
 use crate::mesh_in::MAX_TRIANGLES;
 use slicecraft_doc::profile::{self, Profile};
-use slicecraft_doc::{MAX_OBJECTS, SceneObject, Transform};
+use slicecraft_doc::settings::spec;
+use slicecraft_doc::{
+    MAX_OBJECTS, MAX_SUPPORT_EDITS, MAX_ZONES, SceneObject, SettingZone, SupportEdit,
+    SupportEditKind, Transform,
+};
 use slicecraft_geom::{Mesh, Triangle, Vec3};
 
 /// First line of every project file.
@@ -44,12 +50,21 @@ const TRIANGLE_BYTES: usize = 72;
 pub struct Project {
     pub profile: Profile,
     pub objects: Vec<SceneObject>,
+    /// Boxes where support is added or blocked.
+    pub support_edits: Vec<SupportEdit>,
+    /// Setting zones.
+    pub zones: Vec<SettingZone>,
     /// One note per line that was skipped.
     pub warnings: Vec<String>,
 }
 
 /// The project as text.
-pub fn write_project(profile: &Profile, objects: &[SceneObject]) -> String {
+pub fn write_project(
+    profile: &Profile,
+    objects: &[SceneObject],
+    edits: &[SupportEdit],
+    zones: &[SettingZone],
+) -> String {
     let mut out = String::new();
     out.push_str(PROJECT_HEADER);
     out.push('\n');
@@ -60,6 +75,12 @@ pub fn write_project(profile: &Profile, objects: &[SceneObject]) -> String {
         out.push_str("[object]\n");
         out.push_str(&format!("name = {}\n", profile::quote(&o.name)));
         out.push_str(&format!("visible = {}\n", o.visible));
+        if o.role != slicecraft_doc::ModelRole::Print {
+            out.push_str(&format!("role = {}\n", o.role.name()));
+        }
+        if let Some(g) = o.group {
+            out.push_str(&format!("group = {g}\n"));
+        }
         out.push_str(&format!("translate = {}\n", vec3(t.translate)));
         out.push_str(&format!("rotate = {}\n", vec3(t.rotate)));
         out.push_str(&format!("scale = {}\n", vec3(t.scale)));
@@ -67,6 +88,35 @@ pub fn write_project(profile: &Profile, objects: &[SceneObject]) -> String {
         out.push_str("mesh = ");
         out.push_str(&encode_mesh(&o.mesh));
         out.push('\n');
+    }
+    for z in zones {
+        out.push_str("[zone]\n");
+        out.push_str(&format!("name = {}\n", profile::quote(&z.name)));
+        out.push_str(&format!("from = {}\nto = {}\n", z.z_from, z.z_to));
+        if !z.objects.is_empty() {
+            let ids: Vec<String> = z.objects.iter().map(ToString::to_string).collect();
+            out.push_str(&format!("objects = {}\n", ids.join(" ")));
+        }
+        for (k, v) in &z.overrides {
+            if let Some(s) = spec(k) {
+                out.push_str(&format!("set {k} = {}\n", profile::format_value(s.kind, v)));
+            }
+        }
+    }
+    if !edits.is_empty() {
+        out.push_str("[support]\n");
+        for e in edits {
+            out.push_str(&format!(
+                "{} = {} {} {} {} {} {}\n",
+                e.kind.name(),
+                e.x0,
+                e.y0,
+                e.x1,
+                e.y1,
+                e.z0,
+                e.z1
+            ));
+        }
     }
     out
 }
@@ -85,6 +135,8 @@ struct ObjectBlock {
     line: usize,
     name: String,
     visible: bool,
+    role: slicecraft_doc::ModelRole,
+    group: Option<u32>,
     transform: Transform,
     triangles: Option<usize>,
     mesh: Option<Mesh>,
@@ -96,6 +148,8 @@ impl ObjectBlock {
             line,
             name: "model".into(),
             visible: true,
+            role: slicecraft_doc::ModelRole::Print,
+            group: None,
             transform: Transform::default(),
             triangles: None,
             mesh: None,
@@ -115,12 +169,16 @@ impl ObjectBlock {
         let mut o = SceneObject::new(self.name, mesh);
         o.transform = transform;
         o.visible = self.visible;
+        o.role = self.role;
+        o.group = self.group;
         Ok(o)
     }
 }
 
 enum Section {
     Top,
+    Support,
+    Zone,
     Profile,
     Object(ObjectBlock),
     Unknown,
@@ -137,6 +195,8 @@ pub fn read_project(text: &str) -> Result<Project, IoError> {
     let mut profile_text = String::new();
     let mut profile_line = 0;
     let mut objects: Vec<SceneObject> = Vec::new();
+    let mut support_edits: Vec<SupportEdit> = Vec::new();
+    let mut zones: Vec<SettingZone> = Vec::new();
     let mut warnings = Vec::new();
     let mut section = Section::Top;
 
@@ -154,6 +214,14 @@ pub fn read_project(text: &str) -> Result<Project, IoError> {
                 }
                 "[profile]" => return Err(bad(n, "a second [profile] section")),
                 "[object]" => Section::Object(ObjectBlock::new(n)),
+                "[support]" => Section::Support,
+                "[zone]" => {
+                    if zones.len() >= MAX_ZONES {
+                        return Err(bad(n, "the project has more zones than SliceCraft accepts"));
+                    }
+                    zones.push(SettingZone::new("zone"));
+                    Section::Zone
+                }
                 _ => {
                     warnings.push(format!("line {n}: unknown section {line} skipped"));
                     Section::Unknown
@@ -167,6 +235,83 @@ pub fn read_project(text: &str) -> Result<Project, IoError> {
                 profile_text.push('\n');
             }
             Section::Object(block) => object_line(block, line, n, &mut warnings)?,
+            Section::Zone => {
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                let Some(z) = zones.last_mut() else { continue };
+                let Some((key, value)) = line.split_once('=') else {
+                    warnings.push(format!("line {n}: no '='"));
+                    continue;
+                };
+                let (key, value) = (key.trim(), value.trim());
+                match key {
+                    "name" => z.name = profile::unquote(value).unwrap_or_else(|| value.to_string()),
+                    "from" => {
+                        z.z_from =
+                            value.parse().map_err(|_| bad(n, "a zone height is not a number"))?
+                    }
+                    "to" => {
+                        z.z_to =
+                            value.parse().map_err(|_| bad(n, "a zone height is not a number"))?
+                    }
+                    "objects" => {
+                        z.objects = value
+                            .split_whitespace()
+                            .map(|t| t.parse::<usize>())
+                            .collect::<Result<_, _>>()
+                            .map_err(|_| bad(n, "zone models are not numbers"))?;
+                        z.objects.truncate(MAX_OBJECTS);
+                    }
+                    other => match other.strip_prefix("set ").map(str::trim) {
+                        Some(k) => {
+                            match spec(k).and_then(|s| profile::parse_value(s.kind, value)) {
+                                Some(v) => {
+                                    z.overrides.insert(k.to_string(), v);
+                                }
+                                None => {
+                                    warnings.push(format!("line {n}: zone setting {k} skipped"))
+                                }
+                            }
+                        }
+                        None => {
+                            warnings.push(format!("line {n}: unknown zone key {other} skipped"))
+                        }
+                    },
+                }
+            }
+            Section::Support => {
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                let Some((key, value)) = line.split_once('=') else {
+                    warnings.push(format!("line {n}: no '='"));
+                    continue;
+                };
+                let kind = match key.trim() {
+                    "add" => SupportEditKind::Add,
+                    "block" => SupportEditKind::Block,
+                    other => {
+                        warnings.push(format!("line {n}: unknown support edit {other} skipped"));
+                        continue;
+                    }
+                };
+                let v: Vec<f64> = value.split_whitespace().filter_map(|t| t.parse().ok()).collect();
+                let &[x0, y0, x1, y1, z0, z1] = v.as_slice() else {
+                    return Err(bad(n, "a support edit needs six numbers"));
+                };
+                let e = SupportEdit { kind, x0, y0, x1, y1, z0, z1 };
+                if !e.is_valid() {
+                    return Err(bad(n, "a support edit is out of range"));
+                }
+                if support_edits.len() >= MAX_SUPPORT_EDITS {
+                    return Err(bad(
+                        n,
+                        "the project has more support edits than SliceCraft accepts",
+                    ));
+                }
+                support_edits.push(e);
+            }
             Section::Top => {
                 if !line.is_empty() && !line.starts_with('#') {
                     warnings.push(format!("line {n}: text before the first section skipped"));
@@ -184,7 +329,13 @@ pub fn read_project(text: &str) -> Result<Project, IoError> {
     let (profile, profile_warnings) = Profile::from_text(&profile_text)
         .map_err(|_| bad(profile_line, "the [profile] section is not a SliceCraft profile"))?;
     warnings.extend(profile_warnings.into_iter().map(|w| format!("profile {w}")));
-    Ok(Project { profile, objects, warnings })
+    for z in &zones {
+        z.validate().map_err(|_| bad(1, "a setting zone is out of range"))?;
+        if z.objects.iter().any(|&i| i >= objects.len()) {
+            return Err(bad(1, "a setting zone names a model that is not there"));
+        }
+    }
+    Ok(Project { profile, objects, support_edits, zones, warnings })
 }
 
 fn push_object(objects: &mut Vec<SceneObject>, block: ObjectBlock) -> Result<(), IoError> {
@@ -211,6 +362,13 @@ fn object_line(
     let (key, value) = (key.trim(), value.trim());
     match key {
         "name" => block.name = profile::unquote(value).ok_or(bad(n, "a name is not quoted"))?,
+        "role" => {
+            block.role = slicecraft_doc::ModelRole::from_name(value)
+                .ok_or(bad(n, "an unknown model role"))?;
+        }
+        "group" => {
+            block.group = Some(value.parse().map_err(|_| bad(n, "a group is not a number"))?)
+        }
         "visible" => {
             block.visible = match value {
                 "true" => true,
@@ -289,7 +447,7 @@ fn decode_mesh(text: &str, count: usize, n: usize) -> Result<Mesh, IoError> {
 const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 /// Standard base64 with padding.
-fn base64_encode(bytes: &[u8]) -> String {
+pub fn base64_encode(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
         let b = [
@@ -380,6 +538,9 @@ mod tests {
         let mut b = SceneObject::new("odd name = [x]", octahedron(10.0).unwrap_or_default());
         b.visible = false;
         b.mirror(slicecraft_doc::Axis::X).ok();
+        b.role = slicecraft_doc::ModelRole::Cutter;
+        a.group = Some(3);
+        b.group = Some(3);
         (profile, vec![a, b])
     }
 
@@ -402,20 +563,25 @@ mod tests {
     #[test]
     fn project_round_trip_is_byte_identical() {
         let (profile, objects) = sample();
-        let text = write_project(&profile, &objects);
+        let text = write_project(&profile, &objects, &[], &[]);
         let p = read_project(&text).ok().unwrap_or_else(|| Project {
             profile: profile.clone(),
             objects: Vec::new(),
+            support_edits: Vec::new(),
+            zones: Vec::new(),
             warnings: vec!["read failed".into()],
         });
         assert!(p.warnings.is_empty(), "{:?}", p.warnings);
         assert_eq!(p.profile, profile);
         assert_eq!(p.objects.len(), 2);
-        let again = write_project(&p.profile, &p.objects);
+        let again = write_project(&p.profile, &p.objects, &p.support_edits, &p.zones);
         assert_eq!(again, text);
         let b = &p.objects[1];
         assert_eq!(b.name, "odd name = [x]");
         assert!(!b.visible);
+        assert_eq!(b.role, slicecraft_doc::ModelRole::Cutter);
+        assert_eq!(p.objects[0].role, slicecraft_doc::ModelRole::Print);
+        assert!(p.objects.iter().all(|o| o.group == Some(3)));
         assert_eq!(p.objects[0].transform, objects[0].transform);
         assert_eq!(p.objects[0].mesh.triangles(), objects[0].mesh.triangles());
     }
@@ -423,7 +589,7 @@ mod tests {
     #[test]
     fn hostile_projects_are_refused_not_crashed() {
         let (profile, objects) = sample();
-        let text = write_project(&profile, &objects);
+        let text = write_project(&profile, &objects, &[], &[]);
         // every prefix either reads or is refused
         let mut cut = 0;
         while cut < text.len() {
@@ -452,7 +618,7 @@ mod tests {
     fn a_mesh_with_a_huge_coordinate_is_refused() {
         let (profile, mut objects) = sample();
         objects.truncate(1);
-        let text = write_project(&profile, &objects);
+        let text = write_project(&profile, &objects, &[], &[]);
         // replace the mesh with one triangle whose first coordinate is 1e300
         let mut bytes = Vec::new();
         for c in [1e300f64, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0] {
@@ -470,11 +636,52 @@ mod tests {
     #[test]
     fn unknown_keys_and_sections_are_skipped_with_warnings() {
         let (profile, objects) = sample();
-        let text = write_project(&profile, &objects).replace(
+        let text = write_project(&profile, &objects, &[], &[]).replace(
             "[object]\nname = \"cube\"",
             "[future]\nwhatever = 1\n[object]\ncolour = red\nname = \"cube\"",
         );
         let p = read_project(&text);
         assert!(p.as_ref().is_ok_and(|p| p.objects.len() == 2 && p.warnings.len() == 2), "{p:?}");
+    }
+
+    #[test]
+    fn support_edits_round_trip_and_bad_ones_are_refused() {
+        let (profile, objects) = sample();
+        let edits = vec![
+            SupportEdit::columns(SupportEditKind::Block, (10.0, 20.5), (30.25, 40.0)),
+            SupportEdit {
+                z0: 2.0,
+                z1: 7.5,
+                ..SupportEdit::columns(SupportEditKind::Add, (1.0, 1.0), (3.0, 4.0))
+            },
+        ];
+        let text = write_project(&profile, &objects, &edits, &[]);
+        let p = read_project(&text);
+        assert!(p.as_ref().is_ok_and(|p| p.support_edits == edits), "{p:?}");
+        if let Ok(p) = p {
+            assert_eq!(write_project(&p.profile, &p.objects, &p.support_edits, &p.zones), text);
+        }
+        for bad in ["block = 1 2 3", "block = 5 5 1 1 0 9", "add = 0 0 NaN 1 0 1"] {
+            let t = format!("{}[support]\n{bad}\n", write_project(&profile, &objects, &[], &[]));
+            assert!(read_project(&t).is_err(), "accepted {bad}");
+        }
+    }
+
+    #[test]
+    fn zones_round_trip() {
+        use slicecraft_doc::settings::SettingValue;
+        let (profile, objects) = sample();
+        let mut z = SettingZone::new("top \"half\"");
+        z.z_from = 5.0;
+        z.z_to = 12.5;
+        z.objects = vec![1];
+        z.overrides.insert("infill_percentage".into(), SettingValue::Float(60.0));
+        z.overrides.insert("perimeter_count".into(), SettingValue::Int(4));
+        let text = write_project(&profile, &objects, &[], std::slice::from_ref(&z));
+        let p = read_project(&text);
+        assert!(p.as_ref().is_ok_and(|p| p.zones == vec![z.clone()]), "{p:?}");
+        // a zone naming a model that is not there is refused
+        let bad = text.replace("objects = 1", "objects = 7");
+        assert!(read_project(&bad).is_err());
     }
 }

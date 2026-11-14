@@ -17,11 +17,18 @@ pub mod app;
 pub mod camera;
 pub mod config;
 pub mod dialogs;
+pub mod gizmo;
+pub mod gpu;
+pub mod i18n;
 pub mod icons;
+pub mod keys;
 pub mod menus;
+pub mod network;
 pub mod panels;
 pub mod scene;
+pub mod theme;
 pub mod viewport;
+pub mod wizard;
 
 use slicecraft_engine::{COMMANDS, CommandState, Session};
 use slicecraft_render::{Layer, Point2};
@@ -31,24 +38,57 @@ pub use app::SliceCraftApp;
 /// Open the SliceCraft window and run until it is closed. `files` are opened
 /// as if dropped on the window: projects, profiles or models.
 pub fn run(session: Session, files: Vec<std::path::PathBuf>) -> Result<(), String> {
+    run_on(eframe::Renderer::Wgpu, session, files)
+}
+
+fn run_on(
+    renderer: eframe::Renderer,
+    session: Session,
+    files: Vec<std::path::PathBuf>,
+) -> Result<(), String> {
     let options = eframe::NativeOptions {
+        renderer,
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("SliceCraft")
             .with_inner_size([1500.0, 920.0])
-            .with_min_inner_size([960.0, 600.0])
+            .with_min_inner_size([1024.0, 640.0])
             .with_drag_and_drop(true),
         ..Default::default()
     };
     eframe::run_native(
         "SliceCraft",
         options,
-        Box::new(move |_cc| {
+        Box::new(move |cc| {
+            theme::install_fonts(&cc.egui_ctx);
+            let mut session = session;
+            session.set_interactive(true);
             let mut app = SliceCraftApp::with_config(session, config::config_dir());
+            match cc.wgpu_render_state.as_ref().map(gpu::Gpu::new) {
+                Some(Ok(g)) => app.gpu = Some(g),
+                Some(Err(e)) => app.gpu_note = Some(e),
+                None => {
+                    app.gpu_note = Some("the window was opened without the graphics card".into())
+                }
+            }
             app.open_paths(files);
             Ok(Box::new(app))
         }),
     )
     .map_err(|e| e.to_string())
+}
+
+/// The window on the graphics card first (wgpu), and on OpenGL when that
+/// cannot start, so a machine without a usable wgpu adapter still gets a
+/// window (with the 3D view drawn by the processor).
+pub fn run_with_fallback(
+    session: impl Fn() -> Session,
+    files: Vec<std::path::PathBuf>,
+) -> Result<(), String> {
+    match run_on(eframe::Renderer::Wgpu, session(), files.clone()) {
+        Ok(()) => Ok(()),
+        Err(first) => run_on(eframe::Renderer::Glow, session(), files)
+            .map_err(|second| format!("{first}; OpenGL: {second}")),
+    }
 }
 
 /// Which panel has focus. Panels read engine state and act through commands.
@@ -134,13 +174,19 @@ mod tests {
             }],
             triangles_considered: 1,
             dropped_chains: 0,
+            open: Vec::new(),
         }
     }
 
     #[test]
     fn palette_marks_planned_commands_disabled() {
         let rows = ViewState::palette();
-        assert!(rows.iter().any(|r| r.id == "supports" && !r.enabled));
+        for r in &rows {
+            let ready = slicecraft_engine::COMMANDS
+                .iter()
+                .any(|c| c.id == r.id && c.state == slicecraft_engine::CommandState::Ready);
+            assert!(ready || !r.enabled, "{} is planned but enabled", r.id);
+        }
         assert!(rows.iter().any(|r| r.id == "undo" && r.enabled));
         assert!(rows.iter().any(|r| r.id == "slice" && r.enabled));
     }

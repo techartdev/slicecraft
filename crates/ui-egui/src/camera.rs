@@ -10,6 +10,8 @@ const MIN_PITCH: f64 = -1.55;
 const MAX_PITCH: f64 = 1.55;
 /// Nearest depth that is drawn, mm.
 pub const NEAR: f64 = 1.0;
+/// How far behind the orbit point a parallel view stands, mm.
+const ORTHO_BACKOFF: f64 = 10_000.0;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct OrbitCamera {
@@ -21,6 +23,8 @@ pub struct OrbitCamera {
     pub distance: f64,
     /// Vertical field of view, radians.
     pub fov: f64,
+    /// Parallel projection: sizes do not shrink with distance.
+    pub ortho: bool,
 }
 
 /// A point on screen with its depth along the view direction.
@@ -50,6 +54,8 @@ pub struct Frame {
     focal: f64,
     cx: f64,
     cy: f64,
+    /// Parallel projection: pixels per millimetre.
+    ortho: Option<f64>,
 }
 
 /// Standard directions to look at the bed from.
@@ -129,6 +135,7 @@ impl OrbitCamera {
             pitch: 0.62,
             distance: span * 1.4,
             fov: 40f64.to_radians(),
+            ortho: false,
         }
     }
 
@@ -174,7 +181,15 @@ impl OrbitCamera {
             .unwrap_or(Vec3::new(1.0, 0.0, 0.0));
         let up = right.cross(forward);
         let focal = (viewport.height.max(1.0) / 2.0) / (self.fov / 2.0).tan();
+        // a parallel view keeps the perspective view's scale at the target, and
+        // stands far back so nothing on the bed falls behind it
+        let (eye, ortho) = if self.ortho {
+            (eye - forward.scale(ORTHO_BACKOFF), Some(focal / self.distance.max(1e-6)))
+        } else {
+            (eye, None)
+        };
         Frame {
+            ortho,
             eye,
             right,
             up,
@@ -187,6 +202,51 @@ impl OrbitCamera {
 }
 
 impl Frame {
+    /// The same projection as [`Frame::project`], as a clip-space matrix for
+    /// the GPU (column-major, for WGSL). `width` and `height` are the view's
+    /// size in the units `project` returns. Depth is reversed: nearer is
+    /// larger, 1 at the near plane, towards 0 far away.
+    pub fn clip_matrix(&self, width: f64, height: f64) -> [f32; 16] {
+        let (hw, hh) = ((width / 2.0).max(1e-6), (height / 2.0).max(1e-6));
+        let (r, u, fw, e) = (self.right, self.up, self.forward, self.eye);
+        // rows of the matrix: clip = M · (x, y, z, 1)
+        let rows: [[f64; 4]; 4] = match self.ortho {
+            Some(k) => {
+                let (sx, sy) = (k / hw, k / hh);
+                let far = ORTHO_BACKOFF * 4.0;
+                [
+                    [r.x * sx, r.y * sx, r.z * sx, -r.dot(e) * sx],
+                    [u.x * sy, u.y * sy, u.z * sy, -u.dot(e) * sy],
+                    [-fw.x / far, -fw.y / far, -fw.z / far, 1.0 + fw.dot(e) / far],
+                    [0.0, 0.0, 0.0, 1.0],
+                ]
+            }
+            None => {
+                let (sx, sy) = (self.focal / hw, self.focal / hh);
+                [
+                    [r.x * sx, r.y * sx, r.z * sx, -r.dot(e) * sx],
+                    [u.x * sy, u.y * sy, u.z * sy, -u.dot(e) * sy],
+                    [0.0, 0.0, 0.0, NEAR],
+                    [fw.x, fw.y, fw.z, -fw.dot(e)],
+                ]
+            }
+        };
+        let mut m = [0.0f32; 16];
+        for (row, values) in rows.iter().enumerate() {
+            for (col, v) in values.iter().enumerate() {
+                if let Some(slot) = m.get_mut(col * 4 + row) {
+                    *slot = *v as f32;
+                }
+            }
+        }
+        m
+    }
+
+    /// The camera's right, up and forward directions.
+    pub fn axes(&self) -> (Vec3, Vec3, Vec3) {
+        (self.right, self.up, self.forward)
+    }
+
     /// The camera position.
     pub fn eye(&self) -> Vec3 {
         self.eye
@@ -199,9 +259,10 @@ impl Frame {
         if depth < NEAR || !depth.is_finite() {
             return None;
         }
+        let k = self.ortho.unwrap_or(self.focal / depth);
         Some(Projected {
-            x: self.cx + v.dot(self.right) / depth * self.focal,
-            y: self.cy - v.dot(self.up) / depth * self.focal,
+            x: self.cx + v.dot(self.right) * k,
+            y: self.cy - v.dot(self.up) * k,
             depth,
         })
     }
@@ -226,7 +287,16 @@ impl Frame {
 
     /// Pixels per millimetre at `depth`.
     pub fn scale_at(&self, depth: f64) -> f64 {
-        if depth > 0.0 { self.focal / depth } else { 0.0 }
+        match self.ortho {
+            Some(k) => k,
+            None if depth > 0.0 => self.focal / depth,
+            None => 0.0,
+        }
+    }
+
+    /// The direction from `p` towards the viewer (for back-face tests).
+    pub fn toward_viewer(&self, p: Vec3) -> Vec3 {
+        if self.ortho.is_some() { self.forward.scale(-1.0) } else { self.eye - p }
     }
 
     /// The light direction for simple shading: from over the viewer's shoulder.
@@ -236,8 +306,35 @@ impl Frame {
             .unwrap_or(Vec3::new(0.0, 0.0, 1.0))
     }
 
+    /// The ray through a screen point: origin and unit direction.
+    pub fn ray(&self, x: f64, y: f64) -> (Vec3, Vec3) {
+        match self.ortho {
+            Some(k) => (
+                self.eye + self.right.scale((x - self.cx) / k) + self.up.scale((self.cy - y) / k),
+                self.forward,
+            ),
+            None => {
+                let d = self.forward.scale(self.focal)
+                    + self.right.scale(x - self.cx)
+                    + self.up.scale(self.cy - y);
+                (self.eye, d.normalized().unwrap_or(self.forward))
+            }
+        }
+    }
+
     /// Where the screen point hits the bed plane z = 0, if it does.
     pub fn bed_point(&self, x: f64, y: f64) -> Option<Vec3> {
+        if let Some(k) = self.ortho {
+            // parallel rays from the screen plane
+            let origin =
+                self.eye + self.right.scale((x - self.cx) / k) + self.up.scale((self.cy - y) / k);
+            let d = self.forward;
+            if d.z.abs() < 1e-12 {
+                return None;
+            }
+            let t = -origin.z / d.z;
+            return (t > 0.0 && t.is_finite()).then(|| origin + d.scale(t));
+        }
         let dir = self.forward.scale(self.focal)
             + self.right.scale(x - self.cx)
             + self.up.scale(self.cy - y);
@@ -256,7 +353,67 @@ impl Frame {
 mod tests {
     use super::*;
 
+    /// Screen position of `p` through `clip_matrix`, as `project` gives it.
+    fn through_matrix(f: &Frame, vp: Viewport, p: Vec3) -> (f64, f64, f64) {
+        let m = f.clip_matrix(vp.width, vp.height);
+        let at = |row: usize, col: usize| f64::from(m.get(col * 4 + row).copied().unwrap_or(0.0));
+        let c: Vec<f64> =
+            (0..4).map(|r| at(r, 0) * p.x + at(r, 1) * p.y + at(r, 2) * p.z + at(r, 3)).collect();
+        let (x, y, z) = (c[0] / c[3], c[1] / c[3], c[2] / c[3]);
+        (vp.left + vp.width / 2.0 * (1.0 + x), vp.top + vp.height / 2.0 * (1.0 - y), z)
+    }
+
+    #[test]
+    fn the_gpu_matrix_projects_like_the_cpu() {
+        let vp = Viewport { left: 10.0, top: 20.0, width: 900.0, height: 600.0 };
+        for ortho in [false, true] {
+            let mut cam = OrbitCamera::for_bed(220.0, 220.0, 250.0);
+            cam.ortho = ortho;
+            cam.orbit(0.3, -0.2);
+            let f = cam.frame(vp);
+            for p in [
+                Vec3::new(110.0, 110.0, 0.0),
+                Vec3::new(10.0, 200.0, 30.0),
+                Vec3::new(200.0, 15.0, 120.0),
+            ] {
+                let Some(cpu) = f.project(p) else { continue };
+                let (x, y, z) = through_matrix(&f, vp, p);
+                assert!(
+                    (x - cpu.x).abs() < 0.05 && (y - cpu.y).abs() < 0.05,
+                    "{ortho}: {x},{y} vs {cpu:?}"
+                );
+                assert!(z > 0.0 && z <= 1.0, "depth {z}");
+            }
+            // nearer points get larger depth values (reversed depth)
+            let near = f.eye() + f.forward.scale(50.0);
+            let far = f.eye() + f.forward.scale(500.0);
+            let (_, _, zn) = through_matrix(&f, vp, near);
+            let (_, _, zf) = through_matrix(&f, vp, far);
+            assert!(zn > zf, "{ortho}: {zn} {zf}");
+        }
+    }
+
     const VP: Viewport = Viewport { left: 0.0, top: 0.0, width: 800.0, height: 600.0 };
+
+    #[test]
+    fn a_parallel_view_keeps_sizes_and_finds_the_bed() {
+        let mut cam = OrbitCamera::for_bed(200.0, 200.0, 200.0);
+        cam.ortho = true;
+        let f = cam.frame(VP);
+        let near = f.project(Vec3::new(0.0, 0.0, 0.0));
+        let a = f.project(Vec3::new(100.0, 100.0, 0.0));
+        let b = f.project(Vec3::new(110.0, 100.0, 0.0));
+        let c = f.project(Vec3::new(0.0, 0.0, 0.0));
+        let d = f.project(Vec3::new(10.0, 0.0, 0.0));
+        let (Some(a), Some(b), Some(c), Some(d), Some(_)) = (a, b, c, d, near) else { return };
+        let len = |p: Projected, q: Projected| ((p.x - q.x).powi(2) + (p.y - q.y).powi(2)).sqrt();
+        assert!((len(a, b) - len(c, d)).abs() < 1e-6, "10 mm is as long anywhere");
+        let hit = f.bed_point(a.x, a.y);
+        assert!(
+            hit.is_some_and(|h| (h.x - 100.0).abs() < 1e-6 && (h.y - 100.0).abs() < 1e-6),
+            "{hit:?}"
+        );
+    }
 
     #[test]
     fn target_projects_to_centre() {
