@@ -1006,11 +1006,18 @@ pub fn status_bar(app: &mut SliceCraftApp, ui: &mut Ui) {
         }
         let color = if app.status_is_error { p.warn } else { p.text };
         let status = app.status.clone();
-        ui.add(
-            egui::Label::new(RichText::new(status).size(13.0).color(color))
-                .truncate()
-                .sense(Sense::hover()),
-        );
+        // leave room for the profile, bed and model count on the right; the
+        // whole message shows on hover
+        let room = (ui.available_width() - 440.0).max(120.0);
+        ui.scope(|ui| {
+            ui.set_max_width(room);
+            ui.add(
+                egui::Label::new(RichText::new(&status).size(13.0).color(color))
+                    .truncate()
+                    .sense(Sense::hover()),
+            )
+            .on_hover_text(&status);
+        });
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let doc = app.session.document();
             let info = |ui: &mut Ui, text: String| {
