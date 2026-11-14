@@ -20,8 +20,6 @@ and write G-code for a real printer. The target is the feature set of the
 established desktop slicers; the implementation is our own. Every action is also a
 command that the window, a scriptable command line and AI agents (over MCP) share.
 
-**SliceCraft is a candidate member of the ArtCraft crafting-app suite.** Membership
-is pending; nothing here claims approval.
 
 ## Screenshots
 
