@@ -16,6 +16,7 @@
 
 pub mod gcode;
 pub mod mesh_in;
+pub mod project;
 
 use std::fmt;
 
@@ -24,6 +25,7 @@ pub use mesh_in::{
     Imported, MAX_FACETS_DECLARED, MAX_TRIANGLES, MeshFormat, read_ascii_stl, read_binary_stl,
     read_mesh, read_obj, read_stl,
 };
+pub use project::{PROJECT_HEADER, Project, read_project, write_project};
 pub use slicecraft_doc::Flavor;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,6 +36,11 @@ pub enum IoError {
     Unsupported(&'static str),
     TooLarge,
     NonFinite,
+    /// A project file that cannot be read; `line` is 1-based.
+    BadProject {
+        line: usize,
+        what: &'static str,
+    },
 }
 
 impl fmt::Display for IoError {
@@ -49,6 +56,7 @@ impl fmt::Display for IoError {
                 f.write_str("the file declares more triangles than SliceCraft accepts")
             }
             IoError::NonFinite => f.write_str("the file contains a non-finite coordinate"),
+            IoError::BadProject { line, what } => write!(f, "line {line} of the project: {what}"),
         }
     }
 }

@@ -35,6 +35,16 @@ pub const TOOLS: &[ToolSpec] = &[
         description: "Import an STL or OBJ model from `path` into the document",
     },
     ToolSpec {
+        name: "slicecraft.open_project",
+        command: "open-project",
+        description: "Replace the document with the SliceCraft project at `path`",
+    },
+    ToolSpec {
+        name: "slicecraft.save_project",
+        command: "save-project",
+        description: "Save models, placement and profile as a project at `path`",
+    },
+    ToolSpec {
         name: "slicecraft.arrange",
         command: "arrange",
         description: "Lay all models out on the bed without overlap",
@@ -104,6 +114,11 @@ fn run(session: &mut Session, command: Command) -> Reply {
             Reply::Text(format!("loaded profile {name} ({} warnings)", warnings.len()))
         }
         Ok(Outcome::Saved { path }) => Reply::Text(format!("saved {}", path.display())),
+        Ok(Outcome::ProjectOpened { path, objects, warnings }) => Reply::Text(format!(
+            "opened {} with {objects} model(s) ({} warnings)",
+            path.display(),
+            warnings.len()
+        )),
         Ok(Outcome::Sliced { layers, stats }) => Reply::Text(format!(
             "{layers} layers, {:.0} mm filament, about {:.0} s",
             stats.gcode.filament_mm, stats.gcode.estimated_seconds
@@ -128,6 +143,14 @@ pub fn dispatch(session: &mut Session, call: &Call) -> Reply {
         "import" => match path {
             Some(p) => run(session, Command::ImportFile(p)),
             None => Reply::Error("import needs a `path` argument".into()),
+        },
+        "open-project" => match path {
+            Some(p) => run(session, Command::OpenProject(p)),
+            None => Reply::Error("open_project needs a `path` argument".into()),
+        },
+        "save-project" => match path {
+            Some(p) => run(session, Command::SaveProject(p)),
+            None => Reply::Error("save_project needs a `path` argument".into()),
         },
         "arrange" => run(session, Command::Arrange),
         "remove" => match call.args.get("index").and_then(|i| i.parse::<usize>().ok()) {

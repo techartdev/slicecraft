@@ -12,11 +12,14 @@
 //! ```text
 //! slicecraft-cli commands
 //! slicecraft-cli info  <model.stl|obj>
-//! slicecraft-cli slice <model>... -o <out.gcode> [options]
+//! slicecraft-cli slice [project.scproj] [model]... -o <out.gcode> [options]
 //!   --flavor marlin|reprap|klipper   --layer-height MM   --first-layer MM
 //!   --width MM   --perimeters N   --infill PCT   --top N   --bottom N
 //!   --nozzle C   --bed C   --skirt N   --profile FILE   --json
 //! ```
+//!
+//! A project file brings its models, placement and profile; `--profile` and
+//! the options above then override its settings, and further models are added.
 //!
 //! Exit status is 1 on a refused input, 2 on a usage error. Every action goes
 //! through the engine's commands, the same ones the window and MCP use.
@@ -53,7 +56,7 @@ impl std::fmt::Display for CliError {
     }
 }
 
-const USAGE: &str = "usage: slicecraft-cli commands | info <model> | slice <model>... -o <out.gcode> [--flavor NAME] [--layer-height MM] [--first-layer MM] [--width MM] [--perimeters N] [--infill PCT] [--top N] [--bottom N] [--nozzle C] [--bed C] [--skirt N] [--profile FILE] [--json]";
+const USAGE: &str = "usage: slicecraft-cli commands | info <model> | slice [project.scproj] [model]... -o <out.gcode> [--flavor NAME] [--layer-height MM] [--first-layer MM] [--width MM] [--perimeters N] [--infill PCT] [--top N] [--bottom N] [--nozzle C] [--bed C] [--skirt N] [--profile FILE] [--json]";
 
 fn failed(e: impl std::fmt::Display) -> CliError {
     CliError::Failed(e.to_string())
@@ -100,7 +103,21 @@ fn slice(args: &[String]) -> Result<(), CliError> {
     let mut out: Option<PathBuf> = None;
     let mut json = false;
     let mut session = Session::new();
-    // a profile file first, so the options below override it
+    // a project first, then a profile file, so the options below override both
+    let is_project = |a: &String| a.to_ascii_lowercase().ends_with(".scproj");
+    let mut projects = args.iter().filter(|a| is_project(a));
+    let project = projects.next();
+    if projects.next().is_some() {
+        return Err(CliError::Usage("slice takes at most one project".into()));
+    }
+    if let Some(path) = project
+        && let Outcome::ProjectOpened { warnings, .. } =
+            session.execute(Command::OpenProject(PathBuf::from(path))).map_err(failed)?
+    {
+        for w in warnings {
+            eprintln!("slicecraft-cli: {path}: {w}");
+        }
+    }
     if let Some(i) = args.iter().position(|a| a == "--profile") {
         let path =
             args.get(i + 1).ok_or_else(|| CliError::Usage("--profile needs a file".into()))?;
@@ -148,6 +165,7 @@ fn slice(args: &[String]) -> Result<(), CliError> {
             flag if flag.starts_with("--") => {
                 return Err(CliError::Usage(format!("unknown option {flag}")));
             }
+            _ if is_project(a) => {}
             model => models.push(PathBuf::from(model)),
         }
     }
@@ -159,8 +177,8 @@ fn slice(args: &[String]) -> Result<(), CliError> {
         out = models.pop();
     }
     let out = out.ok_or_else(|| CliError::Usage("slice needs -o <out.gcode>".into()))?;
-    if models.is_empty() {
-        return Err(CliError::Usage("slice needs at least one model".into()));
+    if models.is_empty() && project.is_none() {
+        return Err(CliError::Usage("slice needs a project or at least one model".into()));
     }
     session.execute(Command::Profile(Box::new(p))).map_err(failed)?;
     for m in models {

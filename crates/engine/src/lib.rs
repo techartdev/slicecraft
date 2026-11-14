@@ -18,7 +18,7 @@ pub mod pipeline;
 use slicecraft_doc::profile::{MAX_PROFILE_BYTES, Profile};
 use slicecraft_doc::{Axis, DocError, Document, PrintSettings, SceneObject, Transform};
 use slicecraft_geom::{GeomError, Vec3};
-use slicecraft_io::{IoError, MeshFormat, read_mesh};
+use slicecraft_io::{IoError, MeshFormat, read_mesh, read_project, write_project};
 use slicecraft_render::{Layer, RenderError, layers};
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -82,9 +82,9 @@ pub const COMMANDS: &[CommandSpec] = &[
     ready("profile", "Print Settings"),
     ready("load-profile", "Load Profile"),
     ready("save-profile", "Save Profile"),
-    planned("new-project", "New Project"),
-    planned("open-project", "Open Project"),
-    planned("save-project", "Save Project"),
+    ready("new-project", "New Project"),
+    ready("open-project", "Open Project"),
+    ready("save-project", "Save Project"),
     planned("multi-profile", "Several Profiles per Job"),
     planned("setting-zones", "Height and Region Setting Zones"),
     planned("profile-wizard", "Printer Setup Assistant"),
@@ -162,6 +162,12 @@ pub enum Command {
         path: PathBuf,
         name: String,
     },
+    /// Start an empty project, keeping the current profile. Clears undo.
+    NewProject,
+    /// Replace the document with a project file. Clears undo.
+    OpenProject(PathBuf),
+    /// Write models, placement and profile to a project file.
+    SaveProject(PathBuf),
     /// Slice now, on the calling thread.
     Slice,
     /// Write G-code to a file, slicing first if the slice is stale.
@@ -183,6 +189,9 @@ impl Command {
             Command::Profile(_) => "profile",
             Command::LoadProfile(_) => "load-profile",
             Command::SaveProfile { .. } => "save-profile",
+            Command::NewProject => "new-project",
+            Command::OpenProject(_) => "open-project",
+            Command::SaveProject(_) => "save-project",
             Command::Slice => "slice",
             Command::ExportGcode(_) => "export-gcode",
         }
@@ -207,6 +216,11 @@ pub enum Outcome {
     },
     Saved {
         path: PathBuf,
+    },
+    ProjectOpened {
+        path: PathBuf,
+        objects: usize,
+        warnings: Vec<String>,
     },
     Sliced {
         layers: usize,
@@ -248,6 +262,11 @@ pub struct Session {
     /// model, typing in a field) becomes one undo step.
     last_edit: Option<(&'static str, usize)>,
     profile_name: String,
+    /// The project file this document was last opened from or saved to.
+    project_path: Option<PathBuf>,
+    /// Revision at the last project save or open; differs when there are
+    /// unsaved changes.
+    saved_revision: u64,
 }
 
 impl Session {
@@ -290,6 +309,35 @@ impl Session {
 
     pub fn set_profile_name(&mut self, name: impl Into<String>) {
         self.profile_name = name.into();
+    }
+
+    /// Install a profile without an undo step or an unsaved-changes mark, as
+    /// when restoring the last session's profile at start-up.
+    pub fn restore_profile(&mut self, profile: Profile) -> Result<(), EngineError> {
+        profile.settings.validate()?;
+        let clean = !self.is_modified();
+        self.doc.set_settings(profile.settings);
+        self.profile_name = profile.name;
+        self.revision += 1;
+        if clean {
+            self.saved_revision = self.revision;
+        }
+        Ok(())
+    }
+
+    /// The current profile with its name.
+    pub fn profile(&self) -> Profile {
+        Profile { name: self.profile_name.clone(), settings: self.doc.settings.clone() }
+    }
+
+    /// The project file of this document, once opened or saved.
+    pub fn project_path(&self) -> Option<&Path> {
+        self.project_path.as_deref()
+    }
+
+    /// True when the document changed since it was last opened or saved.
+    pub fn is_modified(&self) -> bool {
+        self.revision != self.saved_revision
     }
 
     /// The slice of the current document, if one has been taken since the last change.
@@ -473,6 +521,39 @@ impl Session {
                 self.profile_name = name;
                 Ok(Outcome::Saved { path })
             }
+            Command::NewProject => {
+                let settings = self.doc.settings.clone();
+                self.doc = Document::default();
+                self.doc.set_settings(settings);
+                self.reset_history(None);
+                Ok(Outcome::Changed)
+            }
+            Command::OpenProject(path) => {
+                let bytes = read_bounded(&path, MAX_FILE_BYTES)?;
+                let text =
+                    String::from_utf8(bytes).map_err(|_| EngineError::Io(IoError::NotUtf8))?;
+                let project = read_project(&text)?;
+                project.profile.settings.validate()?;
+                let mut doc = Document::default();
+                doc.set_settings(project.profile.settings);
+                let objects = project.objects.len();
+                for o in project.objects {
+                    doc.add(o)?;
+                }
+                self.doc = doc;
+                self.profile_name = project.profile.name;
+                self.reset_history(Some(path.clone()));
+                Ok(Outcome::ProjectOpened { path, objects, warnings: project.warnings })
+            }
+            Command::SaveProject(path) => {
+                let text = write_project(&self.profile(), &self.doc.objects);
+                std::fs::write(&path, text).map_err(|e| {
+                    EngineError::File(format!("cannot write {}: {e}", path.display()))
+                })?;
+                self.project_path = Some(path.clone());
+                self.saved_revision = self.revision;
+                Ok(Outcome::Saved { path })
+            }
             Command::Slice => {
                 let out = self.slice_now()?;
                 Ok(Outcome::Sliced { layers: out.layers.len(), stats: out.stats.clone() })
@@ -488,6 +569,16 @@ impl Session {
                 Ok(Outcome::Exported { path, bytes: out.gcode.len() })
             }
         }
+    }
+
+    /// A new or opened document: no undo history, nothing unsaved.
+    fn reset_history(&mut self, path: Option<PathBuf>) {
+        self.undo.clear();
+        self.redo.clear();
+        self.last_edit = None;
+        self.revision += 1;
+        self.saved_revision = self.revision;
+        self.project_path = path;
     }
 
     fn slice_now(&mut self) -> Result<Arc<SliceOutput>, EngineError> {
@@ -869,6 +960,99 @@ mod tests {
         assert_eq!(s.document().settings.layer_height, 0.16);
         assert_eq!(s.profile_name(), "Mine");
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn projects_save_open_and_track_unsaved_changes() {
+        let Some(mut s) = session_with(cube(10.0)) else { return };
+        assert!(
+            s.execute(Command::Import {
+                name: "box".into(),
+                bytes: stl_of(&cuboid(Vec3::ZERO, Vec3::new(5.0, 8.0, 3.0)).unwrap_or_default()),
+                extension: Some("stl".into())
+            })
+            .is_ok()
+        );
+        assert!(s.execute(Command::Mirror { index: 1, axis: Axis::Y }).is_ok());
+        assert!(s.execute(Command::SetVisible { index: 0, visible: false }).is_ok());
+        let p = PrintSettings { layer_height: 0.12, ..PrintSettings::default() };
+        assert!(s.execute(Command::Profile(Box::new(p))).is_ok());
+        assert!(s.is_modified());
+        let path =
+            std::env::temp_dir().join(format!("slicecraft-project-{}.scproj", std::process::id()));
+        let r = s.execute(Command::SaveProject(path.clone()));
+        assert!(r.is_ok(), "{r:?}");
+        assert!(!s.is_modified());
+        assert_eq!(s.project_path(), Some(path.as_path()));
+        let saved = std::fs::read(&path).unwrap_or_default();
+
+        // a fresh session opens it back to the same document
+        let mut t = Session::new();
+        let r = t.execute(Command::OpenProject(path.clone()));
+        assert!(
+            matches!(&r, Ok(Outcome::ProjectOpened { objects: 2, warnings, .. }) if warnings.is_empty()),
+            "{r:?}"
+        );
+        assert!(!t.is_modified());
+        assert!(!t.can_undo(), "opening a project starts a new history");
+        assert_eq!(t.document().settings.layer_height, 0.12);
+        assert!(!t.document().objects.first().is_some_and(|o| o.visible));
+        assert_eq!(
+            t.document().objects.get(1).map(|o| o.world_bounds()),
+            s.document().objects.get(1).map(|o| o.world_bounds())
+        );
+        // and saving it again writes the same bytes
+        let again = std::env::temp_dir()
+            .join(format!("slicecraft-project-{}-again.scproj", std::process::id()));
+        assert!(t.execute(Command::SaveProject(again.clone())).is_ok());
+        assert_eq!(std::fs::read(&again).unwrap_or_default(), saved);
+
+        // new project: no models, same profile, nothing to save
+        assert!(t.execute(Command::NewProject).is_ok());
+        assert!(t.document().objects.is_empty());
+        assert_eq!(t.document().settings.layer_height, 0.12);
+        assert!(!t.is_modified() && t.project_path().is_none());
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&again);
+    }
+
+    #[test]
+    fn a_damaged_project_is_refused_and_the_document_kept() {
+        let Some(mut s) = session_with(cube(10.0)) else { return };
+        let path =
+            std::env::temp_dir().join(format!("slicecraft-bad-{}.scproj", std::process::id()));
+        let _ = std::fs::write(
+            &path,
+            "# SliceCraft project 1
+[profile]
+# SliceCraft profile 1
+layer_height = 0.2
+[object]
+triangles = 2
+mesh = AAAA
+",
+        );
+        assert!(s.execute(Command::OpenProject(path.clone())).is_err());
+        assert_eq!(s.document().objects.len(), 1);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn restoring_a_profile_does_not_mark_changes() {
+        let mut s = Session::new();
+        let profile = Profile {
+            name: "Last".into(),
+            settings: PrintSettings { layer_height: 0.3, ..PrintSettings::default() },
+        };
+        assert!(s.restore_profile(profile).is_ok());
+        assert!(!s.is_modified() && !s.can_undo());
+        assert_eq!(s.profile_name(), "Last");
+        let bad = Profile {
+            name: "Bad".into(),
+            settings: PrintSettings { layer_height: -1.0, ..PrintSettings::default() },
+        };
+        assert!(s.restore_profile(bad).is_err());
+        assert_eq!(s.document().settings.layer_height, 0.3);
     }
 
     #[test]
