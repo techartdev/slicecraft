@@ -7,7 +7,7 @@ version = "0.0.1"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 rust-version = "1.93"
-repository = "https://github.com/storytold/slicecraft"
+repository = "https://github.com/techartdev/slicecraft"
 
 [workspace.dependencies]
 # internal

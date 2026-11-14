@@ -4,17 +4,22 @@ Every asset in this repository that is not original code must have a row here, w
 author, source and licence. `cargo xtask assets` (planned) fails when a file under
 `assets/` has no row.
 
-SliceCraft currently ships **no file assets**: icons are drawn in code, fonts are not
-bundled (they come from `storytold/craft-fonts` at build time, never as a dependency;
-the window reads the operating system's own interface font at run time when one is
-installed, such as Segoe UI, Noto Sans or DejaVu Sans, and otherwise uses egui's
-built-in fonts; no font file is copied into the program or the repository),
-and test models are generated in code (`slicecraft_render::fixtures`) or are original
+The program ships **no file assets**: icons are drawn in code, and fonts are not
+bundled (the window reads the operating system's own interface font at run time when
+one is installed, such as Segoe UI, Noto Sans or DejaVu Sans, and otherwise uses
+egui's built-in fonts; no font file is copied into the program or the repository).
+Test models are generated in code (`slicecraft_render::fixtures`) or are original
 geometry (`examples/cube.stl`).
+
+The repository holds screenshots for the documentation, in `docs/images/`:
 
 | Asset | Author | Source | Licence |
 |---|---|---|---|
-| — | — | — | — |
+| `docs/images/*.jpg` (screenshots of SliceCraft) | the SliceCraft contributors | taken from the running program | CC-BY-4.0 |
+| The vase shown in `preview.jpg`, `preview-layers.jpg`, `vase-mode.jpg`, `plate-preview.jpg`, `rotate-tool.jpg`, `section-view.jpg`, `wireframe.jpg`: *Spiral vase* | JJ76 | https://www.thingiverse.com/thing:2795194 | Creative Commons Attribution (CC BY), as the thing page states |
+| `docs/images/cube-infill.jpg`, `settings-*.jpg`: models shown | the SliceCraft contributors | `examples/cube.stl` and models named only in the list | original |
+
+The model file itself is not in the repository; the screenshots only show it.
 
 ## Third-party code
 

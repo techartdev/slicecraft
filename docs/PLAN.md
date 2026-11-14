@@ -1,6 +1,6 @@
 # SliceCraft — program plan
 
-> **Status:** MVP (2026-11-13): window, slicing pipeline, toolpath preview — see `ROADMAP.md`. **Approval to join the ArtCraft suite: pending.**
+> **Status:** feature complete, not yet test-printed (2026-11-14) — see `ROADMAP.md`. **Approval to join the ArtCraft suite: pending.**
 > **Target:** Simplify3D 5.1.2 behaviour, clean-room, pure Rust.
 > **Reference:** observed black-box (the running application and the G-code it writes) and public documentation.
 
@@ -40,7 +40,7 @@ and `craft-libs`, and the launcher/wiki expectations:
 |---|---|---|
 | House-rules blocks in `AGENTS.md` (core + rust) | `craft-contrib/standards/*` | present |
 | Never-crash: no `unwrap/expect/panic/todo/unimplemented`, no `unsafe`; crate-root `deny` lists | rust house rules | present |
-| Licence allowlist respected; `MIT OR Apache-2.0` | house rules | MIT text present, Apache text to add at first release |
+| Licence allowlist respected; `MIT OR Apache-2.0` | house rules | MIT and Apache-2.0 texts present |
 | `ATTRIBUTION.md` for every non-code asset | house rules | present (empty, enforced later by xtask) |
 | Layered crates with a swappable UI crate | cadcraft, craft-anything | present, checked by `cargo xtask layers` |
 | Everything is a command; agent surface names commands | cadcraft | present |

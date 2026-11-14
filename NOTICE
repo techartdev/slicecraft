@@ -3,9 +3,14 @@ Copyright 2026 the SliceCraft contributors
 
 This product is licensed under MIT OR Apache-2.0.
 
-SliceCraft is a clean-room reimplementation of 3D print slicing workflows. It is not
-affiliated with, endorsed by, or derived from the source code of any commercial
-slicer. Behaviour was studied black-box and from public format specifications only.
+SliceCraft is an independent implementation of 3D print slicing workflows. It is not
+affiliated with or endorsed by any commercial slicer, and contains no code,
+user-visible text, profiles or artwork from one. Simplify3D is a trademark of its
+owner.
+
+Documentation screenshots show "Spiral vase" by JJ76
+(https://www.thingiverse.com/thing:2795194), licensed under Creative Commons
+Attribution. See ATTRIBUTION.md.
 
 ArtCraft, the Craft App Suite and their marks belong to their respective owners. This
 repository is a candidate member of the suite; membership is pending approval and no

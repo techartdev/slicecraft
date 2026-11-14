@@ -14,6 +14,7 @@ open questions. Method rules are in [../PLAN.md](../PLAN.md) §5.
 | R7 | — | Dialect differences across flavours | open |
 | R9 | [09-fff-profiles.md](09-fff-profiles.md) | How is a Simplify3D profile stored, and what do its values mean in SliceCraft's terms? | done |
 | R8 | — | Time and material estimates | open |
+| R10 | [10-s3d-comparison.md](10-s3d-comparison.md) | Side by side with the reference on real jobs: layers, filament, time, retractions | done |
 
 ## Evidence base
 

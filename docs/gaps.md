@@ -162,7 +162,7 @@ the architecture document, not to a quieter line here.
 - **Not a git repository yet**; no remote.
 - **Licence exceptions** for the window's dependencies are recorded in
   `ATTRIBUTION.md` and must be proposed upstream before joining the suite.
-- **Apache-2.0 text missing** (MIT present); dual licensing to be completed at first release.
+- **Test prints:** none yet; real-print calibration is the next step.
 - **No `cargo xtask assets`**, no `contributors/people.toml`, no app icon set or
   desktop/metainfo/plist/wxs files, no `storytold/slicecraft-corpus`.
 - **No `craft-libs` dependencies** — deliberately deferred until approval (PLAN §7).
