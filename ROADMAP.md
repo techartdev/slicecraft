@@ -25,7 +25,7 @@ the extrusion model, the estimates and support removal, this is not a release �
 
 | Number | Value | Kind |
 |---|---|---|
-| Phases complete | P0–P5 in code; P6 without packaging | measured against the phase table |
+| Phases complete | P0–P5 in code; P6 with Windows packaging only | measured against the phase table |
 | Crates | 7 libraries, 2 apps, 1 tool | measured |
 | Lines of Rust | ≈ 28,000 | measured (`cargo xtask stats`) |
 | Tests | 281, all green | measured (`cargo test --workspace`) |
@@ -56,14 +56,14 @@ damaged meshes dominate the uncertainty.
 | **P3** Shells & infill | shells ✓, seams ✓, thin walls and gap fill ✓, ten infill patterns ✓, solid top/bottom, bridges, ironing, reinforcement ✓, extrusion model ✓ (matches the reference's outer-wall filament within 0.1%) | **done** | crown outer perimeter 1641 vs 1642 mm |
 | **P4** Support & control | support pillars and areas ✓, preview ✓, add/block boxes ✓; skirt, brim, raft ✓; retraction rules, coast, wipe, combing ✓; schedules ✓ | **done** | crown support filament 676 vs 682 mm |
 | **P5** Output & agents | three flavours, arcs, thumbnails ✓; preview ✓; turn-weighted estimates ✓; MCP over stdio ✓ (32 tools); multi-tool with prime tower and ooze shield ✓ (synthetic tests) | **done** | `mcp::server` tests and a scripted MCP session slicing a 190k-triangle model |
-| **P6** UI & packaging | egui window ✓, 3D bed view ✓, panels ✓, dialogs ✓, visual overhaul (theme, cards, floating view and tool bars, settings editor with a tab list, machine panel with a jog pad, light theme) ✓, GPU 3D view (wgpu: lit beads, depth, 4× anti-aliasing, CPU fallback) ✓; USB and network printing ✓, camera ✓; packaging ✗; wasm ✗ | started | window driven and screenshotted on Windows 11, dark, light, English and Bulgarian |
+| **P6** UI & packaging | egui window ✓, 3D bed view ✓, panels ✓, dialogs ✓, visual overhaul (theme, cards, floating view and tool bars, settings editor with a tab list, machine panel with a jog pad, light theme) ✓, GPU 3D view (wgpu: lit beads, depth, 4× anti-aliasing, CPU fallback) ✓; USB and network printing ✓, camera ✓; packaging: Windows zip and installer ✓ (`cargo xtask dist`), other platforms ✗; wasm ✗ | started | window driven and screenshotted on Windows 11, dark, light, English and Bulgarian |
 
 ## What is next (concrete)
 
 1. **Real-print check** of the 20 mm cube, the crown with support and a two-tool part;
    record filament, time and support removal as measured.
 2. **Calibrate the time estimate** against the printer's own report.
-3. **Packaging** (MSI, Linux packages) and the **wasm build**.
+3. **Packaging** for Linux and macOS (builds, packages) and the **wasm build**.
 4. **Fuzz** the STL, 3MF, project, profile and G-code readers.
 5. **Upstream the licence exceptions** recorded in [ATTRIBUTION.md](ATTRIBUTION.md).
 

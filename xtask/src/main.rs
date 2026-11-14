@@ -12,6 +12,9 @@
 //! - `ci`      run what CI runs, in order, stopping at the first failure
 //! - `layers`  check the crate layering rules
 //! - `stats`   count lines per crate
+//! - `dist`    build the release and pack it (archive, installer, checksums)
+
+mod dist;
 
 use std::process::{Command, ExitCode};
 
@@ -21,8 +24,9 @@ fn main() -> ExitCode {
         Some("ci") => ci(),
         Some("layers") => layers(),
         Some("stats") => stats(),
+        Some("dist") => dist::dist(),
         _ => {
-            eprintln!("usage: cargo xtask <ci|layers|stats>");
+            eprintln!("usage: cargo xtask <ci|layers|stats|dist>");
             ExitCode::from(2)
         }
     }

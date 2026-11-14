@@ -14,6 +14,7 @@
 //! use; replacing this crate replaces the UI and nothing else.
 
 pub mod app;
+pub mod appicon;
 pub mod camera;
 pub mod config;
 pub mod dialogs;
@@ -52,7 +53,12 @@ fn run_on(
             .with_title("SliceCraft")
             .with_inner_size([1500.0, 920.0])
             .with_min_inner_size([1024.0, 640.0])
-            .with_drag_and_drop(true),
+            .with_drag_and_drop(true)
+            .with_icon(eframe::egui::IconData {
+                rgba: appicon::rgba(256),
+                width: 256,
+                height: 256,
+            }),
         ..Default::default()
     };
     eframe::run_native(
