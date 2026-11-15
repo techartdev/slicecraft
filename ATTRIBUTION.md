@@ -27,7 +27,7 @@ The model file itself is not in the repository; the screenshots only show it.
 
 | Tool | Used for | Licence |
 |---|---|---|
-| Inno Setup 6 (Jordan Russell, Martijn Laan) | the Windows installer, `packaging/windows/slicecraft.iss`; its setup and uninstall program is inside the installer | Inno Setup License (permissive; keeps its copyright notice). Not an SPDX identifier on the allowlist: the installer is not published until the operator approves it. The zip contains only SliceCraft's own build. |
+| Inno Setup 6 (Jordan Russell, Martijn Laan) | the Windows installer, `packaging/windows/slicecraft.iss`; its setup and uninstall program is inside the installer | Inno Setup License (permissive; keeps its copyright notice). Not an SPDX identifier on the allowlist; approved by the operator for the Windows installer on 2026-11-15, to be proposed upstream with the other exceptions. The zip contains only SliceCraft's own build. |
 
 ## Third-party code
 
