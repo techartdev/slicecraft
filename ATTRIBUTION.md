@@ -4,7 +4,9 @@ Every asset in this repository that is not original code must have a row here, w
 author, source and licence. `cargo xtask assets` (planned) fails when a file under
 `assets/` has no row.
 
-The program ships **no file assets**: icons are drawn in code, and fonts are not
+The program ships **no file assets**: icons, the application icon included, are drawn
+in code (`ui-egui::appicon`; `slicecraft --write-icon` writes it as an `.ico` for the
+installer), and fonts are not
 bundled (the window reads the operating system's own interface font at run time when
 one is installed, such as Segoe UI, Noto Sans or DejaVu Sans, and otherwise uses
 egui's built-in fonts; no font file is copied into the program or the repository).
@@ -20,6 +22,12 @@ The repository holds screenshots for the documentation, in `docs/images/`:
 | `docs/images/cube-infill.jpg`, `settings-*.jpg`: models shown | the SliceCraft contributors | `examples/cube.stl` and models named only in the list | original |
 
 The model file itself is not in the repository; the screenshots only show it.
+
+## Packaging tools
+
+| Tool | Used for | Licence |
+|---|---|---|
+| Inno Setup 6 (Jordan Russell, Martijn Laan) | the Windows installer, `packaging/windows/slicecraft.iss`; its setup and uninstall program is inside the installer | Inno Setup License (permissive; keeps its copyright notice). Not an SPDX identifier on the allowlist; approved by the operator for the Windows installer on 2026-11-15, to be proposed upstream with the other exceptions. The zip contains only SliceCraft's own build. |
 
 ## Third-party code
 

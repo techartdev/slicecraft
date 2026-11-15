@@ -47,7 +47,7 @@ and `craft-libs`, and the launcher/wiki expectations:
 | `ROADMAP.md` with measured parity and honest estimates | cadcraft | present, numbers marked as not yet measured |
 | `docs/` set: architecture, parity, gaps, research | cadcraft, craft-anything | present |
 | CI calling `storytold/craft-common-actions` | house rules | **not yet** — needs repo approval before workflows reference shared actions |
-| Packaging per platform (Windows MSI, macOS dmg, Linux nfpm/Flatpak, FreeBSD) | cadcraft | **not yet** (phase P6) |
+| Packaging per platform (Windows MSI, macOS dmg, Linux nfpm/Flatpak, FreeBSD) | cadcraft | Windows zip and Inno Setup installer (`cargo xtask dist`); others not yet |
 | App id `ai.storyteller.slicecraft`, icons in `assets/app-icon/`, wiki entries | cadcraft, craft-wiki | **not yet** |
 | Community repo `storytold/slicecraft-corpus` for test models | house rule 3 (shared corpora) | **not yet** |
 | `contributors/people.toml` entry | house rules | **not yet** |

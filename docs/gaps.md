@@ -142,7 +142,9 @@ the architecture document, not to a quieter line here.
   (upload, or upload and start), tested against a local fake host; no HTTPS, no host
   discovery, no live status from network hosts. The print camera shows a JPEG
   snapshot address refreshed about once a second (no MJPEG stream). No SD-card upload.
-- **No packaging** — no MSI, dmg, nfpm, Flatpak, FreeBSD package.
+- **Packaging: Windows only** — a zip and an Inno Setup installer from `cargo xtask dist`,
+  unsigned (SmartScreen warns on first run); no dmg, nfpm, Flatpak or FreeBSD package,
+  and no Linux or macOS build has been made yet.
 - **No CI** beyond `cargo xtask ci`; shared workflows are deferred until approval.
 - **No wasm build.**
 - **macOS, Linux and FreeBSD have never built this tree**; the window has only been run

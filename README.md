@@ -67,6 +67,20 @@ side with an established slicer on real jobs
 calibration from real prints comes next. Built and run on Windows 11 so far.
 [docs/gaps.md](docs/gaps.md) lists what is missing.
 
+## Install
+
+Download from the [releases page](https://github.com/techartdev/slicecraft/releases):
+
+- **Windows (x64):** `slicecraft-<version>-windows-x64-setup.exe` installs SliceCraft
+  for the current user (no administrator rights needed) with a Start menu entry, opens
+  `.scproj` projects and offers itself for STL, OBJ and 3MF files. Or unpack
+  `slicecraft-<version>-windows-x64.zip` anywhere and run `slicecraft.exe`. The files are not code-signed yet, so Windows SmartScreen may warn
+  on first run (**More info → Run anyway**). Checksums are in the `SHA256SUMS` file.
+- **Linux, macOS, BSD:** no downloads yet; build from source as below.
+
+A graphics card with Direct3D 12, Vulkan or Metal draws the 3D view; without one
+SliceCraft falls back to OpenGL and draws it on the processor.
+
 ## Build and run
 
 You need Rust 1.93 or newer.
@@ -78,6 +92,7 @@ cargo run --release -p slicecraft-cli -- slice examples/cube.stl -o cube.gcode -
 cargo run --release -p slicecraft-cli -- mcp               # an MCP server on stdio, for agents
 cargo test --workspace
 cargo xtask ci                  # fmt, clippy -D warnings, tests, layering
+cargo xtask dist                # release archive, installer (Windows, with Inno Setup), checksums
 ```
 
 In the window: drop model files on it or use **Import**, place them with the tools

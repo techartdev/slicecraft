@@ -13,7 +13,8 @@
 //!
 //! `slicecraft [files…]` opens the window with those files: a project
 //! (`.scproj`), a profile (`.scprofile`) or models (STL, OBJ).
-//! `--version` and `--commands` answer from the terminal without a window.
+//! `--version` and `--commands` answer from the terminal without a window;
+//! `--write-icon <file.ico>` writes the application icon.
 
 use slicecraft_engine::{COMMANDS, Session};
 use std::path::PathBuf;
@@ -24,6 +25,20 @@ fn main() -> std::process::ExitCode {
         Some("--version") | Some("-V") => {
             println!("slicecraft {}", env!("CARGO_PKG_VERSION"));
             std::process::ExitCode::SUCCESS
+        }
+        Some("--write-icon") => {
+            // the icon as a Windows .ico, for installers and shortcuts
+            let Some(path) = args.get(1) else {
+                eprintln!("slicecraft: --write-icon needs a file path");
+                return std::process::ExitCode::FAILURE;
+            };
+            match std::fs::write(path, slicecraft_ui_egui::appicon::ico()) {
+                Ok(()) => std::process::ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("slicecraft: cannot write {path}: {e}");
+                    std::process::ExitCode::FAILURE
+                }
+            }
         }
         Some("--commands") => {
             for c in COMMANDS {
