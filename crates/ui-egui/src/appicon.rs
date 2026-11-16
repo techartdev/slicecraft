@@ -1,7 +1,7 @@
 //! The application icon, drawn in code: a rounded blue tile with a stack of
 //! printed layers shaped like a vase, and a nozzle above them. No image file
-//! is shipped; the window icon and the `.ico` for installers are rendered
-//! from this one description.
+//! is shipped; the window icon, the Windows `.ico`, the macOS `.icns` and the
+//! Linux `.png` are all rendered from this one description.
 
 /// Side lengths written into the `.ico` file (px).
 pub const ICO_SIZES: [u32; 5] = [16, 24, 32, 48, 256];
@@ -133,6 +133,49 @@ pub fn ico() -> Vec<u8> {
     out
 }
 
+/// Entries of the macOS `.icns` file: type code and side (px), each a PNG.
+/// The `@2x` types share sizes with the plain ones.
+pub const ICNS_ENTRIES: [(&[u8; 4], u32); 8] = [
+    (b"icp4", 16),
+    (b"ic11", 32),
+    (b"icp5", 32),
+    (b"ic12", 64),
+    (b"ic07", 128),
+    (b"ic13", 256),
+    (b"ic08", 256),
+    (b"ic10", 1024),
+];
+
+/// The icon as a PNG file, `side` × `side` pixels (Linux desktop files).
+pub fn png(side: u32) -> Vec<u8> {
+    let side = side.clamp(1, MAX_SIDE);
+    slicecraft_io::thumbnail::png(&rgba(side), side, side)
+}
+
+/// A macOS `.icns` file: the icon at every size in [`ICNS_ENTRIES`], each
+/// entry a PNG behind its type code and length.
+pub fn icns() -> Vec<u8> {
+    let mut body = Vec::new();
+    let mut drawn: Vec<(u32, Vec<u8>)> = Vec::new();
+    for (kind, side) in ICNS_ENTRIES {
+        let data = match drawn.iter().find(|(s, _)| *s == side) {
+            Some((_, d)) => d.clone(),
+            None => {
+                let d = png(side);
+                drawn.push((side, d.clone()));
+                d
+            }
+        };
+        body.extend_from_slice(kind);
+        body.extend_from_slice(&((data.len() + 8) as u32).to_be_bytes());
+        body.extend_from_slice(&data);
+    }
+    let mut out = b"icns".to_vec();
+    out.extend_from_slice(&((body.len() + 8) as u32).to_be_bytes());
+    out.extend_from_slice(&body);
+    out
+}
+
 /// One `.ico` entry: a BITMAPINFOHEADER, BGRA rows bottom-up, and an
 /// all-clear AND mask (the alpha channel does the masking).
 fn bitmap(side: u32) -> Vec<u8> {
@@ -191,5 +234,28 @@ mod tests {
             assert_eq!(u32::from_le_bytes([f[off], f[off + 1], f[off + 2], f[off + 3]]), 40);
         }
         assert_eq!(rgba(0).len(), 4, "a zero size is drawn as one pixel");
+    }
+
+    #[test]
+    fn the_icns_file_holds_a_png_for_every_entry() {
+        let f = icns();
+        assert_eq!(f.get(0..4), Some(&b"icns"[..]));
+        let total = u32::from_be_bytes([f[4], f[5], f[6], f[7]]) as usize;
+        assert_eq!(total, f.len());
+        let mut at = 8;
+        let mut kinds = Vec::new();
+        while at + 8 <= f.len() {
+            let len = u32::from_be_bytes([f[at + 4], f[at + 5], f[at + 6], f[at + 7]]) as usize;
+            assert!(len > 8 && at + len <= f.len());
+            kinds.push([f[at], f[at + 1], f[at + 2], f[at + 3]]);
+            // each entry is a PNG whose width is the entry's side
+            assert_eq!(f.get(at + 8..at + 12), Some(&[0x89, b'P', b'N', b'G'][..]));
+            let width = u32::from_be_bytes([f[at + 24], f[at + 25], f[at + 26], f[at + 27]]);
+            let side = ICNS_ENTRIES.iter().find(|(k, _)| **k == kinds[kinds.len() - 1]);
+            assert_eq!(side.map(|(_, s)| *s), Some(width));
+            at += len;
+        }
+        assert_eq!(at, f.len());
+        assert_eq!(kinds.len(), ICNS_ENTRIES.len());
     }
 }

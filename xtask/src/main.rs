@@ -12,7 +12,8 @@
 //! - `ci`      run what CI runs, in order, stopping at the first failure
 //! - `layers`  check the crate layering rules
 //! - `stats`   count lines per crate
-//! - `dist`    build the release and pack it (archive, installer, checksums)
+//! - `dist`    build the release and pack it (archive, installer, checksums);
+//!   `dist --universal` on macOS builds for Intel and Apple Silicon
 
 mod dist;
 
@@ -24,7 +25,7 @@ fn main() -> ExitCode {
         Some("ci") => ci(),
         Some("layers") => layers(),
         Some("stats") => stats(),
-        Some("dist") => dist::dist(),
+        Some("dist") => dist::dist(args.get(1..).unwrap_or_default()),
         _ => {
             eprintln!("usage: cargo xtask <ci|layers|stats|dist>");
             ExitCode::from(2)

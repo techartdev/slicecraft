@@ -1,7 +1,11 @@
 //! `cargo xtask dist`: build the release binaries and pack them for people to
-//! download — a zip (or tar.gz off Windows) and, on Windows when Inno Setup is
-//! installed, an installer — with SHA-256 checksums beside them. Everything
-//! lands in `target/dist/`.
+//! download, with SHA-256 checksums beside them. Everything lands in
+//! `target/dist/`.
+//!
+//! - Windows: a zip and, when Inno Setup is installed, an installer.
+//! - macOS: `SliceCraft.app` in a disk image (`.dmg`). `--universal` builds
+//!   it for Intel and Apple Silicon in one bundle.
+//! - Linux and the rest: a tar.gz with a desktop file and a PNG icon.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
@@ -11,8 +15,16 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Files from the repository that travel with the program.
 const DOCS: [&str; 5] = ["README.md", "LICENSE-MIT", "LICENSE-APACHE", "NOTICE", "ATTRIBUTION.md"];
 
-fn platform() -> &'static str {
+/// The programs in a release.
+const BINS: [&str; 2] = ["slicecraft", "slicecraft-cli"];
+
+/// The targets of a universal macOS build, and the oldest macOS each runs on.
+const MAC_TARGETS: [(&str, &str); 2] =
+    [("x86_64-apple-darwin", "10.13"), ("aarch64-apple-darwin", "11.0")];
+
+fn platform(universal: bool) -> &'static str {
     match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", _) if universal => "macos-universal",
         ("windows", "x86_64") => "windows-x64",
         ("windows", "aarch64") => "windows-arm64",
         ("linux", "x86_64") => "linux-x64",
@@ -43,8 +55,29 @@ fn copy(from: &Path, to: &Path) -> Result<(), String> {
         .map_err(|e| format!("cannot copy {} to {}: {e}", from.display(), to.display()))
 }
 
-pub fn dist() -> ExitCode {
-    match build() {
+fn mkdir(p: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(p).map_err(|e| format!("cannot create {}: {e}", p.display()))
+}
+
+fn write(p: &Path, data: impl AsRef<[u8]>) -> Result<(), String> {
+    std::fs::write(p, data).map_err(|e| format!("cannot write {}: {e}", p.display()))
+}
+
+/// A fresh, empty directory.
+fn fresh(p: &Path) -> Result<(), String> {
+    if p.exists() {
+        std::fs::remove_dir_all(p).map_err(|e| format!("cannot clear {}: {e}", p.display()))?;
+    }
+    mkdir(p)
+}
+
+pub fn dist(args: &[String]) -> ExitCode {
+    let universal = args.iter().any(|a| a == "--universal");
+    if universal && !cfg!(target_os = "macos") {
+        eprintln!("xtask dist: --universal is for macOS");
+        return ExitCode::FAILURE;
+    }
+    match build(universal) {
         Ok(files) => {
             println!("xtask dist: ok");
             for f in files {
@@ -59,61 +92,97 @@ pub fn dist() -> ExitCode {
     }
 }
 
-fn build() -> Result<Vec<PathBuf>, String> {
-    run(
-        "cargo build --release",
-        Command::new("cargo").args([
-            "build",
-            "--release",
-            "-p",
-            "slicecraft",
-            "-p",
-            "slicecraft-cli",
-        ]),
-    )?;
-    let name = format!("slicecraft-{VERSION}-{}", platform());
+/// Build the programs; returns the directory holding them.
+fn compile(universal: bool) -> Result<PathBuf, String> {
+    let package_args = BINS.iter().flat_map(|b| ["-p", b]);
+    if !universal {
+        run(
+            "cargo build --release",
+            Command::new("cargo").args(["build", "--release"]).args(package_args),
+        )?;
+        return Ok(PathBuf::from("target").join("release"));
+    }
+    for (target, oldest) in MAC_TARGETS {
+        run(
+            &format!("cargo build --release --target {target}"),
+            Command::new("cargo")
+                .args(["build", "--release", "--target", target])
+                .args(package_args.clone())
+                .env("MACOSX_DEPLOYMENT_TARGET", oldest),
+        )?;
+    }
+    // one binary holding both architectures
+    let out = PathBuf::from("target").join("universal-apple-darwin").join("release");
+    mkdir(&out)?;
+    for bin in BINS {
+        let mut lipo = Command::new("lipo");
+        lipo.arg("-create").arg("-output").arg(out.join(bin));
+        for (target, _) in MAC_TARGETS {
+            lipo.arg(PathBuf::from("target").join(target).join("release").join(bin));
+        }
+        run(&format!("lipo {bin}"), &mut lipo)?;
+    }
+    Ok(out)
+}
+
+fn build(universal: bool) -> Result<Vec<PathBuf>, String> {
+    let bins = compile(universal)?;
+    let name = format!("slicecraft-{VERSION}-{}", platform(universal));
     let dist = PathBuf::from("target").join("dist");
     let stage = dist.join(&name);
-    if stage.exists() {
-        std::fs::remove_dir_all(&stage)
-            .map_err(|e| format!("cannot clear {}: {e}", stage.display()))?;
-    }
-    std::fs::create_dir_all(stage.join("examples"))
-        .map_err(|e| format!("cannot create {}: {e}", stage.display()))?;
-    let release = PathBuf::from("target").join("release");
-    for bin in ["slicecraft", "slicecraft-cli"] {
-        copy(&release.join(exe(bin)), &stage.join(exe(bin)))?;
-    }
+    fresh(&stage)?;
+    mkdir(&stage.join("examples"))?;
     for doc in DOCS {
         copy(Path::new(doc), &stage.join(doc))?;
     }
     copy(Path::new("examples/cube.stl"), &stage.join("examples").join("cube.stl"))?;
-    // the icon, drawn by the program itself
-    let ico = stage.join("slicecraft.ico");
-    run(
-        "write the icon",
-        Command::new(release.join(exe("slicecraft"))).arg("--write-icon").arg(&ico),
-    )?;
+    let gui = bins.join(exe("slicecraft"));
 
-    let mut out = Vec::new();
-    // the archive: zip on Windows (tar there writes zip), tar.gz elsewhere
-    let archive = if cfg!(windows) {
-        dist.join(format!("{name}.zip"))
+    let archive = if cfg!(target_os = "macos") {
+        mac_bundle(&bins, &stage)?;
+        dist.join(format!("{name}.dmg"))
     } else {
-        dist.join(format!("{name}.tar.gz"))
+        for bin in BINS {
+            copy(&bins.join(exe(bin)), &stage.join(exe(bin)))?;
+        }
+        // the icon, drawn by the program itself
+        let icon = if cfg!(windows) { "slicecraft.ico" } else { "slicecraft.png" };
+        run("write the icon", Command::new(&gui).arg("--write-icon").arg(stage.join(icon)))?;
+        if cfg!(windows) {
+            dist.join(format!("{name}.zip"))
+        } else {
+            copy(
+                &Path::new("packaging").join("linux").join("slicecraft.desktop"),
+                &stage.join("slicecraft.desktop"),
+            )?;
+            dist.join(format!("{name}.tar.gz"))
+        }
     };
     if archive.exists() {
         std::fs::remove_file(&archive)
             .map_err(|e| format!("cannot replace {}: {e}", archive.display()))?;
     }
-    let flags = if cfg!(windows) { "-a -cf" } else { "-czf" };
-    let mut tar = Command::new("tar");
-    tar.args(flags.split(' '))
-        .arg(archive.file_name().unwrap_or_default())
-        .arg(&name)
-        .current_dir(&dist);
-    run("pack the archive", &mut tar)?;
-    out.push(archive);
+    if cfg!(target_os = "macos") {
+        run(
+            "make the disk image",
+            Command::new("hdiutil")
+                .args(["create", "-quiet", "-ov", "-format", "UDZO", "-volname"])
+                .arg(format!("SliceCraft {VERSION}"))
+                .arg("-srcfolder")
+                .arg(&stage)
+                .arg(&archive),
+        )?;
+    } else {
+        // zip on Windows (tar there writes zip), tar.gz elsewhere
+        let flags = if cfg!(windows) { "-a -cf" } else { "-czf" };
+        let mut tar = Command::new("tar");
+        tar.args(flags.split(' '))
+            .arg(archive.file_name().unwrap_or_default())
+            .arg(&name)
+            .current_dir(&dist);
+        run("pack the archive", &mut tar)?;
+    }
+    let mut out = vec![archive];
 
     if cfg!(windows) {
         match inno_setup() {
@@ -146,11 +215,43 @@ fn build() -> Result<Vec<PathBuf>, String> {
         let file = f.file_name().and_then(|n| n.to_str()).unwrap_or("");
         sums.push_str(&format!("{}  {file}\n", hex(&sha256(&bytes))));
     }
-    let sums_path = dist.join(format!("slicecraft-{VERSION}-{}-SHA256SUMS.txt", platform()));
-    std::fs::write(&sums_path, sums)
-        .map_err(|e| format!("cannot write {}: {e}", sums_path.display()))?;
+    let sums_path =
+        dist.join(format!("slicecraft-{VERSION}-{}-SHA256SUMS.txt", platform(universal)));
+    write(&sums_path, sums)?;
     out.push(sums_path);
     Ok(out)
+}
+
+/// `SliceCraft.app` in `stage`, beside a link to /Applications to drag it
+/// onto. The command-line tool travels inside the bundle.
+fn mac_bundle(bins: &Path, stage: &Path) -> Result<(), String> {
+    let app = stage.join("SliceCraft.app");
+    let contents = app.join("Contents");
+    let macos = contents.join("MacOS");
+    let resources = contents.join("Resources");
+    mkdir(&macos)?;
+    mkdir(&resources)?;
+    for bin in BINS {
+        copy(&bins.join(bin), &macos.join(bin))?;
+    }
+    let plist = std::fs::read_to_string(Path::new("packaging").join("macos").join("Info.plist.in"))
+        .map_err(|e| format!("cannot read packaging/macos/Info.plist.in: {e}"))?;
+    write(&contents.join("Info.plist"), plist.replace("@VERSION@", VERSION))?;
+    run(
+        "write the icon",
+        Command::new(macos.join("slicecraft"))
+            .arg("--write-icon")
+            .arg(resources.join("slicecraft.icns")),
+    )?;
+    // an ad-hoc signature, so Apple Silicon runs it; not notarized
+    run(
+        "sign the bundle (ad hoc)",
+        Command::new("codesign").args(["--force", "--deep", "--sign", "-"]).arg(&app),
+    )?;
+    #[cfg(unix)]
+    std::os::unix::fs::symlink("/Applications", stage.join("Applications"))
+        .map_err(|e| format!("cannot link /Applications: {e}"))?;
+    Ok(())
 }
 
 /// Inno Setup's compiler: `ISCC` from the environment, else its usual places.

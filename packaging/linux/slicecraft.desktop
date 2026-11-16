@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=SliceCraft
+GenericName=3D print slicer
+Comment=Slice 3D models into G-code for your printer
+Exec=slicecraft %F
+Icon=slicecraft
+Terminal=false
+Categories=Graphics;3DGraphics;Engineering;
+MimeType=model/stl;model/obj;model/3mf;
+Keywords=3D;printing;slicer;G-code;STL;3MF;
