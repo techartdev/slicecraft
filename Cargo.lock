@@ -2843,7 +2843,7 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
 name = "slicecraft"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "slicecraft-engine",
  "slicecraft-ui-egui",
@@ -2851,7 +2851,7 @@ dependencies = [
 
 [[package]]
 name = "slicecraft-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "slicecraft-doc",
  "slicecraft-engine",
@@ -2861,14 +2861,14 @@ dependencies = [
 
 [[package]]
 name = "slicecraft-doc"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "slicecraft-geom",
 ]
 
 [[package]]
 name = "slicecraft-engine"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "slicecraft-doc",
  "slicecraft-geom",
@@ -2878,14 +2878,14 @@ dependencies = [
 
 [[package]]
 name = "slicecraft-geom"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "i_overlay",
 ]
 
 [[package]]
 name = "slicecraft-io"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "miniz_oxide 0.8.9",
  "roxmltree",
@@ -2897,7 +2897,7 @@ dependencies = [
 
 [[package]]
 name = "slicecraft-mcp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "slicecraft-doc",
  "slicecraft-engine",
@@ -2908,14 +2908,14 @@ dependencies = [
 
 [[package]]
 name = "slicecraft-render"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "slicecraft-geom",
 ]
 
 [[package]]
 name = "slicecraft-ui-egui"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "eframe",
  "rfd",
@@ -4118,7 +4118,7 @@ checksum = "e450f9b2ed1dff33c94c12589a87338689467b9c4f5d8a5710bd09a847d2c8a7"
 
 [[package]]
 name = "xtask"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "yoke"
