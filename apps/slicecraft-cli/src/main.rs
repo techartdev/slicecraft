@@ -210,11 +210,14 @@ fn slice(args: &[String]) -> Result<(), CliError> {
     let Outcome::Sliced { layers, stats } = session.execute(Command::Slice).map_err(failed)? else {
         return Err(CliError::Failed("slicing did not report a result".into()));
     };
-    let Outcome::Exported { bytes, .. } =
+    let Outcome::Exported { bytes, notes, .. } =
         session.execute(Command::ExportGcode(out.clone())).map_err(failed)?
     else {
         return Err(CliError::Failed("export did not report a result".into()));
     };
+    for n in &notes {
+        eprintln!("slicecraft-cli: post-processing: {n}");
+    }
     let g = stats.gcode;
     if json {
         let warnings: Vec<String> =

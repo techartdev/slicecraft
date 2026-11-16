@@ -371,7 +371,7 @@ impl Command {
 
 /// A slice as binary G-code: the facts a printer shows before printing, the
 /// preview image when the profile asks for one, then the G-code.
-fn binary_gcode(out: &SliceOutput, s: &PrintSettings, profile: &str) -> Vec<u8> {
+fn binary_gcode(out: &SliceOutput, gcode: &str, s: &PrintSettings, profile: &str) -> Vec<u8> {
     let g = &out.stats.gcode;
     let kv = |k: &str, v: String| (k.to_string(), v);
     let printer = vec![
@@ -411,8 +411,7 @@ fn binary_gcode(out: &SliceOutput, s: &PrintSettings, profile: &str) -> Vec<u8> 
     let side = u16::try_from(size).unwrap_or(16);
     let thumbnails = if png.is_empty() { Vec::new() } else { vec![(side, side, png.as_slice())] };
     // the plain file's thumbnail comments are not needed in a binary file
-    let text: String = out
-        .gcode
+    let text: String = gcode
         .lines()
         .scan(false, |inside, l| {
             if l.starts_with("; thumbnail begin") {
@@ -425,7 +424,7 @@ fn binary_gcode(out: &SliceOutput, s: &PrintSettings, profile: &str) -> Vec<u8> 
             Some(keep.then_some(l))
         })
         .flatten()
-        .fold(String::with_capacity(out.gcode.len()), |mut acc, l| {
+        .fold(String::with_capacity(gcode.len()), |mut acc, l| {
             acc.push_str(l);
             acc.push('\n');
             acc
@@ -540,6 +539,9 @@ pub enum Outcome {
     Exported {
         path: PathBuf,
         bytes: usize,
+        /// What post-processing said: steps that matched nothing, programs
+        /// that were not run.
+        notes: Vec<String>,
     },
 }
 
@@ -1504,7 +1506,7 @@ impl Session {
                 std::fs::write(&path, &bytes).map_err(|e| {
                     EngineError::File(format!("cannot write {}: {e}", path.display()))
                 })?;
-                Ok(Outcome::Exported { path, bytes: bytes.len() })
+                Ok(Outcome::Exported { path, bytes: bytes.len(), notes: Vec::new() })
             }
             Command::ExportGcode(path) => {
                 let out = match self.slice_result() {
@@ -1514,19 +1516,35 @@ impl Session {
                 let binary = self.doc.settings.output_format
                     == slicecraft_doc::OutputFormat::Binary
                     || path.extension().is_some_and(|e| e.eq_ignore_ascii_case("bgcode"));
-                let bytes = if binary {
-                    binary_gcode(&out, &self.doc.settings, &self.profile_name)
+                // the profile's text edits apply to every export; its programs
+                // run only for a person at the window
+                let script = self.doc.settings.post_process.clone();
+                let post = if script.trim().is_empty() {
+                    slicecraft_io::postprocess::Applied {
+                        gcode: out.gcode.clone(),
+                        ..Default::default()
+                    }
                 } else {
-                    out.gcode.as_bytes().to_vec()
+                    slicecraft_io::postprocess::apply(&out.gcode, &script)
+                        .map_err(|e| EngineError::File(e.to_string()))?
+                };
+                let bytes = if binary {
+                    binary_gcode(&out, &post.gcode, &self.doc.settings, &self.profile_name)
+                } else {
+                    post.gcode.as_bytes().to_vec()
                 };
                 std::fs::write(&path, &bytes).map_err(|e| {
                     EngineError::File(format!("cannot write {}: {e}", path.display()))
                 })?;
-                let program = self.doc.settings.post_process.trim().to_string();
-                if self.interactive && !program.is_empty() {
-                    post_process(&program, &path)?;
+                let mut notes = post.unmatched.clone();
+                for program in &post.programs {
+                    if self.interactive {
+                        run_post_program(program, &path)?;
+                    } else {
+                        notes.push(format!("post-processing program not run here: {program}"));
+                    }
                 }
-                Ok(Outcome::Exported { path, bytes: bytes.len() })
+                Ok(Outcome::Exported { path, bytes: bytes.len(), notes })
             }
         }
     }
@@ -1661,18 +1679,16 @@ fn read_bounded(path: &Path, limit: u64) -> Result<Vec<u8>, EngineError> {
         .map_err(|e| EngineError::File(format!("cannot read {}: {e}", path.display())))
 }
 
-/// Run the profile's post-processing program on a written file: the first
-/// word is the program, the rest its arguments, with `{file}` replaced by the
-/// path (or the path added last when no argument names it).
-fn post_process(program: &str, path: &Path) -> Result<(), EngineError> {
-    let mut words = program.split_whitespace();
-    let Some(exe) = words.next() else { return Ok(()) };
+/// Run one post-processing program on a written file: the first word is the
+/// program, the rest its arguments (double quotes keep spaces), with
+/// `[output_filepath]` or `{file}` replaced by the path, or the path added
+/// last when no argument names it.
+fn run_post_program(program: &str, path: &Path) -> Result<(), EngineError> {
     let file = path.display().to_string();
-    let mut args: Vec<String> = words.map(|w| w.replace("{file}", &file)).collect();
-    if !program.contains("{file}") {
-        args.push(file);
-    }
-    let status = std::process::Command::new(exe)
+    let Some((exe, args)) = slicecraft_io::postprocess::program_args(program, &file) else {
+        return Ok(());
+    };
+    let status = std::process::Command::new(&exe)
         .args(&args)
         .status()
         .map_err(|e| EngineError::File(format!("post-processing could not start {exe}: {e}")))?;
@@ -3098,6 +3114,42 @@ T0 ; tool change"
         let missing = PathBuf::from("no/such/profile");
         let zone = Box::new(slicecraft_doc::SettingZone::new("x"));
         assert!(s.execute(Command::ZoneFromProfile { path: missing, zone }).is_err());
+    }
+
+    #[test]
+    fn post_processing_edits_apply_and_programs_wait_for_a_person() {
+        // a script written for Simplify3D: text edits in braces, then a program
+        let Some(mut s) = session_with(cube(10.0)) else { return };
+        let script = concat!(
+            r#"{REPLACE ";LAYER:5 " "M221 S60\n;LAYER:5 "}"#,
+            "\n",
+            r#"{APPEND "; post-processed\n"}"#,
+            "\n",
+            "my-tool --fix [output_filepath]\n"
+        );
+        let p = PrintSettings { post_process: script.into(), ..s.document().settings.clone() };
+        assert!(s.execute(Command::Profile(Box::new(p))).is_ok());
+        let path =
+            std::env::temp_dir().join(format!("slicecraft-post-{}.gcode", std::process::id()));
+        let r = s.execute(Command::ExportGcode(path.clone()));
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        let _ = std::fs::remove_file(&path);
+        let Ok(Outcome::Exported { notes, .. }) = r else {
+            assert!(r.is_ok(), "{r:?}");
+            return;
+        };
+        assert!(text.contains("M221 S60"), "the REPLACE edit is in the file");
+        assert!(text.ends_with("; post-processed\n"));
+        // not a person at the window: the program is named, not run
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes.iter().all(|n| n.contains("my-tool")));
+        // a broken command is an error, not a silently unchanged file
+        let p = PrintSettings {
+            post_process: r#"{REPLACE "x"}"#.into(),
+            ..s.document().settings.clone()
+        };
+        assert!(s.execute(Command::Profile(Box::new(p))).is_ok());
+        assert!(s.execute(Command::ExportGcode(std::env::temp_dir().join("never.gcode"))).is_err());
     }
 
     #[test]
