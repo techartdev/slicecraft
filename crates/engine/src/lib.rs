@@ -3117,6 +3117,44 @@ T0 ; tool change"
     }
 
     #[test]
+    fn a_simplify3d_script_finds_its_layers_with_compatible_marks() {
+        // the operator's cutter taper: lower flow on chosen layers, restore at the end
+        let Some(mut s) = session_with(cube(10.0)) else { return };
+        let script = concat!(
+            r#"{REPLACE "; layer 40" "; layer 40\nM221 S85"}"#,
+            "\n",
+            r#"{REPLACE "; layer end" "M221 S100\n; layer end"}"#,
+        );
+        let mut p = PrintSettings { post_process: script.into(), ..s.document().settings.clone() };
+        let export = |s: &mut Session| {
+            let path =
+                std::env::temp_dir().join(format!("slicecraft-marks-{}.gcode", std::process::id()));
+            let r = s.execute(Command::ExportGcode(path.clone()));
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            let _ = std::fs::remove_file(&path);
+            let notes = match r {
+                Ok(Outcome::Exported { notes, .. }) => notes,
+                _ => vec!["export failed".into()],
+            };
+            (text, notes)
+        };
+        // SliceCraft's own marks: the script finds nothing and says so
+        assert!(s.execute(Command::Profile(Box::new(p.clone()))).is_ok());
+        let (text, notes) = export(&mut s);
+        assert!(!text.contains("M221"));
+        assert_eq!(notes.len(), 2, "{notes:?}");
+        // Simplify3D-compatible marks: the flow drops at layer 40, counted from 1
+        p.layer_marks = slicecraft_doc::LayerMarks::Simplify3D;
+        assert!(s.execute(Command::Profile(Box::new(p))).is_ok());
+        let (text, notes) = export(&mut s);
+        assert!(notes.is_empty(), "{notes:?}");
+        let at = |needle: &str| text.find(needle).unwrap_or(usize::MAX);
+        assert!(at("; layer 40\nM221 S85, Z = ") < at("; layer 41, Z = "));
+        assert!(at("; layer 39, Z = ") < at("M221 S85"));
+        assert!(at("M221 S100\n; layer end") < text.len());
+    }
+
+    #[test]
     fn post_processing_edits_apply_and_programs_wait_for_a_person() {
         // a script written for Simplify3D: text edits in braces, then a program
         let Some(mut s) = session_with(cube(10.0)) else { return };

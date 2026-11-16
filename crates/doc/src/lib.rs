@@ -22,9 +22,10 @@ use std::fmt;
 use std::sync::Arc;
 
 pub use settings::{
-    BeadShape, BedShape, FillRule, Flavor, HomeCorner, InfillPattern, IslandOrder, OpenOutlines,
-    OutputFormat, PerimeterOrder, PrintSettings, SeamMode, SettingKind, SettingSpec, SettingValue,
-    SolidPattern, SupportPattern, SupportPlacement, SupportStyle, Tab, ThinWalls, WipeFeatures,
+    BeadShape, BedShape, FillRule, Flavor, HomeCorner, InfillPattern, IslandOrder, LayerMarks,
+    OpenOutlines, OutputFormat, PerimeterOrder, PrintSettings, SeamMode, SettingKind, SettingSpec,
+    SettingValue, SolidPattern, SupportPattern, SupportPlacement, SupportStyle, Tab, ThinWalls,
+    WipeFeatures,
 };
 
 /// Largest scale factor a placement may apply on any axis.

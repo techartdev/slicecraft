@@ -953,6 +953,9 @@ const BG: &[(&str, &str)] = &[
     ("No graphics card in use.", "Не се използва видеокарта."),
     ("Draw the 3D view on the graphics card", "3D изгледът се рисува от видеокартата"),
     ("The 3D view moved to the processor:", "3D изгледът премина към процесора:"),
+    // layer marks in the G-code
+    ("Layer marks", "Отбелязване на слоевете"),
+    ("Simplify3D-compatible", "Съвместимо със Simplify3D"),
 ];
 
 #[cfg(test)]

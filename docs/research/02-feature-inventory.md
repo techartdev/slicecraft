@@ -114,12 +114,12 @@ Status: **done** = works and is tested · **partial** = works with stated limits
 | Temperature | several controllers (nozzle, bed, chamber), per-layer schedules, idle cool-down | 9 / 9 |
 | Cooling | several fans, per-layer schedules, kick-start, quick-layer boost, bridge and top fan | 8 / 8 |
 | Speeds | default and per-feature percentages, travel XY/Z, acceleration and jerk for estimates, slow-downs for quick layers, short walls and flow limits | 12 / 12 |
-| G-code | output formats, firmware options, relative E, thumbnails, coordinate offsets, toolhead offsets | 11 / 11 |
+| G-code | output formats, layer marks, firmware options, relative E, thumbnails, coordinate offsets, toolhead offsets | 12 / 12 |
 | Scripts | start, end, layer change, retraction, tool change, profile change, post-processing, variables and conditionals | 6 / 6 |
 | Machine | build volume (box or cylinder), origin, homing, tools | 8 / 8 |
 | Material | filament diameter, density, price | 3 / 3 |
 | Advanced | thin walls, single-line walls, retraction rules, wipe scope, travel detours, slicing repair modes, sequential printing | 17 / 17 |
-| **Total** | — | **171 / 171** |
+| **Total** | — | **172 / 172** |
 
 The reference's settings are grouped differently in places (bridging and filament
 properties sit on an "other" tab; machine geometry on the output tab); SliceCraft's
