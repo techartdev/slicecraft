@@ -13,7 +13,7 @@ into layers, generate perimeters, infill and support, and write G-code for a rea
 printer. It targets Simplify3D's feature set and adds what Simplify3D does not have:
 agent control over MCP, a headless CLI, a Linux/BSD build and a free licence.
 
-**Why beta candidate:** every command the menus list works (49 of 49) and all 171
+**Why beta candidate:** every command the menus list works (49 of 49) and all 172
 profile settings drive the slicer. The window speaks English and Bulgarian. Import (STL, OBJ, 3MF), placement, repair and mesh tools, profiles (with
 Simplify3D `.fff` import), setting zones, support with editing, all adhesion types,
 ten infill patterns, multi-tool output, preview, USB and network printing, and an
@@ -30,7 +30,7 @@ the extrusion model, the estimates and support removal, this is not a release �
 | Lines of Rust | ≈ 28,000 | measured (`cargo xtask stats`) |
 | Tests | 281, all green | measured (`cargo test --workspace`) |
 | Commands | 50, all ready | measured (`engine::COMMANDS`) |
-| Profile settings | 171, all used by the slicer | measured (`doc::settings::SETTINGS`) |
+| Profile settings | 172, all used by the slicer | measured (`doc::settings::SETTINGS`) |
 | Crown with support (350 layers, release) | sliced in ≈ 1.5 s; support filament 676 mm vs the reference's 682 mm; 2606 retractions vs 4384 | measured on one Windows machine |
 | Direct external dependencies | 9 (`i_overlay`, `roxmltree`, `miniz_oxide`, `serial2`; `eframe` with `wgpu`, `rfd`, `zune-jpeg`, `skrifa` in the window only) | measured |
 | Simplify3D profiles imported | 16 of 16 operator files (4.0 and 5.1.2) | measured (`io::fff::tests::corpus_profiles_import`, corpus outside the repo) |

@@ -267,6 +267,21 @@ impl OutputFormat {
     }
 }
 
+/// How each layer is marked in the G-code, for post-processing scripts and
+/// G-code viewers that look for the marks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayerMarks {
+    /// `;LAYER:<n> Z:<z> HEIGHT:<h>`, counting from 0 (with move comments on).
+    SliceCraft,
+    /// `; layer <n>, Z = <z>`, counting from 1, and `; layer end` after the
+    /// last layer: the marks Simplify3D post-processing scripts look for.
+    Simplify3D,
+}
+
+impl LayerMarks {
+    pub const ALL: [LayerMarks; 2] = [LayerMarks::SliceCraft, LayerMarks::Simplify3D];
+}
+
 /// Which paths end with a wipe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WipeFeatures {
@@ -547,6 +562,8 @@ pub struct PrintSettings {
     pub sequential_printing: bool,
     /// Plain or binary G-code.
     pub output_format: OutputFormat,
+    /// How layers are marked in the G-code.
+    pub layer_marks: LayerMarks,
     /// How far the print head reaches around the nozzle, mm.
     pub head_clearance: f64,
     /// Height under the gantry: models printed earlier must be lower, mm.
@@ -751,6 +768,7 @@ impl Default for PrintSettings {
             idle_after_seconds: 120.0,
             sequential_printing: false,
             output_format: OutputFormat::Plain,
+            layer_marks: LayerMarks::SliceCraft,
             head_clearance: 35.0,
             gantry_height: 25.0,
             thumbnail_size: 0,
@@ -2765,6 +2783,16 @@ pub static SETTINGS: &[SettingSpec] = &[
         Dc(0),
         "Which file is written. Binary G-code is smaller and carries the preview and print facts in blocks.",
         bind_e!(output_format, OutputFormat),
+    ),
+    row(
+        "layer_marks",
+        "Layer marks",
+        Gcode,
+        "Output",
+        SettingKind::Choice(&["SliceCraft", "Simplify3D-compatible"]),
+        Dc(0),
+        "How each layer is marked in the G-code. Simplify3D-compatible writes \"; layer 1, Z = 0.2800\" (counting from 1) and \"; layer end\", so post-processing scripts written for Simplify3D find their layers. Profiles imported from Simplify3D use it.",
+        bind_e!(layer_marks, LayerMarks),
     ),
     row(
         "retract_script",

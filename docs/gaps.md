@@ -93,7 +93,7 @@ the architecture document, not to a quieter line here.
 
 ## Profiles and project
 
-- **Profiles** — 171 typed settings with ranges and help, all used by the slicer.
+- **Profiles** — 172 typed settings with ranges and help, all used by the slicer.
   Binary G-code is written uncompressed from the published specification and has not
   been tried on a printer. Profiles save and load as text and
   the last one is restored at start-up; no inheritance or comparison.

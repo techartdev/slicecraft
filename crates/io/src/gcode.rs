@@ -611,7 +611,14 @@ impl<'a> GcodeWriter<'a> {
 
     /// Move to `z` for a new layer: retract, lift, reset E.
     fn layer_change(&mut self, layer: &LayerPaths) {
-        if self.settings.verbose_comments {
+        if self.settings.layer_marks == slicecraft_doc::LayerMarks::Simplify3D {
+            let _ = writeln!(
+                self.out,
+                "; layer {}, Z = {:.4}",
+                layer.index.saturating_add(1),
+                layer.z + self.settings.gcode_offset_z
+            );
+        } else if self.settings.verbose_comments {
             let _ = writeln!(
                 self.out,
                 ";LAYER:{} Z:{:.3} HEIGHT:{:.3}",
@@ -1048,6 +1055,9 @@ impl<'a> GcodeWriter<'a> {
 
     fn end(&mut self, bed: &Bed) {
         self.retract();
+        if self.settings.layer_marks == slicecraft_doc::LayerMarks::Simplify3D {
+            self.line("; layer end");
+        }
         if !self.settings.end_script.trim().is_empty() {
             self.line("; end script");
             let text = self.settings.end_script.clone();
