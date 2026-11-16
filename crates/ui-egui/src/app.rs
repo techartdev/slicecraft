@@ -712,8 +712,14 @@ impl SliceCraftApp {
                             format.name()
                         ));
                     }
-                    Outcome::Exported { path, bytes } => {
-                        self.info(format!("Wrote {} ({} KB).", path.display(), bytes / 1024));
+                    Outcome::Exported { path, bytes, notes } => {
+                        let msg = format!("Wrote {} ({} KB).", path.display(), bytes / 1024);
+                        if notes.is_empty() {
+                            self.info(msg);
+                        } else {
+                            // a post-processing step that matched nothing is worth a warning
+                            self.error(format!("{msg} Post-processing: {}", notes.join("; ")));
+                        }
                     }
                     Outcome::ProfileLoaded { name, warnings } => {
                         let w = if warnings.is_empty() {

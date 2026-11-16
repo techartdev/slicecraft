@@ -356,8 +356,12 @@ fn run(session: &mut Session, command: Command) -> Reply {
             "{layers} layers, {:.0} mm filament, about {:.0} s",
             stats.gcode.filament_mm, stats.gcode.estimated_seconds
         )),
-        Ok(Outcome::Exported { path, bytes }) => {
-            Reply::Text(format!("wrote {bytes} bytes to {}", path.display()))
+        Ok(Outcome::Exported { path, bytes, notes }) => {
+            let mut t = format!("wrote {bytes} bytes to {}", path.display());
+            for n in notes {
+                t.push_str(&format!("\nnote: {n}"));
+            }
+            Reply::Text(t)
         }
         Err(e) => Reply::Error(e.to_string()),
     }

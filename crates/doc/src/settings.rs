@@ -2283,7 +2283,7 @@ pub static SETTINGS: &[SettingSpec] = &[
         "Output",
         SettingKind::Text,
         Dt(""),
-        "A program to run on the finished file (never run by agents).",
+        "One step per line. Text edits: {REPLACE \"find\" \"with\"}, {DELETE \"text\"}, {STRIP \"line start\"}, {PREPEND \"text\"}, {APPEND \"text\"}, {TOOL1REPLACE \"find\" \"with\"}; \n is a line break. Any other line is a program run on the written file ([output_filepath] stands for it); programs run only from the window, never for agents or the command line.",
         bind_t!(post_process),
     ),
     // ----------------------------------------------------------- Scripts
