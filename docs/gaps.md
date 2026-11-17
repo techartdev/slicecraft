@@ -142,13 +142,17 @@ the architecture document, not to a quieter line here.
   (upload, or upload and start), tested against a local fake host; no HTTPS, no host
   discovery, no live status from network hosts. The print camera shows a JPEG
   snapshot address refreshed about once a second (no MJPEG stream). No SD-card upload.
-- **Packaging: Windows only** — a zip and an Inno Setup installer from `cargo xtask dist`,
-  unsigned (SmartScreen warns on first run); no dmg, nfpm, Flatpak or FreeBSD package,
-  and no Linux or macOS build has been made yet.
+- **Packaging: Windows and macOS** — `cargo xtask dist` makes a zip and an Inno Setup
+  installer on Windows (unsigned, SmartScreen warns on first run) and a universal
+  `SliceCraft.app` in a `.dmg` on macOS (ad-hoc signed, not notarized, so Gatekeeper
+  asks on first open). On Linux it packs a tar.gz with a desktop file and icon, but no
+  Linux release has been built yet. No nfpm, Flatpak, AppImage or FreeBSD package. The
+  macOS app does not yet open files handed to it by Finder (only from the command line).
 - **No CI** beyond `cargo xtask ci`; shared workflows are deferred until approval.
 - **No wasm build.**
-- **macOS, Linux and FreeBSD have never built this tree**; the window has only been run
-  on Windows 11.
+- **Linux and FreeBSD have never built this tree.** macOS 10.15 (Intel) builds it and
+  passes every test; the window has been seen running only on Windows 11 (on macOS it
+  opened, but behind a locked screen).
 
 ## Stability and quality
 

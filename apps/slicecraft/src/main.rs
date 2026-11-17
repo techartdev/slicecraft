@@ -14,7 +14,7 @@
 //! `slicecraft [files…]` opens the window with those files: a project
 //! (`.scproj`), a profile (`.scprofile`) or models (STL, OBJ).
 //! `--version` and `--commands` answer from the terminal without a window;
-//! `--write-icon <file.ico>` writes the application icon.
+//! `--write-icon <file>` writes the application icon (`.ico`, `.icns` or `.png`).
 
 use slicecraft_engine::{COMMANDS, Session};
 use std::path::PathBuf;
@@ -27,12 +27,21 @@ fn main() -> std::process::ExitCode {
             std::process::ExitCode::SUCCESS
         }
         Some("--write-icon") => {
-            // the icon as a Windows .ico, for installers and shortcuts
+            // the icon for installers and shortcuts, in the format the file
+            // name asks for: .icns (macOS), .png (Linux, 256 px) or .ico
             let Some(path) = args.get(1) else {
                 eprintln!("slicecraft: --write-icon needs a file path");
                 return std::process::ExitCode::FAILURE;
             };
-            match std::fs::write(path, slicecraft_ui_egui::appicon::ico()) {
+            let lower = path.to_ascii_lowercase();
+            let bytes = if lower.ends_with(".icns") {
+                slicecraft_ui_egui::appicon::icns()
+            } else if lower.ends_with(".png") {
+                slicecraft_ui_egui::appicon::png(256)
+            } else {
+                slicecraft_ui_egui::appicon::ico()
+            };
+            match std::fs::write(path, bytes) {
                 Ok(()) => std::process::ExitCode::SUCCESS,
                 Err(e) => {
                     eprintln!("slicecraft: cannot write {path}: {e}");

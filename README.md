@@ -63,8 +63,9 @@ The vase in the screenshots is *Spiral vase* by JJ76, used under CC BY 4.0 (see
 
 **Status.** Every planned feature is in, and the output has been compared side by
 side with an established slicer on real jobs
-([R10](docs/research/10-s3d-comparison.md)). Nothing has been test-printed yet;
-calibration from real prints comes next. Built and run on Windows 11 so far.
+([R10](docs/research/10-s3d-comparison.md)). First real prints, on Creality
+printers, went well; calibration from more prints comes next. Built and run on
+Windows 11 and macOS 10.15 so far.
 [docs/gaps.md](docs/gaps.md) lists what is missing.
 
 ## Install
@@ -76,7 +77,14 @@ Download from the [releases page](https://github.com/techartdev/slicecraft/relea
   `.scproj` projects and offers itself for STL, OBJ and 3MF files. Or unpack
   `slicecraft-<version>-windows-x64.zip` anywhere and run `slicecraft.exe`. The files are not code-signed yet, so Windows SmartScreen may warn
   on first run (**More info → Run anyway**). Checksums are in the `SHA256SUMS` file.
-- **Linux, macOS, BSD:** no downloads yet; build from source as below.
+- **macOS (10.13 or newer, Intel and Apple Silicon):** open
+  `slicecraft-<version>-macos-universal.dmg` and drag **SliceCraft** onto
+  **Applications**. The app is not notarized yet, so the first time macOS refuses to
+  open it: Control-click it and choose **Open** (on macOS 15 and later, use **System
+  Settings → Privacy & Security → Open Anyway**). The command-line tool is inside the
+  app at `SliceCraft.app/Contents/MacOS/slicecraft-cli`.
+- **Linux, BSD:** no downloads yet; build from source as below. `cargo xtask dist`
+  packs a tar.gz with a desktop file and an icon.
 
 A graphics card with Direct3D 12, Vulkan or Metal draws the 3D view; without one
 SliceCraft falls back to OpenGL and draws it on the processor.
@@ -93,6 +101,7 @@ cargo run --release -p slicecraft-cli -- mcp               # an MCP server on st
 cargo test --workspace
 cargo xtask ci                  # fmt, clippy -D warnings, tests, layering
 cargo xtask dist                # release archive, installer (Windows, with Inno Setup), checksums
+cargo xtask dist --universal    # macOS: SliceCraft.app for Intel and Apple Silicon, in a .dmg
 ```
 
 In the window: drop model files on it or use **Import**, place them with the tools
