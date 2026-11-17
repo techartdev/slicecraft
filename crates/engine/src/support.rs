@@ -87,8 +87,7 @@ fn pillars(area: &Region, cell: f64, gap: f64) -> Result<Region, EngineError> {
                 }
             }
             xs.sort_by(f64::total_cmp);
-            for pair in xs.chunks_exact(2) {
-                let &[x0, x1] = pair else { continue };
+            for &[x0, x1] in xs.as_chunks::<2>().0 {
                 for fx in SAMPLES {
                     let (lo, hi) = ((x0 / cell - fx).ceil(), (x1 / cell - fx).floor());
                     let mut c = lo;

@@ -427,11 +427,7 @@ fn decode_mesh(text: &str, count: usize, n: usize) -> Result<Mesh, IoError> {
         return Err(bad(n, "the mesh length does not match its triangle count"));
     }
     let bytes = base64_decode(text).ok_or(bad(n, "the mesh is not valid base64"))?;
-    let mut coords = bytes.chunks_exact(8).map(|c| {
-        let mut b = [0u8; 8];
-        b.copy_from_slice(c);
-        f64::from_le_bytes(b)
-    });
+    let mut coords = bytes.as_chunks::<8>().0.iter().map(|c| f64::from_le_bytes(*c));
     let mut corner =
         || -> Option<Vec3> { Some(Vec3::new(coords.next()?, coords.next()?, coords.next()?)) };
     let mut tris = Vec::with_capacity(count);
@@ -495,7 +491,7 @@ fn base64_decode(text: &str) -> Option<Vec<u8>> {
     }
     let mut out = Vec::with_capacity(base64_decoded_len(text)?);
     let quads = bytes.len() / 4;
-    for (q, chunk) in bytes.chunks_exact(4).enumerate() {
+    for (q, chunk) in bytes.as_chunks::<4>().0.iter().enumerate() {
         let last = q + 1 == quads;
         let pad = chunk.iter().rev().take_while(|&&c| c == b'=').count();
         if pad > 2 || (pad > 0 && !last) {
