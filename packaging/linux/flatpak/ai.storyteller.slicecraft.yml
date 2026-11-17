@@ -1,0 +1,36 @@
+# Flatpak manifest for the single-file bundle (slicecraft-<version>-linux-<arch>.flatpak). Build it
+# with packaging/linux/flatpak-bundle.sh, which unpacks the release tarball into `stage/` next to
+# a copy of this file: the bundle holds the same programs as the tarball, built on Ubuntu 22.04
+# (glibc 2.35). They load X11, Wayland, xkbcommon and Vulkan or GL at run time; the freedesktop
+# runtime has them.
+id: ai.storyteller.slicecraft
+runtime: org.freedesktop.Platform
+runtime-version: '25.08'
+sdk: org.freedesktop.Sdk
+command: slicecraft
+finish-args:
+  # Display: Wayland first, X11 when no Wayland compositor runs; MIT-SHM for X11.
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  # The GPU for the 3D view, and USB serial printers (/dev/ttyUSB*, /dev/ttyACM*).
+  - --device=all
+  # Models are opened from anywhere in home and G-code is saved next to them.
+  - --filesystem=home
+  # Uploads to OctoPrint and Moonraker, and the print camera.
+  - --share=network
+modules:
+  - name: slicecraft
+    buildsystem: simple
+    build-commands:
+      - install -Dm755 slicecraft /app/bin/slicecraft
+      - install -Dm755 slicecraft-cli /app/bin/slicecraft-cli
+      # Flatpak names the desktop file and icon after the app id.
+      - sed 's/^Icon=slicecraft$/Icon=ai.storyteller.slicecraft/' slicecraft.desktop > ai.storyteller.slicecraft.desktop
+      - install -Dm644 ai.storyteller.slicecraft.desktop /app/share/applications/ai.storyteller.slicecraft.desktop
+      - install -Dm644 slicecraft.png /app/share/icons/hicolor/256x256/apps/ai.storyteller.slicecraft.png
+      - install -Dm644 ai.storyteller.slicecraft.metainfo.xml /app/share/metainfo/ai.storyteller.slicecraft.metainfo.xml
+      - install -Dm644 -t /app/share/doc/slicecraft README.md LICENSE-MIT LICENSE-APACHE NOTICE ATTRIBUTION.md
+    sources:
+      - type: dir
+        path: stage

@@ -1,0 +1,39 @@
+name: Release builds
+
+# Builds the release files for Linux (x86_64, aarch64) and Windows (x64, arm64) on GitHub's
+# standard runners, through the suite's shared release workflow, and keeps them as the run's
+# artifacts. A maintainer attaches them to the GitHub release.
+#
+# Always a dry run: the shared workflow's macOS job uses a larger runner, which is billed even for
+# public repositories, so macOS is built on a maintainer's Mac with `cargo xtask dist --universal`.
+# A dry run also skips signing and the draft release.
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "packaging/**"
+      - "xtask/src/dist.rs"
+      - ".github/workflows/release.yml"
+
+concurrency:
+  group: release-builds-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  release:
+    # The shared workflow's jobs ask for these; in a dry run nothing is published.
+    permissions:
+      contents: write
+      packages: write
+    # Tracks @main so suite-wide fixes reach every app without a PR in each repository.
+    uses: storytold/craft-common-actions/.github/workflows/release.yml@main
+    with:
+      app-name: slicecraft
+      app-title: SliceCraft
+      dry-run: true
+      # SliceCraft embeds no craft-fonts and has no web, riscv64, FreeBSD or Arch build yet.
+      craft-fonts-ref: ""
+      has-web: false
+      has-riscv64: false
+      has-freebsd: false
+      has-arch: false

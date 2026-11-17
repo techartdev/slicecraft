@@ -27,8 +27,10 @@ fn platform(universal: bool) -> &'static str {
         ("macos", _) if universal => "macos-universal",
         ("windows", "x86_64") => "windows-x64",
         ("windows", "aarch64") => "windows-arm64",
-        ("linux", "x86_64") => "linux-x64",
-        ("linux", "aarch64") => "linux-arm64",
+        // `uname -m` names: the shared release workflow's Flatpak job looks for
+        // slicecraft-<version>-linux-<x86_64|aarch64>.tar.gz
+        ("linux", "x86_64") => "linux-x86_64",
+        ("linux", "aarch64") => "linux-aarch64",
         ("macos", "aarch64") => "macos-arm64",
         ("macos", "x86_64") => "macos-x64",
         ("freebsd", _) => "freebsd",
@@ -294,10 +296,10 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
         msg.push(0);
     }
     msg.extend_from_slice(&bits.to_be_bytes());
-    for block in msg.chunks_exact(64) {
+    for block in msg.as_chunks::<64>().0 {
         let mut w = [0u32; 64];
-        for (i, word) in block.chunks_exact(4).enumerate().take(16) {
-            w[i] = u32::from_be_bytes([word[0], word[1], word[2], word[3]]);
+        for (i, word) in block.as_chunks::<4>().0.iter().enumerate() {
+            w[i] = u32::from_be_bytes(*word);
         }
         for i in 16..64 {
             let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
@@ -326,8 +328,8 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
         }
     }
     let mut out = [0u8; 32];
-    for (chunk, v) in out.chunks_exact_mut(4).zip(h) {
-        chunk.copy_from_slice(&v.to_be_bytes());
+    for (chunk, v) in out.as_chunks_mut::<4>().0.iter_mut().zip(h) {
+        *chunk = v.to_be_bytes();
     }
     out
 }

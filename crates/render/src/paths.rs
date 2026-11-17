@@ -237,8 +237,7 @@ pub fn line_infill(
         }
         xs.sort_by(f64::total_cmp);
         let y = (k_min + row_index as f64) * spacing;
-        for pair in xs.chunks_exact(2) {
-            let &[x0, x1] = pair else { continue };
+        for &[x0, x1] in xs.as_chunks::<2>().0 {
             if x1 - x0 < min_len {
                 continue;
             }
@@ -356,8 +355,7 @@ pub fn comb(region: &Region, a: Point2, b: Point2, max_len: f64) -> Option<Vec<P
     }
     hits.sort_by(|x, y| x.0.total_cmp(&y.0));
     let mut via = Vec::new();
-    for pair in hits.chunks_exact(2) {
-        let [(_, r0, i0, p0), (_, r1, i1, p1)] = pair else { return None };
+    for [(_, r0, i0, p0), (_, r1, i1, p1)] in hits.as_chunks::<2>().0 {
         if r0 != r1 {
             return None;
         }
