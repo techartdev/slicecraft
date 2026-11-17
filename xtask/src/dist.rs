@@ -27,8 +27,10 @@ fn platform(universal: bool) -> &'static str {
         ("macos", _) if universal => "macos-universal",
         ("windows", "x86_64") => "windows-x64",
         ("windows", "aarch64") => "windows-arm64",
-        ("linux", "x86_64") => "linux-x64",
-        ("linux", "aarch64") => "linux-arm64",
+        // `uname -m` names: the shared release workflow's Flatpak job looks for
+        // slicecraft-<version>-linux-<x86_64|aarch64>.tar.gz
+        ("linux", "x86_64") => "linux-x86_64",
+        ("linux", "aarch64") => "linux-aarch64",
         ("macos", "aarch64") => "macos-arm64",
         ("macos", "x86_64") => "macos-x64",
         ("freebsd", _) => "freebsd",

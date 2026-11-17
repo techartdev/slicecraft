@@ -142,17 +142,21 @@ the architecture document, not to a quieter line here.
   (upload, or upload and start), tested against a local fake host; no HTTPS, no host
   discovery, no live status from network hosts. The print camera shows a JPEG
   snapshot address refreshed about once a second (no MJPEG stream). No SD-card upload.
-- **Packaging: Windows and macOS** — `cargo xtask dist` makes a zip and an Inno Setup
-  installer on Windows (unsigned, SmartScreen warns on first run) and a universal
+- **Packaging: Windows, macOS and Linux** — `cargo xtask dist` makes a zip and an Inno
+  Setup installer on Windows (unsigned, SmartScreen warns on first run), a universal
   `SliceCraft.app` in a `.dmg` on macOS (ad-hoc signed, not notarized, so Gatekeeper
-  asks on first open). On Linux it packs a tar.gz with a desktop file and icon, but no
-  Linux release has been built yet. No nfpm, Flatpak, AppImage or FreeBSD package. The
+  asks on first open) and a tar.gz with a desktop file and icon on Linux. The release
+  workflow builds Linux (x86_64, aarch64: tar.gz and a Flatpak bundle) and Windows
+  (x64, arm64) on GitHub's runners as a dry run; a maintainer attaches the files. macOS
+  is built by hand on a Mac, because the shared workflow's macOS runner is billed. No
+  deb, rpm, AppImage or FreeBSD package, and the Flatpak bundle is not published. The
   macOS app does not yet open files handed to it by Finder (only from the command line).
-- **No CI** beyond `cargo xtask ci`; shared workflows are deferred until approval.
+- **CI** — `cargo xtask ci` runs on Ubuntu and Windows for every pull request through the
+  suite's shared gate workflow; no macOS leg (billed).
 - **No wasm build.**
-- **Linux and FreeBSD have never built this tree.** macOS 10.15 (Intel) builds it and
-  passes every test; the window has been seen running only on Windows 11 (on macOS it
-  opened, but behind a locked screen).
+- **FreeBSD has never built this tree.** Linux builds and passes every test in CI, and
+  macOS 10.15 (Intel) on a real Mac; the window has been seen running only on Windows 11
+  (on macOS it opened, but behind a locked screen; on Linux only `--version` ran).
 
 ## Stability and quality
 
@@ -169,6 +173,6 @@ the architecture document, not to a quieter line here.
 - **Licence exceptions** for the window's dependencies are recorded in
   `ATTRIBUTION.md` and must be proposed upstream before joining the suite.
 - **Test prints:** none yet; real-print calibration is the next step.
-- **No `cargo xtask assets`**, no `contributors/people.toml`, no app icon set or
-  desktop/metainfo/plist/wxs files, no `storytold/slicecraft-corpus`.
+- **No `cargo xtask assets`**, no `contributors/people.toml`, no app icon set (the
+  program draws its icon), no WiX installer, no `storytold/slicecraft-corpus`.
 - **No `craft-libs` dependencies** — deliberately deferred until approval (PLAN §7).

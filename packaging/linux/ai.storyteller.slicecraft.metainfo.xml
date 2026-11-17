@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>ai.storyteller.slicecraft</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT OR Apache-2.0</project_license>
+  <name>SliceCraft</name>
+  <summary>Slice 3D models into G-code for your printer</summary>
+  <description>
+    <p>
+      SliceCraft turns STL, OBJ and 3MF models into G-code for FDM printers: place models on the
+      plate, choose a profile, slice and check the toolpath preview layer by layer.
+    </p>
+    <p>
+      It also has a command-line tool and an MCP server, so scripts and agents can slice
+      without the window.
+    </p>
+  </description>
+  <launchable type="desktop-id">ai.storyteller.slicecraft.desktop</launchable>
+  <url type="homepage">https://github.com/techartdev/slicecraft</url>
+  <url type="bugtracker">https://github.com/techartdev/slicecraft/issues</url>
+  <developer id="io.github.techartdev">
+    <name>SliceCraft contributors</name>
+  </developer>
+  <categories>
+    <category>Graphics</category>
+    <category>3DGraphics</category>
+    <category>Engineering</category>
+  </categories>
+  <content_rating type="oars-1.1"/>
+</component>

@@ -83,8 +83,12 @@ Download from the [releases page](https://github.com/techartdev/slicecraft/relea
   open it: Control-click it and choose **Open** (on macOS 15 and later, use **System
   Settings → Privacy & Security → Open Anyway**). The command-line tool is inside the
   app at `SliceCraft.app/Contents/MacOS/slicecraft-cli`.
-- **Linux, BSD:** no downloads yet; build from source as below. `cargo xtask dist`
-  packs a tar.gz with a desktop file and an icon.
+- **Linux (x86_64, glibc 2.35 or newer: Ubuntu 22.04, Debian 12, Fedora 36 and
+  later):** unpack `slicecraft-<version>-linux-x86_64.tar.gz` and run `./slicecraft`
+  (the window) or `./slicecraft-cli`. The folder also holds `slicecraft.desktop` and
+  `slicecraft.png` for a menu entry. Built and tested on GitHub's Ubuntu runners;
+  not yet tried on a Linux desktop.
+- **BSD:** no downloads yet; build from source as below.
 
 A graphics card with Direct3D 12, Vulkan or Metal draws the 3D view; without one
 SliceCraft falls back to OpenGL and draws it on the processor.
@@ -101,6 +105,7 @@ cargo run --release -p slicecraft-cli -- mcp               # an MCP server on st
 cargo test --workspace
 cargo xtask ci                  # fmt, clippy -D warnings, tests, layering
 cargo xtask dist                # release archive, installer (Windows, with Inno Setup), checksums
+                                # (Linux: a tar.gz with a desktop file and an icon)
 cargo xtask dist --universal    # macOS: SliceCraft.app for Intel and Apple Silicon, in a .dmg
 ```
 
