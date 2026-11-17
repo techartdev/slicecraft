@@ -25,7 +25,7 @@ the extrusion model, the estimates and support removal, this is not a release �
 
 | Number | Value | Kind |
 |---|---|---|
-| Phases complete | P0–P5 in code; P6 with Windows packaging only | measured against the phase table |
+| Phases complete | P0–P5 in code; P6 with Windows and macOS packaging | measured against the phase table |
 | Crates | 7 libraries, 2 apps, 1 tool | measured |
 | Lines of Rust | ≈ 28,000 | measured (`cargo xtask stats`) |
 | Tests | 281, all green | measured (`cargo test --workspace`) |
